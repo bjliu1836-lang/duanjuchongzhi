@@ -17,7 +17,7 @@
     "videoModel": "",
     "videoGenerationModel": "doubao-seedance-2.0",
     "responseTimeoutSeconds": 900,
-    "maxOutputTokens": 32768,
+    "maxOutputTokens": 131072,
     "agentExtraTimeoutSeconds": 60,
     "imageSize": "2K",
     "imageWatermark": true,
