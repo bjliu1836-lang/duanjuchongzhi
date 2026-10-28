@@ -32,6 +32,8 @@ tmp/
 temp/
 __pycache__/
 *.pyc
+backend/tests/.pytest-tmp-*/
+backend/tests/.source-review-test-*/
 
 # document exports and validation captures
 *.docx
