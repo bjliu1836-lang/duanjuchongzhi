@@ -2254,3 +2254,113 @@ def test_storyboard_mode_prompt_routes_keep_shared_shot_rules_without_defaults_o
         assert "目标国家为空时，默认使用美国。" not in routed
         assert "目标语言为空时，默认使用英语。" not in routed
         assert main.STORYBOARD_STYLE_TEMPLATES["cg_3d"] not in routed
+
+
+def _two_board_storyboard_output_with_boundary_slip() -> str:
+    shot_template = {
+        "机位与构图": {"角度": "平视", "景别": "中景", "主体构图": "人物位于画面中央"},
+        "背景": {"可见环境": "婚礼舞台"},
+        "人物站位": [{"资产变量": "@LinHao", "画面左右": "左侧"}],
+        "动作过程": {"起始": "站立", "变化": "抬手"},
+        "运镜": {"方式": "固定"},
+        "台词与声音": [{"原话": "待确认", "环境音": "宾客声"}],
+    }
+    board_one_shot = dict(shot_template)
+    board_one_shot["镜头编号"] = "镜头1"
+    board_one_shot["时间范围"] = {"开始时间": "00:00:00", "结束时间": "00:00:06"}
+    board_two_shot = dict(shot_template)
+    board_two_shot["镜头编号"] = "镜头1"
+    board_two_shot["时间范围"] = {"开始时间": "00:00:06", "结束时间": "00:00:11"}
+    return json.dumps({
+        "片段说明": {"场景": "@婚礼舞台", "分镜数量": 2, "目标风格": "按项目设置", "参考素材分工": "视频提供镜头事实，资产变量提供外观", "成片语言与字幕": "保留可辨原话", "共用要求": "无后期字幕或水印"},
+        "分镜列表": [
+            {
+                "分镜编号": "分镜_001",
+                "分镜时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:05"},
+                "引用资产变量": ["@LinHao"],
+                "镜头列表": [board_one_shot],
+                "最终视频生成提示词": "平视中景，人物站在婚礼舞台中央。",
+            },
+            {
+                "分镜编号": "分镜_002",
+                "分镜时间范围": {"开始时间": "00:00:06", "结束时间": "00:00:11"},
+                "引用资产变量": ["@LinHao"],
+                "镜头列表": [board_two_shot],
+                "最终视频生成提示词": "平视中景，人物抬手致意。",
+            },
+        ],
+    }, ensure_ascii=False)
+
+
+def test_storyboard_time_boundary_slip_is_repaired_and_audited(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="storyboard-time-boundary-repair")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "boundary-repair.mp4")
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "video storyboard", "prompt_file": "test"})
+    monkeypatch.setattr(main, "call_agent_chat", lambda *_args: _two_board_storyboard_output_with_boundary_slip())
+    response = client.post(
+        f"/api/projects/{project['id']}/tasks/run",
+        json={"taskType": "storyboard_generation", "episodeId": episode_id, "force": True},
+    )
+    assert response.status_code == 200, response.text
+    task = client.get(f"/api/tasks/{response.json()['task']['id']}").json()["task"]
+    assert task["status"] == "成功", task["message"]
+    repairs = task["result"]["分镜时间边界自动修复"]
+    assert repairs and "分镜_001" in repairs[0] and "00:00:06" in repairs[0]
+    assert "已自动修复 1 处分镜时间边界" in task["message"]
+    with main.connect() as conn:
+        row = conn.execute(
+            "SELECT time_range, payload_json FROM storyboards WHERE project_id=? AND episode_id=? ORDER BY time_range LIMIT 1",
+            (project["id"], episode_id),
+        ).fetchone()
+        assert row["time_range"] == "00:00:00-00:00:06"
+        payload = json.loads(row["payload_json"])
+        assert payload["分镜时间范围"]["结束时间"] == "00:00:06"
+
+
+def test_storyboard_time_boundary_collision_is_not_repaired_and_reports_offender():
+    boards = [
+        {
+            "title": "分镜_001",
+            "time_range": "00:00:00-00:00:05",
+            "payload": {"镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:08"}}]},
+        },
+        {
+            "title": "分镜_002",
+            "time_range": "00:00:06-00:00:11",
+            "payload": {"镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:06", "结束时间": "00:00:11"}}]},
+        },
+    ]
+    notes = main.repair_storyboard_time_bounds(boards, {})
+    assert notes == []
+    errors = main.storyboard_time_fit_errors(boards, {})
+    assert errors and "分镜_001" in errors[0] and "镜头1" in errors[0] and "00:00:08" in errors[0]
+    assert main.storyboard_times_fit_source(boards, {}) is False
+
+
+def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="cg3d-overseas-context")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "cg3d-context.mp4")
+    with main.connect() as conn:
+        conn.execute(
+            "UPDATE projects SET remake_mode='cg_3d', target_country='美国', target_language='英语', storyboard_visual_style='cg_3d' WHERE id=?",
+            (project["id"],),
+        )
+        conn.commit()
+    captured: list[dict] = []
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "video storyboard", "prompt_file": "test"})
+    def fake_call(_key, _agent, payload):
+        captured.append(payload)
+        return _valid_storyboard_model_output()
+    monkeypatch.setattr(main, "call_agent_chat", fake_call)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        task = main.run_storyboard_generation(conn, db_project, episode_id, force=True)
+        conn.commit()
+    assert task["status"] == "成功"
+    assert captured, "应捕获到分镜请求上下文"
+    payload = captured[0]
+    assert payload["目标国家"] == "美国"
+    assert payload["目标语言"] == "英语"
+    assert "海外本土化" in payload["模式路由强约束"]
+    summary_names = [item["本地化资产名称"] for item in payload["资产摘要"]]
+    assert "Lin Hao" in summary_names

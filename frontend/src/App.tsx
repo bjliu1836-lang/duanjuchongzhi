@@ -2071,7 +2071,16 @@ export function App() {
                       </div>
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
                         <div className="asset-profile-pending" role="status">
-                          目标脸部本地化已完成；自动提示词暂被以下源事实锁定：{(((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.needsReview as string[] | undefined) || []).join("、") || "源视觉字段"}。可先核对源事实，或填写完整、自包含的人工提示词。
+                          目标脸部本地化已完成；自动提示词暂被以下源事实锁定：{(() => {
+                            const profile = selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined;
+                            const paths = (profile?.sourceReviewPaths as string[] | undefined) || (profile?.needsReview as string[] | undefined) || [];
+                            return paths.join("、") || "源视觉字段";
+                          })()}。可先核对源事实，或填写完整、自包含的人工提示词。
+                        </div>
+                      )}
+                      {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && assetPromptDraft.includes("源事实待核对") && (
+                        <div className="asset-profile-pending" role="alert">
+                          提示词里仍带着【源事实待核对：自动生图已锁定】标记段。请把该标记段整段删除，并在提示词中直接写清上述字段的具体内容（例如鞋子的款式与颜色），再点击生成。
                         </div>
                       )}
                       {selectedAsset.payload?.["目标画像状态"] === "待本地化" && (

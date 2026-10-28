@@ -4992,12 +4992,17 @@ def load_reusable_storyboard_cache(
     return cached
 
 
-def storyboard_times_fit_source(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> bool:
+def storyboard_time_fit_errors(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> list[str]:
     duration = next((float(episode[key]) for key in ("duration_seconds", "durationSeconds", "video_duration") if episode.get(key) not in (None, "")), None)
+    errors: list[str] = []
     for storyboard in storyboards:
+        title = str(storyboard.get("title") or "未命名分镜")
         board_start, board_end = parse_storyboard_range(str(storyboard.get("time_range") or ""))
-        if board_end <= board_start or board_start < 0 or (duration is not None and board_end > duration + 0.1):
-            return False
+        if board_end <= board_start or board_start < 0:
+            errors.append(f"{title} 分镜区间非法（{storyboard.get('time_range') or '空'}）")
+            continue
+        if duration is not None and board_end > duration + 0.1:
+            errors.append(f"{title} 结束于 {format_timecode(board_end)}，超出视频时长 {format_timecode(duration)}")
         for shot in (storyboard.get("payload") or {}).get("镜头列表", []):
             shot_range = shot.get("时间范围") if isinstance(shot, dict) else None
             if isinstance(shot_range, dict):
@@ -5005,9 +5010,56 @@ def storyboard_times_fit_source(storyboards: list[dict[str, Any]], episode: dict
             else:
                 shot_text = str(shot_range or "")
             shot_start, shot_end = parse_storyboard_range(shot_text)
+            shot_label = str(shot.get("镜头编号") or "未编号镜头") if isinstance(shot, dict) else "未编号镜头"
             if shot_end <= shot_start or shot_start < board_start - 0.05 or shot_end > board_end + 0.05:
-                return False
-    return True
+                errors.append(
+                    f"{title} 的{shot_label}（{shot_text}）超出本分镜区间 {format_timecode(board_start)}-{format_timecode(board_end)}"
+                )
+    return errors
+
+
+def storyboard_times_fit_source(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> bool:
+    return not storyboard_time_fit_errors(storyboards, episode)
+
+
+def repair_storyboard_time_bounds(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> list[str]:
+    """修复模型偶发的分镜边界笔误：分镜结束时间早于其内部镜头的结束时间
+    （如分镜标注 24-29 秒，但其最后一个镜头为 29-30 秒）。
+    仅在“把分镜结束延长到最后一个镜头结束、且不越过下一段分镜的开始时间与
+    视频实际时长”时执行；不改动任何镜头内容与事实。返回修复说明列表。"""
+    notes: list[str] = []
+    duration = next((float(episode[key]) for key in ("duration_seconds", "durationSeconds", "video_duration") if episode.get(key) not in (None, "")), None)
+    for index, storyboard in enumerate(storyboards):
+        board_start, board_end = parse_storyboard_range(str(storyboard.get("time_range") or ""))
+        if board_end <= board_start:
+            continue
+        shot_ends: list[float] = []
+        for shot in (storyboard.get("payload") or {}).get("镜头列表", []):
+            if not isinstance(shot, dict):
+                continue
+            shot_range = shot.get("时间范围")
+            shot_text = f"{shot_range.get('开始时间', '')}-{shot_range.get('结束时间', '')}" if isinstance(shot_range, dict) else str(shot_range or "")
+            _, shot_end = parse_storyboard_range(shot_text)
+            if shot_end > 0:
+                shot_ends.append(shot_end)
+        if not shot_ends:
+            continue
+        max_shot_end = max(shot_ends)
+        if max_shot_end <= board_end + 0.05:
+            continue
+        next_start = parse_storyboard_range(str(storyboards[index + 1].get("time_range") or ""))[0] if index + 1 < len(storyboards) else None
+        upper_bound = next_start if next_start is not None else duration
+        if upper_bound is not None and max_shot_end > upper_bound + 0.05:
+            continue
+        old_end_text = format_timecode(board_end)
+        new_end_text = format_timecode(max_shot_end)
+        storyboard["time_range"] = f"{format_timecode(board_start)}-{new_end_text}"
+        board_range = (storyboard.get("payload") or {}).get("分镜时间范围")
+        if isinstance(board_range, dict):
+            board_range["结束时间"] = new_end_text
+        title = str(storyboard.get("title") or f"分镜 {index + 1}")
+        notes.append(f"{title} 结束时间 {old_end_text} → {new_end_text}（含内部镜头结束，未改镜头内容）")
+    return notes
 
 
 def parse_storyboard_range(range_text: str) -> tuple[float, float]:
@@ -5787,7 +5839,15 @@ def run_storyboard_generation(
         episode = get_episode_or_first(conn, project["id"], episode_id)
         if not ark_result["file_id"]:
             ark_upload_error = ark_result.get("error") or "Ark 文件上传失败"
-    overseas_mode = project.get("remake_mode", "overseas_localization") == "overseas_localization"
+    storyboard_target_language = str(project.get("target_language") or "").strip()
+    keep_source_language = storyboard_target_language in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
+    # remake_mode 里的 cg_3d / asset_replacement 只是视觉或资产策略，不代表国内市场；
+    # 只要用户选择了具体目标语言（非保留原片语言），分镜上下文必须按海外本土化标记，
+    # 否则模型会被误导成“国内模式/不翻译”。
+    overseas_mode = (
+        project.get("remake_mode", "overseas_localization") == "overseas_localization"
+        or not keep_source_language
+    )
     asset_count = conn.execute(
         "SELECT COUNT(*) FROM assets WHERE project_id = ? AND episode_id = ?",
         (project["id"], episode["id"]),
@@ -5957,6 +6017,8 @@ def run_storyboard_generation(
                         model_error = f"{exc}；部分响应不是完整JSON，未采用输出。"
                     else:
                         candidate_storyboards = normalize_storyboards_from_agent(parsed_candidate, old_to_display)
+                        if candidate_storyboards:
+                            repair_storyboard_time_bounds(candidate_storyboards, episode)
                         if (
                             candidate_storyboards
                             and all(storyboard_has_real_shot_facts(item.get("payload") or {}) for item in candidate_storyboards)
@@ -5974,6 +6036,9 @@ def run_storyboard_generation(
             if not model_error:
                 parsed_model_output, model_json_repaired = parse_json_object_with_repair(raw_model_output)
     generated_storyboards = normalize_storyboards_from_agent(parsed_model_output, old_to_display)
+    time_boundary_repairs: list[str] = []
+    if agent["mode"] == "volcengine" and not model_error and generated_storyboards:
+        time_boundary_repairs = repair_storyboard_time_bounds(generated_storyboards, episode)
     if agent["mode"] == "volcengine" and not model_error and generated_storyboards and not all(
         storyboard_has_real_shot_facts(storyboard.get("payload") or {}) for storyboard in generated_storyboards
     ):
@@ -5982,7 +6047,9 @@ def run_storyboard_generation(
     if agent["mode"] == "volcengine" and not model_error and generated_storyboards and not storyboard_times_fit_source(
         generated_storyboards, episode
     ):
-        model_error = "模型返回的分镜时间超出当前视频或镜头区间，未替换现有分镜；请重试分析。"
+        fit_errors = storyboard_time_fit_errors(generated_storyboards, episode)
+        detail = "；".join(fit_errors[:3])
+        model_error = f"模型返回的分镜时间超出当前视频或镜头区间（{detail}），未替换现有分镜；请重试分析。"
         generated_storyboards = []
     if agent["mode"] == "volcengine" and (model_error or not generated_storyboards):
         if not model_error:
@@ -6083,6 +6150,7 @@ def run_storyboard_generation(
         "资产片段作为上下文": bool(asset_occurrence_index),
         "sourceTaskId": latest_asset_task.get("id", "") if latest_asset_task else "",
         "被替换的旧分镜备份": replaced_storyboard_backups,
+        "分镜时间边界自动修复": time_boundary_repairs,
         "流式输出字符数": stream_chars,
         "流式事件": [(stage, chars) for stage, chars in stream_events],
     }
@@ -6095,6 +6163,8 @@ def run_storyboard_generation(
         message_parts.append(f"分镜生成完成（已自动修复模型 JSON，共生成 {stream_chars} 字符）")
     else:
         message_parts.append(f"分镜生成完成（共生成 {stream_chars} 字符）")
+    if time_boundary_repairs and not used_fallback_storyboard:
+        message_parts.append(f"已自动修复 {len(time_boundary_repairs)} 处分镜时间边界")
     if used_fallback_storyboard:
         task = create_task_with_status(conn, project["id"], episode["id"], "storyboard_generation", "失败", "；".join(message_parts), payload)
     else:
