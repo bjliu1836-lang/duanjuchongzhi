@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import mimetypes
 import os
 import urllib.error
@@ -13,6 +14,50 @@ from typing import Any
 
 class ProviderError(RuntimeError):
     pass
+
+
+class ProviderIncompleteRead(ProviderError):
+    def __init__(
+        self,
+        partial_body: bytes,
+        partial_text: str,
+        extracted_text: str,
+        response_id: str,
+        response_complete: bool,
+        response_status: str = "",
+        incomplete_details: Any = None,
+        finish_reason: str = "",
+    ) -> None:
+        self.partial_body = partial_body
+        self.partial_text = partial_text
+        self.extracted_text = extracted_text
+        self.response_id = response_id
+        self.response_complete = response_complete
+        self.response_status = response_status
+        self.incomplete_details = incomplete_details
+        self.finish_reason = finish_reason
+        super().__init__(f"方舟接口响应读取不完整（已接收 {len(partial_body)} 字节）")
+
+
+class ProviderIncompleteResponse(ProviderError):
+    def __init__(
+        self,
+        raw_response: str,
+        response_id: str,
+        reason: str,
+        response_status: str,
+        incomplete_details: Any,
+        finish_reason: str,
+        extracted_text: str,
+    ) -> None:
+        self.raw_response = raw_response
+        self.response_id = response_id
+        self.reason = reason
+        self.response_status = response_status
+        self.incomplete_details = incomplete_details
+        self.finish_reason = finish_reason
+        self.extracted_text = extracted_text
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -269,6 +314,42 @@ class VolcengineModelProvider(BaseModelProvider):
         try:
             with urllib.request.urlopen(request, timeout=self._response_timeout()) as response:
                 raw = response.read().decode("utf-8")
+        except http.client.IncompleteRead as exc:
+            partial_body = bytes(exc.partial or b"")
+            partial_text = partial_body.decode("utf-8", errors="replace")
+            extracted_text = ""
+            response_id = ""
+            response_complete = False
+            try:
+                partial_envelope = json.loads(partial_text)
+            except (json.JSONDecodeError, TypeError):
+                partial_envelope = None
+            if isinstance(partial_envelope, dict):
+                response_id = str(partial_envelope.get("id") or "")
+                extracted_text = self._extract_response_text(partial_envelope)
+                status = str(partial_envelope.get("status") or "").lower()
+                incomplete = partial_envelope.get("incomplete_details")
+                finish_reason = str(partial_envelope.get("finish_reason") or "").lower()
+                choices = partial_envelope.get("choices")
+                if isinstance(choices, list):
+                    for choice in choices:
+                        if isinstance(choice, dict) and str(choice.get("finish_reason") or "").lower() in {"length", "max_tokens"}:
+                            finish_reason = str(choice.get("finish_reason")).lower()
+                response_complete = (
+                    status == "completed"
+                    and not incomplete
+                    and finish_reason not in {"length", "max_tokens"}
+                )
+            raise ProviderIncompleteRead(
+                partial_body,
+                partial_text,
+                extracted_text,
+                response_id,
+                response_complete,
+                str(partial_envelope.get("status") or "").lower() if isinstance(partial_envelope, dict) else "",
+                partial_envelope.get("incomplete_details") if isinstance(partial_envelope, dict) else None,
+                finish_reason if isinstance(partial_envelope, dict) else "",
+            ) from exc
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise ProviderError(f"方舟接口请求失败：HTTP {exc.code} {body}") from exc
@@ -278,6 +359,31 @@ class VolcengineModelProvider(BaseModelProvider):
             raise ProviderError(f"方舟接口响应超时：超过 {self._response_timeout()} 秒未返回") from exc
 
         data = json.loads(raw)
+        response_status = str(data.get("status") or "").lower()
+        incomplete_details = data.get("incomplete_details")
+        finish_reason = str(data.get("finish_reason") or "").lower()
+        choices = data.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict) and str(choice.get("finish_reason") or "").lower() in {"length", "max_tokens"}:
+                    finish_reason = str(choice.get("finish_reason")).lower()
+        response_is_unsuccessful = response_status not in {"", "completed"}
+        output_was_truncated = bool(incomplete_details) or finish_reason in {"length", "max_tokens"}
+        if response_is_unsuccessful or output_was_truncated:
+            reason = (
+                "方舟接口返回了未完成响应，不能作为有效模型结果使用。"
+                if response_is_unsuccessful or incomplete_details
+                else "方舟接口因输出长度限制提前结束，不能作为有效模型结果使用。"
+            )
+            raise ProviderIncompleteResponse(
+                raw,
+                str(data.get("id") or ""),
+                reason,
+                response_status,
+                incomplete_details,
+                finish_reason,
+                self._extract_response_text(data),
+            )
         extracted = self._extract_response_text(data)
         if extracted:
             return extracted
