@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { VideoComposition } from "./VideoComposition";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
@@ -21,6 +21,7 @@ type AssetTab = "角色" | "场景" | "道具" | "资产进度";
 type UploadMode = "folder" | "single";
 type ModalName = "upload-confirm-modal" | "image-view-modal" | null;
 type SegmentPanel = "shot-prompt" | "shot-assets" | "shot-history";
+type WorkbenchPane = "assets" | "preview";
 
 type Project = {
   id: string;
@@ -69,8 +70,14 @@ type Storyboard = {
   time_range: string;
   prompt: string;
   status: string;
+  analysis_state?: string;
+  analysis_message?: string;
   payload?: Record<string, any>;
 };
+
+type PromptVariablePart =
+  | { kind: "text"; value: string }
+  | { kind: "variable"; token: string; asset?: Asset };
 
 type VideoGeneration = {
   id: string;
@@ -159,8 +166,14 @@ function variantMeta(asset: Asset) {
 
 function assetPrompt(asset: Asset) {
   const child = currentChild(asset);
+  const finalPrompt = pickText(asset.payload, ["最终资产图生成提示词"]);
+  const targetStatus = pickText(asset.payload, ["目标画像状态"]);
+  const pending = targetStatus === "待本地化" || targetStatus === "待源事实核对";
+  const manualPrompt = pickText(asset.payload, ["用户编辑资产图生成提示词"]);
+  if (targetStatus === "待源事实核对") return manualPrompt || pickText(asset.payload, ["自动编译资产图生成提示词"]);
+  if (pending) return manualPrompt;
   const prompt =
-    pickText(asset.payload, ["最终资产图生成提示词"]) ||
+    finalPrompt || manualPrompt ||
     pickText(child, ["角色资产图生成提示词", "场景资产图生成提示词", "道具资产图生成提示词"]) ||
     pickText(asset.payload, ["角色资产图生成提示词", "场景资产图生成提示词", "道具资产图生成提示词"]);
   if (prompt) return prompt;
@@ -433,6 +446,41 @@ function originalAssetImageUrl(asset?: Asset) {
   );
 }
 
+function splitPromptAssetVariables(prompt: string, assets: Asset[]): PromptVariablePart[] {
+  const aliasMap = new Map<string, Asset>();
+  assets.forEach((asset) => {
+    [assetDisplayVariable(asset), asset.variable].filter((token) => token.startsWith("@")).forEach((token) => {
+      if (!aliasMap.has(token)) aliasMap.set(token, asset);
+    });
+  });
+  const aliases = Array.from(aliasMap.entries()).sort((left, right) => right[0].length - left[0].length);
+  const isAsciiVariableChar = (character: string) => Boolean(character && /[A-Za-z0-9_-]/.test(character));
+  const parts: PromptVariablePart[] = [];
+  let textStart = 0;
+  let index = 0;
+  while (index < prompt.length) {
+    const previous = prompt[index - 1] ?? "";
+    const atBoundary = index === 0 || !/[A-Za-z0-9_@]/.test(previous);
+    const known = atBoundary
+      ? aliases.find(([token]) => prompt.startsWith(token, index) && !isAsciiVariableChar(prompt[index + token.length] ?? ""))
+      : undefined;
+    const unknownMatch = !known && atBoundary && prompt[index] === "@"
+      ? prompt.slice(index).match(/^@[\p{L}\p{N}]+(?:[_-][\p{L}\p{N}]+)*/u)?.[0]
+      : undefined;
+    const token = known?.[0] ?? unknownMatch;
+    if (!token) {
+      index += 1;
+      continue;
+    }
+    if (index > textStart) parts.push({ kind: "text", value: prompt.slice(textStart, index) });
+    parts.push({ kind: "variable", token, asset: known?.[1] });
+    index += token.length;
+    textStart = index;
+  }
+  if (textStart < prompt.length) parts.push({ kind: "text", value: prompt.slice(textStart) });
+  return parts;
+}
+
 function groupOriginalImageUrl(group: AssetGroup) {
   for (const item of group.items) {
     const url = originalAssetImageUrl(item);
@@ -469,6 +517,22 @@ function mockGenerationLabel(status: string) {
   return "模拟请求处理中（未生成视频）";
 }
 
+function getInitialWorkbenchPaneWidths() {
+  const workbenchWidth = Math.max(window.innerWidth, 940);
+  const gap = Math.min(14, Math.max(8, workbenchWidth * 0.01));
+  const availableTracks = workbenchWidth - gap * 2 - gap * 4 - 16 - 360;
+  const minimumTotal = 230 + 260;
+  const preferredAssets = Math.min(680, Math.round(workbenchWidth * 0.26));
+  const preferredPreview = Math.min(720, Math.round(workbenchWidth * 0.3));
+  const preferredExtra = Math.max(0, preferredAssets - 230) + Math.max(0, preferredPreview - 260);
+  const extraBudget = Math.max(0, Math.min(preferredExtra, availableTracks - minimumTotal));
+  const scale = preferredExtra > 0 ? extraBudget / preferredExtra : 1;
+  return {
+    assets: Math.floor(230 + Math.max(0, preferredAssets - 230) * scale),
+    preview: Math.floor(260 + Math.max(0, preferredPreview - 260) * scale),
+  };
+}
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
@@ -480,6 +544,9 @@ export function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [assetSidebarCollapsed, setAssetSidebarCollapsed] = useState(false);
   const [previewPanelCollapsed, setPreviewPanelCollapsed] = useState(false);
+  const [initialWorkbenchPaneWidths] = useState(getInitialWorkbenchPaneWidths);
+  const [assetPaneWidth, setAssetPaneWidth] = useState(initialWorkbenchPaneWidths.assets);
+  const [previewPaneWidth, setPreviewPaneWidth] = useState(initialWorkbenchPaneWidths.preview);
   const [selectedSource, setSelectedSource] = useState<SelectedSource | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[] | null>(null);
   const [uploadState, setUploadState] = useState<"idle" | "selected" | "uploading" | "uploaded" | "failed">("idle");
@@ -492,7 +559,9 @@ export function App() {
   const [storyboardVisualStyle, setStoryboardVisualStyle] = useState<Project["storyboard_visual_style"]>("live_action");
   const [replaceCharacters, setReplaceCharacters] = useState(false);
   const [replaceScenes, setReplaceScenes] = useState(false);
-  const [targetAssetDescription, setTargetAssetDescription] = useState("");
+  const [assetPromptDraft, setAssetPromptDraft] = useState("");
+  const assetPromptDraftRevision = useRef(new Map<string, number>());
+  const selectedAssetIdForPrompt = useRef<string | null>(null);
   const [frameRatio, setFrameRatio] = useState("9:16");
   const [resolution, setResolution] = useState("720p");
   const [styleType, setStyleType] = useState("写实通用");
@@ -502,15 +571,16 @@ export function App() {
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
   const [segmentPanel, setSegmentPanel] = useState<SegmentPanel>("shot-prompt");
-  const [editingStoryboardBody, setEditingStoryboardBody] = useState(false);
+  const [storyboardSaveStates, setStoryboardSaveStates] = useState<Record<string, "saved" | "saving" | "failed">>({});
   const [activeAnalysisTask, setActiveAnalysisTask] = useState<Task | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState({ story: 0, asset: 0 });
   const [analysisNow, setAnalysisNow] = useState(Date.now());
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [mentionCaret, setMentionCaret] = useState(0);
+  const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
+  const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [storyboardAssetSearch, setStoryboardAssetSearch] = useState("");
   const [storyboardAssetLayout, setStoryboardAssetLayout] = useState<"list" | "grid">("list");
-  const [collapsedStoryboardAssetGroups, setCollapsedStoryboardAssetGroups] = useState<string[]>([]);
+  const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具">("角色");
   const [busy, setBusy] = useState(false);
   const [storyboardLoading, setStoryboardLoading] = useState(false);
   const [generatingAssetId, setGeneratingAssetId] = useState<string | null>(null);
@@ -519,8 +589,13 @@ export function App() {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const storyboardPatchQueue = useRef<Promise<void>>(Promise.resolve());
+  const storyboardSaveRevisions = useRef(new Map<string, number>());
   const assetImageInputRef = useRef<HTMLInputElement | null>(null);
   const pollingTaskIds = useRef(new Set<string>());
+  const workbenchRef = useRef<HTMLElement | null>(null);
+  const splitterDragRef = useRef<{ pane: WorkbenchPane; pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
+  const storyboardReferenceRevision = useRef(new Map<string, number>());
+  const storyboardReferenceDrafts = useRef(new Map<string, { projectId: string; references: string[] }>());
 
   const selectedEpisode = useMemo(
     () => episodes.find((episode) => episode.id === selectedEpisodeId) ?? null,
@@ -534,6 +609,7 @@ export function App() {
     () => storyboards.find((storyboard) => storyboard.id === selectedStoryboardId) ?? storyboards[0] ?? null,
     [storyboards, selectedStoryboardId]
   );
+  const storyboardSaveState = selectedStoryboard ? storyboardSaveStates[selectedStoryboard.id] ?? "saved" : "saved";
   const assetGroups = useMemo(() => {
     const map = new Map<string, AssetGroup>();
     assets.forEach((asset) => {
@@ -560,15 +636,25 @@ export function App() {
   const roleCount = assets.filter((asset) => asset.asset_type === "角色").length;
   const sceneCount = assets.filter((asset) => asset.asset_type === "场景").length;
   const propCount = assets.filter((asset) => asset.asset_type === "道具").length;
+  const storyboardFilteredAssets = useMemo(
+    () => assets.filter((asset) => asset.asset_type === storyboardAssetTab
+      && `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(storyboardAssetSearch.toLowerCase())),
+    [assets, storyboardAssetSearch, storyboardAssetTab]
+  );
   const selectedGroup = selectedAsset ? assetGroups.find((group) => group.key === mainAssetKey(selectedAsset)) : null;
   const latestAssetIndex = useMemo(() => {
     const task = tasks.find((item) => item.task_type === "asset_extraction" && item.status === "成功" && item.result?.资产出现片段索引);
     return Array.isArray(task?.result?.资产出现片段索引) ? task.result.资产出现片段索引 : [];
   }, [tasks]);
-  const selectedStoryboardAssets = useMemo(() => {
+  const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
-    const storyboardRange = parseRange(selectedStoryboard.time_range || "");
     const variableSet = new Set<string>();
+    const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
+    if (selectedStoryboard.payload?.["引用资产变量手动覆盖"] === true) {
+      payloadRefs.forEach((value) => variableSet.add(value));
+      return Array.from(variableSet);
+    }
+    const storyboardRange = parseRange(selectedStoryboard.time_range || "");
     latestAssetIndex.forEach((segment: any) => {
       const segmentRange = parseRange(`${segment.开始时间 || "00:00:00"}-${segment.结束时间 || segment.开始时间 || "00:00:00"}`);
       if (!rangesOverlap(storyboardRange, segmentRange)) return;
@@ -581,8 +667,7 @@ export function App() {
       splitAssetVariableValues(segment.出现资产变量).forEach((value: string) => variableSet.add(value));
       splitAssetVariableValues(segment.引用资产变量).forEach((value: string) => variableSet.add(value));
     });
-    const payloadRefs = selectedStoryboard.payload?.引用资产变量;
-    splitAssetVariableValues(payloadRefs).forEach((value) => variableSet.add(value));
+    payloadRefs.forEach((value) => variableSet.add(value));
     const prompt = selectedStoryboard.prompt || "";
     assets.forEach((asset) => {
       if (prompt.includes(asset.variable) || prompt.includes(assetDisplayVariable(asset))) {
@@ -590,23 +675,57 @@ export function App() {
         variableSet.add(assetDisplayVariable(asset));
       }
     });
-    return assets.filter((asset) => variableSet.has(asset.variable) || variableSet.has(assetDisplayVariable(asset)));
+    return Array.from(variableSet);
   }, [assets, latestAssetIndex, selectedStoryboard]);
+  const selectedStoryboardAssets = useMemo(() => {
+    const referenceSet = new Set(selectedStoryboardReferenceTokens);
+    return assets.filter((asset) => referenceSet.has(asset.variable) || referenceSet.has(assetDisplayVariable(asset)) || referenceSet.has(assetDisplayName(asset)));
+  }, [assets, selectedStoryboardReferenceTokens]);
+  function getLatestStoryboardReferenceTokens(storyboard: Storyboard) {
+    const draft = storyboardReferenceDrafts.current.get(storyboard.id);
+    if (draft && draft.projectId === currentProject?.id) return [...draft.references];
+    if (selectedStoryboard?.id === storyboard.id) return [...selectedStoryboardReferenceTokens];
+    return splitAssetVariableValues(storyboard.payload?.["引用资产变量"]);
+  }
+  const selectedStoryboardReferenceItems = useMemo(() => {
+    const seen = new Set<string>();
+    return selectedStoryboardReferenceTokens.flatMap((token) => {
+      const asset = assets.find((item) => [item.variable, assetDisplayVariable(item), assetDisplayName(item)].includes(token));
+      const key = asset ? `asset:${asset.id}` : `reference:${token}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ key, token, asset, label: asset ? assetDisplayName(asset) : token }];
+    });
+  }, [assets, selectedStoryboardReferenceTokens]);
+  const workbenchStyle = {
+    "--asset-pane-width": `${assetPaneWidth}px`,
+    "--preview-pane-width": `${previewPaneWidth}px`,
+  } as CSSProperties;
   const selectedStoryboardPrompt = useMemo(
-    () => convertPromptVariables(
+    () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : convertPromptVariables(
       String(selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""),
       assets
     ),
     [assets, selectedStoryboard]
   );
-  useEffect(() => setEditingStoryboardBody(false), [selectedStoryboardId]);
   const mentionOptions = useMemo(() => {
     const query = (mentionQuery ?? "").toLowerCase();
-    return selectedStoryboardAssets.filter((asset) => {
+    return assets.filter((asset) => {
       if (!query) return true;
       return `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(query);
-    });
-  }, [mentionQuery, selectedStoryboardAssets]);
+    }).slice(0, 40);
+  }, [assets, mentionQuery]);
+  useEffect(() => setActiveMentionIndex(0), [mentionQuery]);
+  useEffect(() => {
+    if (!selectedStoryboard) return;
+    const savedBody = selectedStoryboard.payload?.["使用回退占位"] === true
+      ? ""
+      : convertPromptVariables(String(selectedStoryboard.payload?.["分镜生成正文"] ?? selectedStoryboard.payload?.["源分镜文本"] ?? selectedStoryboard.prompt ?? ""), assets);
+    if (selectedStoryboardPrompt === savedBody) return;
+    const storyboard = selectedStoryboard;
+    const timer = window.setTimeout(() => { void savePrompt(storyboard, selectedStoryboardPrompt); }, 700);
+    return () => window.clearTimeout(timer);
+  }, [selectedStoryboard?.id, selectedStoryboardPrompt]);
   const isSingleUpload = selectedSource?.kind === "local" && selectedSource.uploadMode === "single";
   const sourceEpisodeCount = isSingleUpload
     ? 1
@@ -845,7 +964,7 @@ export function App() {
     }
   }
 
-  async function runBackendTask(taskType: "asset_extraction" | "storyboard_generation" | "video_generation" | "series_analysis") {
+  async function runBackendTask(taskType: "asset_extraction" | "storyboard_generation" | "video_generation" | "series_analysis", options: { force?: boolean } = {}) {
     if (!currentProject) return null;
     if (taskType !== "video_generation" && taskType !== "series_analysis" && !selectedEpisodeId) {
       setMessage("请先选择要处理的视频");
@@ -855,7 +974,7 @@ export function App() {
       ? { taskType, storyboardId: selectedStoryboard?.id ?? storyboards[0]?.id }
       : taskType === "series_analysis"
         ? { taskType }
-        : { taskType, episodeId: selectedEpisodeId };
+        : { taskType, episodeId: selectedEpisodeId, ...(taskType === "storyboard_generation" && options.force ? { force: true } : {}) };
     const data = await request<{ task: Task }>(`/api/projects/${currentProject.id}/tasks/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1028,12 +1147,12 @@ export function App() {
     }
   }
 
-  async function enterStoryboards() {
+  async function enterStoryboards(force = false) {
     if (!currentProject || busy) return;
     setBusy(true);
     setStoryboardLoading(true);
     try {
-      const task = await runBackendTask("storyboard_generation");
+      const task = await runBackendTask("storyboard_generation", { force });
       if (!task) {
         setStoryboardLoading(false);
         return;
@@ -1064,6 +1183,19 @@ export function App() {
     if (!currentProject || busy) return;
     setBusy(true);
     try {
+      if (selectedStoryboard && promptInputRef.current) {
+        const saved = await savePrompt(selectedStoryboard, promptInputRef.current.value);
+        if (!saved) {
+          setMessage("分镜正文尚未保存；草稿仍保留，可重试保存后再生成");
+          return;
+        }
+        const refsSaved = await saveStoryboardReferenceOverrides(selectedStoryboard, getLatestStoryboardReferenceTokens(selectedStoryboard));
+        if (!refsSaved) {
+          setMessage("资产引用尚未保存；分镜草稿仍保留，可重试后再生成");
+          return;
+        }
+      }
+      await storyboardPatchQueue.current;
       const task = await runBackendTask("video_generation");
       if (task) {
         setScreen("compare");
@@ -1105,15 +1237,19 @@ export function App() {
     }
   }
 
-  async function generateAssetImage(assetId: string, prompt?: string) {
+  async function generateAssetImage(asset: Asset, finalPrompt: string) {
     if (!currentProject) return;
     setBusy(true);
-    setGeneratingAssetId(assetId);
+    setGeneratingAssetId(asset.id);
     try {
-      await request(`/api/projects/${currentProject.id}/assets/${assetId}/generate-image`, {
+      const canonicalPrompt = await saveAssetPrompt(asset, finalPrompt);
+      if (canonicalPrompt.startsWith("目标画像待本地化；") || canonicalPrompt.startsWith("目标画像需本地化；")) {
+        throw new Error("目标画像待本地化，当前不能把状态提示作为生图提示词发送。");
+      }
+      await request(`/api/projects/${currentProject.id}/assets/${asset.id}/generate-image`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ finalPrompt: canonicalPrompt }),
       });
       setMessage("资产图已生成");
       await loadAssets(currentProject.id);
@@ -1123,14 +1259,24 @@ export function App() {
     }
   }
 
-  async function saveTargetAssetDescription(asset: Asset, description: string) {
-    if (!currentProject) return;
+  async function saveAssetPrompt(asset: Asset, finalPrompt: string): Promise<string> {
+    if (!currentProject) return "";
+    const requestRevision = assetPromptDraftRevision.current.get(asset.id) ?? 0;
+    const existingManual = String(asset.payload?.["用户编辑资产图生成提示词"] ?? "");
+    const automatic = String(asset.payload?.["自动编译资产图生成提示词"] ?? "");
+    const manualPrompt = finalPrompt === automatic ? "" : finalPrompt;
+    if (manualPrompt === existingManual) return String(asset.payload?.["最终资产图生成提示词"] ?? finalPrompt);
     const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${asset.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload: { "目标生成描述": description, "目标资产来源": "手动生成" } }),
+      body: JSON.stringify({ payload: { "用户编辑资产图生成提示词": manualPrompt } }),
     });
     setAssets((items) => items.map((item) => item.id === asset.id ? data.asset : item));
-    setMessage("目标生成描述已保存；受影响分镜标记为待更新");
+    setMessage("完整资产提示词已保存");
+    const canonicalPrompt = String(data.asset.payload?.["最终资产图生成提示词"] ?? finalPrompt);
+    if (selectedAssetIdForPrompt.current === asset.id && (assetPromptDraftRevision.current.get(asset.id) ?? 0) === requestRevision) {
+      setAssetPromptDraft(canonicalPrompt);
+    }
+    return canonicalPrompt;
   }
 
   async function uploadTargetAssetImage(file?: File) {
@@ -1175,46 +1321,165 @@ export function App() {
     setMessage("分镜画面类型已更新，既有源拆解保留；提示词已标记待更新");
   }
 
-  async function savePrompt(storyboard: Storyboard, prompt: string) {
-    if (!currentProject) return;
+  async function savePrompt(storyboard: Storyboard, prompt: string): Promise<boolean> {
+    if (!currentProject) return false;
+    const projectId = currentProject.id;
+    const revision = storyboardSaveRevisions.current.get(storyboard.id) ?? 0;
+    setStoryboardSaveStates((states) => ({ ...states, [storyboard.id]: "saving" }));
     const queueTask = storyboardPatchQueue.current.catch(() => undefined).then(async () => {
       const data = await request<{ storyboard: Storyboard }>(
-        `/api/projects/${currentProject.id}/storyboards/${storyboard.id}`,
+        `/api/projects/${projectId}/storyboards/${storyboard.id}`,
         { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generatedBody: prompt }) }
       );
-      setStoryboards((items) => items.map((item) => (item.id === storyboard.id ? data.storyboard : item)));
+      if (storyboardSaveRevisions.current.get(storyboard.id) === revision) {
+        setStoryboards((items) => items.map((item) => {
+          if (item.id !== storyboard.id) return item;
+          const localPayload = item.payload ?? {};
+          const serverPayload = data.storyboard.payload ?? {};
+          return {
+            ...data.storyboard,
+            payload: {
+              ...serverPayload,
+              ...(localPayload["引用资产变量"] !== undefined ? { "引用资产变量": localPayload["引用资产变量"] } : {}),
+              ...(localPayload["引用资产变量手动覆盖"] !== undefined ? { "引用资产变量手动覆盖": localPayload["引用资产变量手动覆盖"] } : {}),
+            },
+          };
+        }));
+        setStoryboardSaveStates((states) => ({ ...states, [storyboard.id]: "saved" }));
+      }
     });
-    storyboardPatchQueue.current = queueTask.catch(() => undefined);
+    storyboardPatchQueue.current = queueTask;
     try {
       await queueTask;
-      setMessage("提示词已保存");
+      return true;
     } catch (error) {
       setMessage(`提示词保存失败，当前编辑保留：${error instanceof Error ? error.message : "请重试"}`);
+      if (storyboardSaveRevisions.current.get(storyboard.id) === revision) {
+        setStoryboardSaveStates((states) => ({ ...states, [storyboard.id]: "failed" }));
+      }
+      return false;
     }
   }
 
-  async function toggleStoryboardAsset(asset: Asset) {
-    if (!currentProject || !selectedStoryboard) return;
-    const payload = { ...(selectedStoryboard.payload ?? {}) };
-    const refs = splitAssetVariableValues(payload["引用资产变量"]);
-    const variable = asset.variable || assetDisplayVariable(asset);
-    const aliases = new Set([asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)]);
-    const wasReferenced = refs.some((item) => aliases.has(item));
-    const nextRefs = wasReferenced ? refs.filter((item) => !aliases.has(item)) : [...refs, variable];
+  async function saveStoryboardReferenceOverrides(storyboard: Storyboard, references: string[]) {
+    if (!currentProject) return false;
+    const projectId = currentProject.id;
+    const normalizedReferences = Array.from(new Set(references.filter(Boolean)));
+    storyboardReferenceDrafts.current.set(storyboard.id, { projectId, references: normalizedReferences });
+    const revision = (storyboardReferenceRevision.current.get(storyboard.id) ?? 0) + 1;
+    storyboardReferenceRevision.current.set(storyboard.id, revision);
+    setStoryboards((items) => items.map((item) => item.id === storyboard.id
+      ? { ...item, payload: { ...(item.payload ?? {}), "引用资产变量": normalizedReferences, "引用资产变量手动覆盖": true } }
+      : item));
     const queueTask = storyboardPatchQueue.current.catch(() => undefined).then(async () => {
-      const data = await request<{ storyboard: Storyboard }>(`/api/projects/${currentProject.id}/storyboards/${selectedStoryboard.id}`, {
+      const data = await request<{ storyboard: Storyboard }>(`/api/projects/${projectId}/storyboards/${storyboard.id}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ payload: { "引用资产变量": nextRefs } }),
+        body: JSON.stringify({ payload: { "引用资产变量": normalizedReferences, "引用资产变量手动覆盖": true } }),
       });
-      setStoryboards((items) => items.map((item) => item.id === data.storyboard.id ? data.storyboard : item));
+      if (storyboardReferenceRevision.current.get(storyboard.id) === revision) {
+        setStoryboards((items) => items.map((item) => {
+          if (item.id !== data.storyboard.id) return item;
+          const localBody = item.payload?.["分镜生成正文"];
+          const serverBody = data.storyboard.payload?.["分镜生成正文"];
+          const preserveDraft = typeof localBody === "string" && localBody !== serverBody;
+          return preserveDraft
+            ? { ...data.storyboard, payload: { ...data.storyboard.payload, "分镜生成正文": localBody } }
+            : data.storyboard;
+        }));
+      }
     });
-    storyboardPatchQueue.current = queueTask.catch(() => undefined);
+    storyboardPatchQueue.current = queueTask;
     try {
       await queueTask;
-      setMessage(wasReferenced ? `已移除引用 ${assetDisplayName(asset)}` : `已引用资产 ${assetDisplayName(asset)}`);
+      return true;
     } catch (error) {
       setMessage(`资产引用保存失败：${error instanceof Error ? error.message : "请重试"}`);
+      return false;
     }
+  }
+
+  function getWorkbenchPaneMaxWidth(pane: WorkbenchPane) {
+    const workbench = workbenchRef.current;
+    if (!workbench) return pane === "assets" ? 230 : 260;
+    const style = window.getComputedStyle(workbench);
+    const horizontalPadding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+    const gap = Number.parseFloat(style.columnGap) || 0;
+    const otherPanel = workbench.querySelector<HTMLElement>(pane === "assets" ? ".video-preview" : ".asset-sidebar");
+    const otherVisible = Boolean(otherPanel && otherPanel.getClientRects().length > 0);
+    const gapCount = otherVisible ? 4 : 2;
+    const splitterWidth = otherVisible ? 16 : 8;
+    const availableTracks = workbench.clientWidth - horizontalPadding - gap * gapCount - splitterWidth;
+    const otherWidth = otherVisible ? otherPanel!.getBoundingClientRect().width : 0;
+    const minimum = pane === "assets" ? 230 : 260;
+    const preferredMaximum = pane === "assets" ? 680 : 720;
+    return Math.max(minimum, Math.min(preferredMaximum, Math.floor(availableTracks - 360 - otherWidth)));
+  }
+
+  function updateWorkbenchPaneWidth(pane: WorkbenchPane, width: number) {
+    const minimum = pane === "assets" ? 230 : 260;
+    const bounded = Math.max(minimum, Math.min(getWorkbenchPaneMaxWidth(pane), Math.round(width)));
+    if (pane === "assets") setAssetPaneWidth(bounded);
+    else setPreviewPaneWidth(bounded);
+  }
+
+  function startWorkbenchResize(pane: WorkbenchPane, event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const workbench = workbenchRef.current;
+    const panel = workbench?.querySelector<HTMLElement>(pane === "assets" ? ".asset-sidebar" : ".video-preview");
+    if (!panel) return;
+    const startWidth = panel.getBoundingClientRect().width;
+    if (pane === "assets") setAssetPaneWidth(startWidth);
+    else setPreviewPaneWidth(startWidth);
+    splitterDragRef.current = { pane, pointerId: event.pointerId, startX: event.clientX, startWidth, target: event.currentTarget };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveWorkbenchResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = splitterDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientX - drag.startX;
+    updateWorkbenchPaneWidth(drag.pane, drag.startWidth + (drag.pane === "assets" ? delta : -delta));
+  }
+
+  function endWorkbenchResize(event?: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = splitterDragRef.current;
+    if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+    splitterDragRef.current = null;
+    try {
+      if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
+    } catch {
+      // Pointer capture may already be released by the browser on cancellation/blur.
+    }
+  }
+
+  function handleWorkbenchResizeKey(pane: WorkbenchPane, event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 48 : 16;
+    const sign = event.key === "ArrowRight" ? 1 : -1;
+    const current = pane === "assets" ? assetPaneWidth : previewPaneWidth;
+    updateWorkbenchPaneWidth(pane, current + sign * step * (pane === "assets" ? 1 : -1));
+  }
+
+  async function toggleStoryboardAsset(asset: Asset) {
+    if (!selectedStoryboard) return;
+    const aliases = new Set([asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)]);
+    const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
+    const wasReferenced = currentReferences.some((item) => aliases.has(item));
+    const nextRefs = currentReferences.filter((item) => !aliases.has(item));
+    if (!wasReferenced) nextRefs.push(asset.variable || assetDisplayVariable(asset));
+    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, nextRefs)) return;
+    if (wasReferenced) setMessage(`已移除引用 ${assetDisplayName(asset)}`);
+    else setMessage(`已引用资产 ${assetDisplayName(asset)}`);
+  }
+
+  async function removeStoryboardReference(token: string, asset?: Asset) {
+    if (!selectedStoryboard) return;
+    const aliases = asset ? new Set([asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)]) : new Set([token]);
+    const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
+    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, currentReferences.filter((item) => !aliases.has(item)))) return;
+    setMessage(`已移除引用 ${asset ? assetDisplayName(asset) : token}`);
   }
 
   async function createStoryboard(duplicateFrom?: Storyboard) {
@@ -1279,6 +1544,8 @@ export function App() {
 
   function updateStoryboardPromptText(value: string) {
     if (!selectedStoryboard) return;
+    storyboardSaveRevisions.current.set(selectedStoryboard.id, (storyboardSaveRevisions.current.get(selectedStoryboard.id) ?? 0) + 1);
+    setStoryboardSaveStates((states) => ({ ...states, [selectedStoryboard.id]: "saving" }));
     setStoryboards((items) => items.map((item) => item.id === selectedStoryboard.id
       ? { ...item, payload: { ...(item.payload ?? {}), "分镜生成正文": value } }
       : item));
@@ -1288,32 +1555,73 @@ export function App() {
     const value = event.target.value;
     const caret = event.target.selectionStart ?? value.length;
     updateStoryboardPromptText(value);
-    const beforeCaret = value.slice(0, caret);
-    const match = beforeCaret.match(/@([A-Za-z0-9_\u4e00-\u9fa5]*)$/);
-    if (match) {
-      setMentionQuery(match[1] ?? "");
-      setMentionCaret(caret);
+    const at = value.lastIndexOf("@", caret - 1);
+    const query = at >= 0 ? value.slice(at + 1, caret) : "";
+    const prefix = at > 0 ? value[at - 1] : "";
+    if (at >= 0 && !/[A-Za-z0-9_\u4e00-\u9fa5@]/.test(prefix) && /^[A-Za-z0-9_\u4e00-\u9fa5-]*$/.test(query)) {
+      setMentionQuery(query);
+      setMentionRange({ start: at, end: caret });
     } else {
       setMentionQuery(null);
+      setMentionRange(null);
     }
   }
 
   function insertMention(asset: Asset) {
-    if (!selectedStoryboard || mentionQuery === null) return;
-    const value = selectedStoryboardPrompt;
-    const tokenStart = Math.max(0, mentionCaret - mentionQuery.length - 1);
-    const nextValue = `${value.slice(0, tokenStart)}${assetDisplayVariable(asset)} ${value.slice(mentionCaret)}`;
+    if (!selectedStoryboard || mentionQuery === null || !mentionRange) return;
+    const value = promptInputRef.current?.value ?? selectedStoryboardPrompt;
+    const nextValue = `${value.slice(0, mentionRange.start)}${assetDisplayVariable(asset)} ${value.slice(mentionRange.end)}`;
     updateStoryboardPromptText(nextValue);
+    const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
+    const aliases = [asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)];
+    if (!currentReferences.some((item) => aliases.includes(item))) {
+      void saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, asset.variable || assetDisplayVariable(asset)]);
+    }
     setMentionQuery(null);
+    setMentionRange(null);
     window.setTimeout(() => {
       promptInputRef.current?.focus();
-      const nextCaret = tokenStart + assetDisplayVariable(asset).length + 1;
+      const nextCaret = mentionRange.start + assetDisplayVariable(asset).length + 1;
       promptInputRef.current?.setSelectionRange(nextCaret, nextCaret);
     }, 0);
   }
 
+  function handlePromptMentionKeys(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionQuery === null) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setMentionQuery(null);
+      setMentionRange(null);
+    } else if (event.key === "ArrowDown" && mentionOptions.length) {
+      event.preventDefault();
+      setActiveMentionIndex((index) => (index + 1) % mentionOptions.length);
+    } else if (event.key === "ArrowUp" && mentionOptions.length) {
+      event.preventDefault();
+      setActiveMentionIndex((index) => (index - 1 + mentionOptions.length) % mentionOptions.length);
+    } else if (event.key === "Enter" && mentionOptions.length) {
+      event.preventDefault();
+      insertMention(mentionOptions[activeMentionIndex] ?? mentionOptions[0]);
+    }
+  }
+
   useEffect(() => {
     loadProjects().catch((error) => setMessage(error.message));
+  }, []);
+  useEffect(() => {
+    if (modal !== "image-view-modal") return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setModal(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [modal]);
+  useEffect(() => {
+    const releaseDragOnBlur = () => endWorkbenchResize();
+    window.addEventListener("blur", releaseDragOnBlur);
+    return () => {
+      window.removeEventListener("blur", releaseDragOnBlur);
+      endWorkbenchResize();
+    };
   }, []);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 1100px)");
@@ -1332,8 +1640,9 @@ export function App() {
   }, [assets, selectedAssetId]);
 
   useEffect(() => {
-    setTargetAssetDescription(String(selectedAsset?.payload?.["目标生成描述"] ?? ""));
-  }, [selectedAsset?.id, selectedAsset?.payload?.["目标生成描述"]]);
+    setAssetPromptDraft(selectedAsset ? assetPrompt(selectedAsset) : "");
+    selectedAssetIdForPrompt.current = selectedAsset?.id ?? null;
+  }, [selectedAsset?.id, selectedAsset?.payload?.["最终资产图生成提示词"], selectedAsset?.payload?.["用户编辑资产图生成提示词"]]);
 
   useEffect(() => {
     if (storyboards.length && (!selectedStoryboardId || !storyboards.some((item) => item.id === selectedStoryboardId))) {
@@ -1756,15 +2065,29 @@ export function App() {
                   <div className="agent-generate-card">
                     <div className="agent-card-head"><h3>Agent 生成{assetTab === "角色" ? "形象" : assetTab}</h3></div>
                     <div className="agent-prompt-box">
-                      {currentProject?.remake_mode !== "overseas_localization" && <div className="asset-target-controls">
-                        <label>目标生成描述（可编辑）<textarea value={targetAssetDescription} onChange={(event) => setTargetAssetDescription(event.target.value)} onBlur={() => saveTargetAssetDescription(selectedAsset, targetAssetDescription).catch((error) => setMessage(error.message))} placeholder={originalAssetDescription(selectedAsset) === "原片描述未留存" ? "请补充目标外观描述" : "只编辑当前项目目标外观"} /></label>
-                        <div><button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>{currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setTargetAssetDescription(""); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}</div>
+                      <div className="asset-target-controls">
+                        <div><button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>{currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}</div>
                         <input ref={assetImageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.currentTarget.files?.[0]; void uploadTargetAssetImage(file).catch((error) => setMessage(error.message)); event.currentTarget.value = ""; }} />
-                      </div>}
-                      <textarea value={assetPrompt(selectedAsset) || "当前资产未返回提示词"} readOnly />
+                      </div>
+                      {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
+                        <div className="asset-profile-pending" role="status">
+                          目标脸部本地化已完成；自动提示词暂被以下源事实锁定：{(((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.needsReview as string[] | undefined) || []).join("、") || "源视觉字段"}。可先核对源事实，或填写完整、自包含的人工提示词。
+                        </div>
+                      )}
+                      {selectedAsset.payload?.["目标画像状态"] === "待本地化" && (
+                        <div className="asset-profile-pending" role="status">
+                          {((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.needsReview)
+                            ? `群像待人工确认：${String((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.reviewReason || "保留原片群像信息，不生成单人脸部设定。")}`
+                            : "目标画像需本地化；旧共享描述不能作为目标提示词。"}
+                        </div>
+                      )}
+                      <textarea value={assetPromptDraft} onChange={(event) => {
+                        assetPromptDraftRevision.current.set(selectedAsset.id, (assetPromptDraftRevision.current.get(selectedAsset.id) ?? 0) + 1);
+                        setAssetPromptDraft(event.target.value);
+                      }} onBlur={() => saveAssetPrompt(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} placeholder="当前资产未返回提示词" disabled={busy} />
                       <div className="agent-prompt-footer">
                         <div className="agent-model-note">按当前后端模型配置生成</div>
-                        <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset.id, currentProject?.remake_mode === "overseas_localization" ? undefined : targetAssetDescription)} disabled={busy || (currentProject?.remake_mode !== "overseas_localization" && !targetAssetDescription.trim())}>生成</button>
+                      <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={busy || selectedAsset.payload?.effectiveAssetSource === "source" || ((selectedAsset.payload?.["目标画像状态"] === "待源事实核对" || selectedAsset.payload?.["目标画像状态"] === "待本地化") && !assetPromptDraft.trim()) || (selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && assetPromptDraft === String(selectedAsset.payload?.["自动编译资产图生成提示词"] || ""))}>生成</button>
                       </div>
                     </div>
                   </div>
@@ -1775,43 +2098,47 @@ export function App() {
 
           <div className="footer-actions">
             <button className="ghost" onClick={() => setScreen("source")}>返回</button>
-            <button className="primary" disabled={busy || !assets.length} onClick={enterStoryboards}>进入分镜</button>
+            <button className="primary" disabled={busy || !assets.length} onClick={() => void enterStoryboards()}>进入分镜</button>
           </div>
         </section>
 
-        <section className={`screen workbench${screen === "segments" ? " active" : ""}${assetSidebarCollapsed ? " assets-collapsed" : ""}${previewPanelCollapsed ? " preview-collapsed" : ""}`} id="segments">
+        <section ref={workbenchRef} style={workbenchStyle} className={`screen workbench${screen === "segments" ? " active" : ""}${assetSidebarCollapsed ? " assets-collapsed" : ""}${previewPanelCollapsed ? " preview-collapsed" : ""}`} id="segments">
           <section className={`asset-sidebar${assetSidebarCollapsed ? " folded" : ""}`}>
-            <details className="episode-select">
-              <summary><b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择剧集"}</b><span>{episodes.length} 集已解析</span></summary>
-              <div className="episode-menu">
-                {episodes.map((episode) => (
-                  <button className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => setSelectedEpisodeId(episode.id)}>第 {episode.episode_index} 集 {episode.filename}</button>
+            <div className="storyboard-asset-controls">
+              <details className="episode-select">
+                <summary><b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择剧集"}</b><span>{episodes.length} 集已解析</span></summary>
+                <div className="episode-menu">
+                  {episodes.map((episode) => (
+                    <button className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => setSelectedEpisodeId(episode.id)}>第 {episode.episode_index} 集 {episode.filename}</button>
+                  ))}
+                </div>
+              </details>
+              <div className="storyboard-asset-tabs" role="tablist" aria-label="分镜资产类别">
+                {(["角色", "场景", "道具"] as const).map((type) => (
+                  <button type="button" role="tab" aria-selected={storyboardAssetTab === type} className={storyboardAssetTab === type ? "active" : ""} key={type} onClick={() => setStoryboardAssetTab(type)}>
+                    {type}<span>{assets.filter((asset) => asset.asset_type === type).length}</span>
+                  </button>
                 ))}
               </div>
-            </details>
-            <div className="inner-tabs compact-asset-tabs"><span className="sidepanel-label">资产库 · 点击引用到当前分镜</span></div>
-            <input className="storyboard-asset-search" placeholder="搜索角色、场景、道具" value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
-            <div className="storyboard-asset-view-controls"><span>显示</span><button className={storyboardAssetLayout === "list" ? "active" : ""} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div>
-            <div className={`asset-panel active storyboard-asset-list ${storyboardAssetLayout}`}>
-              {["角色", "场景", "道具"].map((type) => <div className="storyboard-asset-group" key={type}>
-                <button className="storyboard-asset-group-toggle" aria-expanded={!collapsedStoryboardAssetGroups.includes(type)} onClick={() => setCollapsedStoryboardAssetGroups((groups) => groups.includes(type) ? groups.filter((item) => item !== type) : [...groups, type])}>{type} <small>{assets.filter((asset) => asset.asset_type === type && `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(storyboardAssetSearch.toLowerCase())).length}</small><span>{collapsedStoryboardAssetGroups.includes(type) ? "＋" : "−"}</span></button>
-                {!collapsedStoryboardAssetGroups.includes(type) && <div className="storyboard-asset-group-items">
-                {assets.filter((asset) => asset.asset_type === type && `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(storyboardAssetSearch.toLowerCase())).map((asset) => {
-                  const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
-                  const refs = splitAssetVariableValues(selectedStoryboard?.payload?.["引用资产变量"]);
-                  const aliases = [asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)];
-                  const isReferenced = aliases.some((alias) => refs.includes(alias)) || selectedStoryboardAssets.some((item) => item.id === asset.id);
-                  return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
-                    {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
-                  </button>;
-                })}
-                </div>}
-              </div>)}
-              {!assets.length && <p className="empty-shot-assets">当前项目还没有可用资产。</p>}
+              <input className="storyboard-asset-search" placeholder={`搜索${storyboardAssetTab}`} value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
+              <div className="storyboard-asset-view-controls"><span>资产库</span><div><button className={storyboardAssetLayout === "list" ? "active" : ""} aria-pressed={storyboardAssetLayout === "list"} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} aria-pressed={storyboardAssetLayout === "grid"} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div></div>
+            </div>
+            <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
+              {storyboardFilteredAssets.map((asset) => {
+                const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
+                const refs = splitAssetVariableValues(selectedStoryboard?.payload?.["引用资产变量"]);
+                const aliases = [asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)];
+                const isReferenced = aliases.some((alias) => refs.includes(alias)) || selectedStoryboardAssets.some((item) => item.id === asset.id);
+                return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
+                  {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
+                </button>;
+              })}
+              {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
             </div>
           </section>
+          <button type="button" className="workbench-splitter asset-pane-splitter" role="separator" aria-label="调整资产栏宽度" aria-orientation="vertical" aria-valuemin={230} aria-valuemax={getWorkbenchPaneMaxWidth("assets")} aria-valuenow={assetPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("assets", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("assets", event)} />
           <section className="shot-main">
-            <div className="shot-head"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2><div className="shot-actions"><button className="ghost small" onClick={() => setAssetSidebarCollapsed((value) => !value)}>{assetSidebarCollapsed ? "显示资产库" : "收起资产库"}</button><button className="ghost small" onClick={() => setPreviewPanelCollapsed((value) => !value)}>{previewPanelCollapsed ? "显示预览" : "收起预览"}</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && renameStoryboard(selectedStoryboard)}>编辑</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && createStoryboard(selectedStoryboard)}>复制</button><button className="primary small" disabled={busy || !selectedStoryboard} onClick={runVideoGeneration}>生成模拟任务</button></div></div>
+            <div className="shot-head"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2><div className="shot-actions"><button className="ghost small" onClick={() => setAssetSidebarCollapsed((value) => !value)}>{assetSidebarCollapsed ? "显示资产库" : "收起资产库"}</button><button className="ghost small" onClick={() => setPreviewPanelCollapsed((value) => !value)}>{previewPanelCollapsed ? "显示预览" : "收起预览"}</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && renameStoryboard(selectedStoryboard)}>编辑</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && createStoryboard(selectedStoryboard)}>复制</button><button className="primary small" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true} onClick={runVideoGeneration}>生成模拟任务</button></div></div>
             {segmentPanel === "shot-prompt" && !selectedStoryboard && (
               storyboardLoading ? (
                 <div className="shot-empty sub-panel active">
@@ -1829,24 +2156,37 @@ export function App() {
             {segmentPanel === "shot-prompt" && selectedStoryboard && (
               <div className="shot-text sub-panel active">
                 <div className="prompt-body">
-                  <div className="tool-row"><button onClick={() => setSegmentPanel("shot-assets")}>引用</button><button onClick={() => setEditingStoryboardBody((value) => !value)}>{editingStoryboardBody ? "完成编辑" : "编辑正文"}</button><span>保存后正文与原始反解文本分开保留。</span></div>
-                  <div className="storyboard-ref-chips">{selectedStoryboardAssets.map((asset) => <button key={asset.id} title="点击移除该引用" onClick={() => toggleStoryboardAsset(asset)}>{assetDisplayName(asset)} <span>×</span></button>)}{!selectedStoryboardAssets.length && <span>当前分镜尚未关联资产；可从左侧资产库添加。</span>}</div>
+                  {selectedStoryboard.payload?.["使用回退占位"] === true && <div className={`storyboard-analysis-state ${selectedStoryboard.analysis_state === "分析失败" ? "failed" : "pending"}`} role="status">
+                    <div><strong>{selectedStoryboard.analysis_state ?? "待分析"}</strong><span>{selectedStoryboard.analysis_message ?? "当前分镜没有真实逐镜分析结果；占位内容不会作为提示词或视频生成输入。"}</span></div>
+                    <button className="ghost small" disabled={busy} onClick={() => void enterStoryboards(true)}>重新分析当前视频</button>
+                  </div>}
+                  <div className="tool-row"><button onClick={() => setSegmentPanel("shot-assets")}>引用</button><span className={`storyboard-save-state ${storyboardSaveState}`}>{storyboardSaveState === "saved" ? "分镜正文已保存" : storyboardSaveState === "saving" ? "正在保存分镜正文…" : "保存失败，草稿已保留"}</span>{storyboardSaveState === "failed" && <button className="ghost small" onClick={() => selectedStoryboard && promptInputRef.current && void savePrompt(selectedStoryboard, promptInputRef.current.value)}>重试保存</button>}<span>仅编辑正文；项目语言与画面约束仍由系统编译。</span></div>
+                  <div className="storyboard-ref-chips">{selectedStoryboardReferenceItems.map((reference) => {
+                    const thumbUrl = reference.asset ? selectedAssetImageUrl(reference.asset) || originalAssetImageUrl(reference.asset) : "";
+                    return <button className="storyboard-ref-thumb" key={reference.key} type="button" title={`${reference.label} · 点击移除引用`} aria-label={`移除资产引用：${reference.label}`} onClick={() => void removeStoryboardReference(reference.token, reference.asset)}>
+                      <span className="storyboard-ref-thumb-visual">{thumbUrl ? <img key={thumbUrl} src={thumbUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} /> : <span aria-hidden="true">　</span>}</span>
+                      <span className="storyboard-ref-thumb-remove" aria-hidden="true">×</span>
+                    </button>;
+                  })}{!selectedStoryboardReferenceItems.length && <span>当前分镜尚未关联资产；可从左侧资产库添加。</span>}</div>
                   <div className="prompt-editor-wrap">
-                    {editingStoryboardBody
-                      ? <textarea ref={promptInputRef} value={selectedStoryboardPrompt} onChange={handlePromptInput} onBlur={(event) => selectedStoryboard && savePrompt(selectedStoryboard, event.currentTarget.value)} />
-                      : <div className="storyboard-body-view">{selectedStoryboardPrompt}</div>}
-                    {mentionQuery !== null && (
+                    <textarea ref={promptInputRef} aria-label="编辑当前分镜正文" disabled={busy} value={selectedStoryboardPrompt} placeholder={selectedStoryboard.payload?.["使用回退占位"] === true ? "请填写可核实的具体镜头事实；保存后即可作为手工分镜使用。" : "输入分镜正文；输入 @ 可插入资产变量"} onChange={handlePromptInput} onKeyDown={handlePromptMentionKeys} onBlur={(event) => {
+                      if (selectedStoryboard) void savePrompt(selectedStoryboard, event.currentTarget.value);
+                      setMentionQuery(null);
+                      setMentionRange(null);
+                    }} />
+                    {mentionQuery !== null && mentionRange !== null && (
                       <div className="mention-menu">
-                        <b>引用资产</b>
-                        {mentionOptions.map((asset) => (
-                          <button key={asset.id} onMouseDown={(event) => {
+                        <b>选择资产 · ↑↓ 导航 · Enter 插入 · Esc 关闭</b>
+                        {mentionOptions.map((asset, index) => {
+                          const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
+                          return <button key={asset.id} className={index === activeMentionIndex ? "active" : ""} aria-selected={index === activeMentionIndex} onMouseDown={(event) => {
                             event.preventDefault();
                             insertMention(asset);
                           }}>
-                            <span className={`mention-thumb ${assetThumbClass(asset)}`}></span>
+                            <span className={`mention-thumb ${assetThumbClass(asset)}`}>{thumbUrl ? <img src={thumbUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} /> : <span aria-hidden="true">　</span>}</span>
                             <span><strong>{assetDisplayName(asset)}</strong><small>{assetDisplayVariable(asset)}</small></span>
-                          </button>
-                        ))}
+                          </button>;
+                        })}
                         {!mentionOptions.length && <em>无匹配资产</em>}
                       </div>
                     )}
@@ -1860,11 +2200,14 @@ export function App() {
           </section>
           <aside className={`video-preview${previewPanelCollapsed ? " folded" : ""}`}>
             <div className="preview-tabs"><button className={segmentPanel === "shot-prompt" ? "active" : ""} onClick={() => setSegmentPanel("shot-prompt")}>分镜生成</button><button className={segmentPanel === "shot-history" ? "active" : ""} onClick={() => setSegmentPanel("shot-history")}>任务记录</button></div>
-            {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
-            <div className="video-not-ready compact-note">生成结果尚未产生真实视频；模拟任务不会显示为可播放结果。</div>
+            <div className="preview-content">
+              {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
+              <div className="video-not-ready compact-note">生成结果尚未产生真实视频；模拟任务不会显示为可播放结果。</div>
+            </div>
           </aside>
+          <button type="button" className="workbench-splitter preview-pane-splitter" role="separator" aria-label="调整预览栏宽度" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={getWorkbenchPaneMaxWidth("preview")} aria-valuenow={previewPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("preview", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("preview", event)} />
           <section className="shot-strip">
-            <div className="strip-head"><h3>{storyboards.length} 分镜 · 自动切分，可自由增删改查</h3><div className="strip-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "up")}>上移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "down")}>下移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && deleteStoryboard(selectedStoryboard)}>删除</button></div></div>
+            <div className="strip-head"><h3>{storyboards.length ? storyboards.every((item) => item.payload?.["使用回退占位"] === true) ? `${storyboards.length} 个待分析片段` : `${storyboards.length} 个分镜${storyboards.some((item) => item.payload?.["使用回退占位"] === true) ? "（含待分析片段）" : " · 自动切分"}` : "尚无已分析分镜"}</h3><div className="strip-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "up")}>上移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "down")}>下移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && deleteStoryboard(selectedStoryboard)}>删除</button></div></div>
             <div className="thumb-row">
               {storyboards.map((storyboard) => (
                 <div className="shot-thumb-wrap" key={storyboard.id}><div className={storyboard.id === selectedStoryboard?.id ? "shot-thumb active" : "shot-thumb"} onClick={() => setSelectedStoryboardId(storyboard.id)}><span>{storyboard.title} · {storyboard.time_range}</span><small>{storyboard.status}</small></div><button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button></div>
