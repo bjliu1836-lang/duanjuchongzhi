@@ -37,7 +37,7 @@ MODELS_CONFIG_PATH = CONFIG_DIR / "models.json"
 REMAKE_MODES = {"overseas_localization", "cg_3d", "asset_replacement"}
 ASSET_PROMPT_TEMPLATE_VERSION = "asset-prompt-v3-independent-visual"
 ASSET_SOURCE_SCHEMA_VERSION = "asset-source-snapshot-v2-canonical-reviewed"
-ASSET_LOCALIZATION_SCHEMA_VERSION = "asset-localized-profile-v1"
+ASSET_LOCALIZATION_SCHEMA_VERSION = "asset-localized-profile-v2-source-bound"
 STORYBOARD_STYLE_TEMPLATES = {
     "live_action": "真人实拍电影质感。角色与环境采用真实世界的比例、材质、自然光照及摄影成像，保持原分镜的动作、情绪、站位、构图和运镜；避免三维CG与卡通渲染质感。",
     "cg_3d": "高端三维游戏CG过场动画质感，Unreal Engine 5 cinematic render，Final Fantasy CG style，非摄影式三维网格与数字雕刻材质，PBR材质和电影级三维光照；保持原分镜的动作、情绪、站位、构图和运镜，角色与场景风格统一；避免真人摄影皮肤、照片颗粒与二维插画。",
@@ -259,7 +259,7 @@ def capture_asset_original_frames(project_id: str, episode: dict[str, Any], asse
         command = [ffmpeg, "-y", "-i", str(video_path), "-vf", f"select={expression},showinfo", "-vsync", "0", "-q:v", "2", str(group_dir / "%03d.jpg")]
         process_count += 1
         try:
-            decoded = subprocess.run(command, check=True, capture_output=True, timeout=90, text=True, errors="replace")
+            decoded = subprocess.run(command, check=True, capture_output=True, timeout=90, text=True, encoding="utf-8", errors="replace")
         except (subprocess.SubprocessError, OSError):
             shutil.rmtree(group_dir, ignore_errors=True)
             continue
@@ -633,6 +633,7 @@ def call_compact_video_json_stream(
 
 
 ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT = (CONFIG_DIR / "agents" / "asset_source_extraction.md").read_text(encoding="utf-8")
+ASSET_SOURCE_LEGACY_V2_PROMPT = (CONFIG_DIR / "agents" / "asset_source_extraction_v2.md").read_text(encoding="utf-8")
 ASSET_SOURCE_LEGACY_V1_PROMPT = (CONFIG_DIR / "agents" / "asset_source_extraction_v1.md").read_text(encoding="utf-8")
 ASSET_LOCALIZATION_COMPACT_PROMPT = (CONFIG_DIR / "agents" / "asset_target_localization.md").read_text(encoding="utf-8")
 ASSET_EXTRACTION_COMPACT_PROMPT = ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT
@@ -812,6 +813,70 @@ def upload_episode_to_ark(conn: sqlite3.Connection, episode: dict[str, Any]) -> 
         return {"file_id": "", "status": "upload_failed", "error": error}
 
 
+def project_valid_target_profile_for_asset_view(asset: dict[str, Any], project: dict[str, Any]) -> None:
+    """Project a valid canonical target profile onto legacy UI fields in memory.
+
+    The database payload and source evidence stay untouched. This keeps older
+    UI readers from showing stale target aliases when the profile is canonical.
+    """
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    if str(project.get("target_country") or "").strip() in {"", "中国", "中国大陆"}:
+        return
+    profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
+    if profile.get("status") not in {"complete", "source_review"} or not localized_profile_context_matches(payload, project):
+        return
+
+    asset["payload"] = payload
+    attach_display_variable(asset)
+    old_display_aliases = [
+        str(asset.get("display_variable") or "").strip(),
+        str(payload.get("旧展示资产变量") or "").strip(),
+    ]
+    payload_for_projection = dict(payload)
+    payload_for_projection["资产类型"] = str(asset.get("asset_type") or payload.get("资产类型") or "")
+    projected = project_asset_profile_to_legacy(payload_for_projection, project)
+    for key, value in projected.items():
+        if key.startswith("本地化") or key in {"角色资产图结构化描述", "场景资产图生成提示词", "道具资产图生成提示词"}:
+            payload[key] = value
+
+    if str(asset.get("asset_type") or "") == "角色":
+        canonical_description = localized_role_reference_appearance(payload, profile)
+    else:
+        canonical_description = str(profile.get("coreDescription") or profile.get("visualDescription") or "").strip()
+    if canonical_description:
+        payload["当前目标画像描述"] = canonical_description
+
+    current_child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
+    projected_child = projected.get("当前子资产") if isinstance(projected.get("当前子资产"), dict) else {}
+    child_target_keys = {key for key in projected_child if key.startswith("本地化") or key == "角色资产图结构化描述"}
+    for key in child_target_keys:
+        current_child[key] = projected_child[key]
+    payload["当前子资产"] = current_child
+
+    child_id = str(profile.get("childId") or payload.get("sourceSnapshot", {}).get("childId") or current_child.get("子资产编号") or "").strip()
+    children = payload.get("子资产")
+    if child_id and isinstance(children, list):
+        for child in children:
+            if not isinstance(child, dict) or str(child.get("子资产编号") or child.get("childId") or "").strip() != child_id:
+                continue
+            for key in child_target_keys:
+                if key in projected_child:
+                    child[key] = projected_child[key]
+            break
+
+    user_name = explicit_user_localized_name(payload)
+    canonical_name = user_name or str(profile.get("localizedName") or "").strip()
+    if canonical_name:
+        asset["localized_name"] = canonical_name
+    aliases = payload.get("历史展示变量别名") if isinstance(payload.get("历史展示变量别名"), list) else []
+    for alias in old_display_aliases:
+        if alias and alias not in aliases:
+            aliases.append(alias)
+    if aliases:
+        payload["历史展示变量别名"] = aliases
+    asset["payload"] = payload
+
+
 def get_asset_response(conn: sqlite3.Connection, project_id: str, asset_id: str) -> dict[str, Any]:
     project = get_project_or_404(conn, project_id)
     asset = row_to_dict(
@@ -823,6 +888,7 @@ def get_asset_response(conn: sqlite3.Connection, project_id: str, asset_id: str)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     asset["payload"] = enrich_asset_payload_urls(json.loads(asset.pop("payload_json")))
+    project_valid_target_profile_for_asset_view(asset, project)
     source_description = asset_source_description(asset["asset_type"], asset["payload"])
     asset["payload"].setdefault("原片资产描述", source_description or "原片描述未留存")
     asset["payload"].setdefault("目标生成描述", "")
@@ -837,6 +903,10 @@ def get_asset_response(conn: sqlite3.Connection, project_id: str, asset_id: str)
     asset["payload"]["当前有效外观描述"] = effective["description"]
     asset["payload"]["当前有效资产名"] = effective["name"]
     asset["payload"]["当前有效资产就绪"] = effective["ready"]
+    asset["payload"]["generationInProgress"] = conn.execute(
+        "SELECT 1 FROM asset_generation_jobs WHERE project_id=? AND asset_id=? AND status='running' LIMIT 1",
+        (project_id, asset_id),
+    ).fetchone() is not None
     prepare_asset_prompt_fields(asset, project)
     attach_display_variable(asset)
     images = rows_to_dicts(
@@ -917,6 +987,122 @@ def normalize_asset_visual_override(text: str, existing: str = "") -> tuple[str,
     return value, True
 
 
+def localized_role_reference_appearance(payload: dict[str, Any], profile: dict[str, Any]) -> str:
+    """Compile a static appearance summary for storyboard references.
+
+    Full asset-sheet prompts and temporary wear/action beats do not belong in a
+    shot's target-appearance context. The source/profile records remain intact;
+    this is only the read-time reference summary.
+    """
+    structure = profile.get("structuredDescription") if isinstance(profile.get("structuredDescription"), dict) else {}
+    section_fields = (
+        ("基础设定", ("性别", "视觉年龄", "身份定位", "族裔外貌")),
+        ("脸部特征", ("目标族裔背景", "脸型", "骨相", "眉形", "眼形", "虹膜颜色", "鼻形", "唇形", "妆感", "皮肤肤色", "皮肤质感")),
+        ("发型", ("发型名称", "发色", "长度", "刘海 / 分线", "发丝质感")),
+        ("身材体态", ("体型", "肩颈", "腰腿", "整体体态")),
+        ("服装", ("服装等级", "场合", "主色", "副色", "点缀色", "内衬", "中间层", "外层", "领型", "袖型", "腰线", "衣长", "下装", "摆型", "拖尾程度", "摆与地面关系", "鞋子", "面料", "纹样", "纹样位置", "结构与廓形", "工艺与重工程度", "穿着状态")),
+    )
+    parts: list[str] = []
+    for section_name, fields in section_fields:
+        section = structure.get(section_name) if isinstance(structure.get(section_name), dict) else {}
+        for field in fields:
+            value = str(section.get(field) or "").strip()
+            if not value:
+                continue
+            if section_name == "服装" and field == "穿着状态":
+                value = stable_wear_state_text(value)
+            if value:
+                parts.append(f"{field}：{value}")
+    if structure:
+        accessories = fixed_worn_accessory_observations(payload, {}, structure)
+        if accessories:
+            parts.append("固定穿戴配饰：" + "、".join(accessories))
+    user_appearance = role_asset_prompt_user_appearance(
+        str(payload.get("用户编辑资产图生成提示词") or ""), profile
+    )
+    if user_appearance:
+        parts.append("用户指定目标外观：" + user_appearance)
+    if parts:
+        return "；".join(parts)
+    return stable_wear_state_text(str(profile.get("coreDescription") or profile.get("visualDescription") or "").strip()) or user_appearance
+
+
+def role_asset_prompt_user_appearance(prompt: str, profile: dict[str, Any] | None = None) -> str:
+    """Extract an explicit appearance supplement without copying sheet layout/style."""
+    value = str(prompt or "").strip()
+    if not value:
+        return ""
+    marker = "【用户指定目标外观覆盖】"
+    if marker in value:
+        value = value.split(marker, 1)[1]
+        for end_marker in ("\n优先于同字段", "\n【共同展示构图】", "\n【目标视觉风格】", "\n固定约束"):
+            value = value.split(end_marker, 1)[0]
+    elif "【服装】" in value or "【发型】" in value or "【脸部特征】" in value:
+        # A user may edit the generated full prompt (for example, changing a
+        # white dress to red). Extract only changed appearance fields so the
+        # storyboard gets the edit without inheriting the asset-sheet layout.
+        structure = profile.get("structuredDescription") if isinstance(profile, dict) and isinstance(profile.get("structuredDescription"), dict) else {}
+        allowed_sections = {"基础设定", "脸部特征", "发型", "身材体态", "服装"}
+        layout_sections = {"共同展示构图", "目标视觉风格", "服装文字约束"}
+        field_values: list[str] = []
+        current_section = ""
+        for line in value.splitlines():
+            heading = re.fullmatch(r"\s*【([^】]+)】\s*", line)
+            if heading:
+                section_name = heading.group(1).strip()
+                current_section = section_name if section_name in allowed_sections else ""
+                if section_name in layout_sections:
+                    current_section = ""
+                continue
+            if not current_section:
+                continue
+            field = re.match(r"\s*([^：:]+)[：:]\s*(.*?)\s*$", line)
+            if not field:
+                continue
+            key, candidate_value = field.group(1).strip(), field.group(2).strip()
+            if not candidate_value or key in {"国家 / 时代", "角色名称", "目标语言"}:
+                continue
+            baseline_section = structure.get(current_section) if isinstance(structure.get(current_section), dict) else {}
+            if key not in baseline_section:
+                continue
+            baseline = str(baseline_section.get(key) or "").strip()
+            if candidate_value != baseline:
+                field_values.append(f"{current_section}.{key}：{candidate_value}")
+        value = "；".join(field_values)
+        if not value:
+            return ""
+    elif re.search(r"(?i)four[- ]view|front side back|single[- ]row grid|multi[- ]view layout|三视图|四视图|三面视图", value):
+        return ""
+    value = value.replace(CG_ROLE_FIXED_TEMPLATE, "")
+    value = re.sub(r"(?is)\[Style & Render\].*?(?=\n\[|$)", "", value)
+    value = re.sub(r"(?is)\[3D Surface Shader\].*?(?=\n\[|$)", "", value)
+    value = re.sub(r"(?is)\[Layout & Light\].*?(?=\n\[|$)", "", value)
+    value = re.sub(r"(?is)【共同展示构图】.*", "", value)
+    value = re.sub(r"(?is)【目标视觉风格】.*", "", value)
+    value = re.sub(r"(?is)固定约束.*", "", value)
+    return re.sub(r"\s+", " ", value).strip(" \t\r\n，,、；;：:")
+
+
+def strip_resolved_source_review_status_block(prompt: str, profile: dict[str, Any]) -> str:
+    """Remove only a stale system banner after every named review path resolves."""
+    value = str(prompt or "")
+    marker = "【源事实待核对：自动生图已锁定】"
+    if marker not in value or profile.get("status") != "complete":
+        return value
+    before, remainder = value.split(marker, 1)
+    line, separator, after = remainder.partition("\n")
+    if not line.strip() and separator:
+        line, separator, after = after.partition("\n")
+    paths = [item.strip() for item in re.split(r"[、,，]", line.strip()) if item.strip()]
+    if not paths:
+        return value
+    blocking = set(str(item).strip() for item in (profile.get("sourceReviewPaths") or profile.get("needsReview") or []) if str(item).strip())
+    non_blocking = set(str(item).strip() for item in (profile.get("nonBlockingSourceReviewPaths") or []) if str(item).strip())
+    if any(path in blocking and path not in non_blocking for path in paths):
+        return value
+    return (before.rstrip() + ("\n" + after if separator else "")).strip()
+
+
 def resolve_effective_asset_reference(
     asset: dict[str, Any], project: dict[str, Any], selected_image: sqlite3.Row | dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -930,11 +1116,13 @@ def resolve_effective_asset_reference(
     manual_prompt = str(payload.get("用户编辑资产图生成提示词") or "").strip()
     localized_profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
     overseas = str(project.get("target_country") or "").strip() not in {"", "中国", "中国大陆"}
+    target_profile_status = str(localized_profile.get("status") or "")
     if overseas:
-        if localized_profile.get("status") == "complete" and localized_profile_context_matches(payload, project):
-            target_description = str(localized_profile.get("coreDescription") or localized_profile.get("visualDescription") or "").strip()
-        elif manual_prompt:
-            target_description = manual_prompt
+        if target_profile_status in {"complete", "source_review"} and localized_profile_context_matches(payload, project):
+            if asset_type == "角色":
+                target_description = localized_role_reference_appearance(payload, localized_profile)
+            else:
+                target_description = str(localized_profile.get("coreDescription") or localized_profile.get("visualDescription") or "").strip()
         else:
             target_description = explicit_user_visual_lock(payload)
     replacement_enabled = mode == "asset_replacement" and (
@@ -955,16 +1143,21 @@ def resolve_effective_asset_reference(
         ready = bool(source_image_path and source_description != "原片描述未留存")
     else:
         candidate = dict(selected_image) if selected_image else None
-        image_path = str(candidate["file_path"]) if candidate else ("" if mode == "asset_replacement" and replacement_enabled else source_image_path)
+        source_review_draft = overseas and target_profile_status == "source_review"
+        # A source frame is evidence for review, never an implicit target
+        # identity image in an overseas project.
+        image_path = str(candidate["file_path"]) if candidate else ("" if overseas or (mode == "asset_replacement" and replacement_enabled) else source_image_path)
         image_id = str(candidate["id"]) if candidate else ""
         candidate_payload = json.loads(candidate["payload_json"]) if candidate and candidate.get("payload_json") else {}
         image_source = str(candidate_payload.get("source") or ("project_source_frame" if image_path == source_image_path and image_path else ""))
         description = target_description or (source_description if not overseas else "")
         name = str(asset.get("localized_name") or asset.get("name") or "")
+        if source_review_draft:
+            effective_source = "target_draft"
         if mode == "asset_replacement" and replacement_enabled:
-            ready = bool(candidate)
+            ready = bool(candidate) and not source_review_draft
         else:
-            ready = bool(image_path and description and description != "原片描述未留存")
+            ready = bool(image_path and description and description != "原片描述未留存") and not source_review_draft
     return {
         "effectiveAssetSource": effective_source,
         "description": description,
@@ -1001,14 +1194,54 @@ def enforce_role_cg_fixed_suffix(prompt: str, asset_type: str, project: dict[str
     return f"{without_template}{suffix}"
 
 
+def build_group_portrait_asset_prompt(
+    asset: dict[str, Any], project: dict[str, Any], target_country: str, target_language: str
+) -> str:
+    """Compile observed crowd facts into a target-country group prompt."""
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    source = payload.get("sourceSnapshot") if isinstance(payload.get("sourceSnapshot"), dict) else {}
+    child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
+    observed_parts = (
+        str(source.get("coreDescription") or "").strip(),
+        str(source.get("visualDescription") or "").strip(),
+        str(source.get("groupDescription") or "").strip(),
+        str(child.get("原剧角色描述") or child.get("原剧视觉形象描述") or "").strip(),
+        str(payload.get("原剧角色描述") or payload.get("原剧视觉形象描述") or "").strip(),
+    )
+    observed = "；".join(dict.fromkeys(value for value in observed_parts if value))
+    if not observed:
+        return ""
+    # Keep source-observed crowd composition and clothing while translating
+    # source-region appearance labels through the selected target country.
+    observed = re.sub(r"(?:黄皮肤?|黄种人|亚洲人|东亚人|中国(?:大陆)?当代|当代中国|中国(?:大陆)?人外貌)", "", observed)
+    observed = re.sub(r"[，,；;、\s]{2,}", "，", observed).strip("，,；;、 ")
+    name = str(asset.get("localized_name") or asset.get("name") or source.get("name") or "群像")
+    target_look = localized_ethnicity_text(target_country, observed + " 群像", "群像人物")
+    _, _, style = asset_prompt_context(project)
+    style_text = CG_ROLE_FIXED_TEMPLATE if style == "cg_3d" else ROLE_LIVE_STYLE
+    group_layout = (
+        "展示构图：左侧为整组多人正面胸像，右侧为同一组人物的正面、右侧面90°、背面全身视图；所有视图中的组内人数、人物顺序、服装与人物关系保持一致，不把每名群像人物复制成各自独立的单人四视图。白色干净背景，无文字、无水印、无logo。"
+        if style == "cg_3d" else
+        "展示构图：单幅完整多人群像构图，人物自然站立并保持源观察所示的相对位置；不拆成单人视图，不新增未记录的人物或道具。白色干净背景，无文字、无水印、无logo。"
+    )
+    prompt = (
+        f"【群像角色资产图】\n资产名称：{name}\n目标国家：{target_country}\n目标语言：{target_language}\n"
+        f"源视频已记录的群像事实：{observed}\n"
+        f"目标群像外貌指导：{target_look}。仅将明确的外貌地域特征按目标国家转写；保留已记录的人数、性别构成、年龄范围、服装、动作、构图与人物关系，不补造未记录的个体身份或细节。群像人数遵循已记录的源观察；若源资料未注明具体人数，不强行指定确切人数。\n\n"
+        f"【共同展示构图】\n{group_layout}\n\n"
+        f"【目标视觉风格】\n{style_text}"
+    )
+    return enforce_role_cg_fixed_suffix(prompt, "角色", project)
+
+
 def build_project_asset_prompt(asset_type: str, payload: dict[str, Any], project: dict[str, Any]) -> str:
     payload = project_asset_profile_to_legacy(payload, project)
-    mode = str(project.get("remake_mode") or "overseas_localization")
-    if mode == "asset_replacement" and ((asset_type == "角色" and not project.get("replace_characters")) or (asset_type == "场景" and not project.get("replace_scenes"))):
-        return "当前资产沿用原片外观与原片资产图；不使用历史目标候选。"
-    if mode == "asset_replacement" and payload.get("目标资产来源") == "沿用原貌":
-        return "当前资产沿用原片外观与原片资产图；不使用历史目标候选。"
     target_country, target_language, style = asset_prompt_context(project)
+    asset = {"asset_type": asset_type, "payload": payload, "name": payload.get("原剧角色名称") or payload.get("原剧资产名称") or ""}
+    if is_group_portrait_asset(asset):
+        group_prompt = build_group_portrait_asset_prompt(asset, project, target_country, target_language)
+        if group_prompt:
+            return group_prompt
     prompt = infer_asset_image_prompt(
         asset_type,
         payload,
@@ -1023,23 +1256,24 @@ def build_project_asset_prompt(asset_type: str, payload: dict[str, Any], project
 def prepare_asset_prompt_fields(asset: dict[str, Any], project: dict[str, Any]) -> None:
     payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
     target_country = str(project.get("target_country") or "").strip()
+    refresh_role_source_review_profile(payload)
     profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
     source_review = target_country not in {"", "中国", "中国大陆"} and profile.get("status") == "source_review" and localized_profile_context_matches(payload, project)
     pending = target_country not in {"", "中国", "中国大陆"} and (
         profile.get("status") != "complete" or not localized_profile_context_matches(payload, project)
     )
+    compiled_prompt = build_project_asset_prompt(asset.get("asset_type", ""), payload, project)
+    group_asset = is_group_portrait_asset(asset)
     automatic = (
-        build_project_asset_prompt(asset.get("asset_type", ""), payload, project)
-        + "\n\n【源事实待核对：自动生图已锁定】\n"
-        + "、".join(profile.get("sourceReviewPaths") or profile.get("needsReview") or [])
-        if source_review else "目标画像待本地化；当前旧资产共享描述不能作为目标提示词。"
-        if pending else build_project_asset_prompt(asset.get("asset_type", ""), payload, project)
+        compiled_prompt
+        if source_review or (pending and group_asset and compiled_prompt.strip())
+        else "目标画像待本地化；当前旧资产共享描述不能作为目标提示词。"
+        if pending else compiled_prompt
     )
-    if source_review:
-        automatic = enforce_role_cg_fixed_suffix(automatic, asset.get("asset_type", ""), project)
     payload["目标画像状态"] = "待源事实核对" if source_review else "待本地化" if pending else "已就绪"
     payload["自动编译资产图生成提示词"] = automatic
     final_prompt = str(payload.get("用户编辑资产图生成提示词") or automatic)
+    final_prompt = strip_resolved_source_review_status_block(final_prompt, profile)
     payload["最终资产图生成提示词"] = (
         final_prompt
         if pending and not source_review and not str(payload.get("用户编辑资产图生成提示词") or "").strip()
@@ -1049,7 +1283,11 @@ def prepare_asset_prompt_fields(asset: dict[str, Any], project: dict[str, Any]) 
 
 
 def route_project_agent_prompt(agent: dict[str, Any], project: dict[str, Any], storyboard: bool = False) -> None:
-    if (project.get("remake_mode") or "overseas_localization") == "overseas_localization":
+    target_country = str(project.get("target_country") or "").strip()
+    target_language = str(project.get("target_language") or "").strip()
+    country_requires_localization = target_country not in {"", "中国", "中国大陆"}
+    language_requires_localization = target_language not in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译", "中文"}
+    if country_requires_localization or language_requires_localization:
         return
     source_language = project.get("source_language") or "原片语言（具体语言未知时也保持原片语言，不翻译）"
     route = (
@@ -1152,6 +1390,28 @@ def role_prompt_field(payload: dict[str, Any], child: dict[str, Any], section: s
     if not usable_visual_value(value):
         value = ""
     return strip_role_nonwearable_items(value or infer_role_prompt_field(payload, child, section, field))
+
+
+def stable_wear_state_text(value: str) -> str:
+    """Render stable wardrobe state without temporary action clauses.
+
+    This is a display-only projection. Source snapshots and localized profiles
+    remain unchanged so the original action observation stays auditable.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    dynamic_clause_markers = (
+        "后被", "随后", "之后", "然后", "暂时", "短暂", "正在", "动作中",
+        "掀开", "掀起", "撩起", "脱下", "脱去", "换上", "换下", "露出腹部",
+    )
+    clauses = re.split(r"(?<=[，,；;。])|[\r\n]+", text)
+    stable = [
+        clause.strip(" ，,；;。\t")
+        for clause in clauses
+        if clause.strip(" ，,；;。\t") and not any(marker in clause for marker in dynamic_clause_markers)
+    ]
+    return "，".join(stable)
 
 
 def role_context_text(payload: dict[str, Any], child: dict[str, Any]) -> str:
@@ -1281,7 +1541,41 @@ def localized_role_prompt_field(
 
 def localized_visual_anchor_text(payload: dict[str, Any], child: dict[str, Any], target_country: str) -> str:
     visual = pick_payload_text(child, ["本地化视觉形象描述", "本地化子资产描述"]) or pick_payload_text(payload, ["本地化核心形象描述"])
-    return visual
+    return stable_wear_state_text(visual)
+
+
+def fixed_worn_accessory_observations(payload: dict[str, Any], child: dict[str, Any], structure: dict[str, Any]) -> list[str]:
+    clothing = structure.get("服装") if isinstance(structure.get("服装"), dict) else {}
+    values: list[str] = []
+    for candidate in (child.get("固定穿戴配饰"), clothing.get("固定穿戴配饰"), structure.get("固定穿戴配饰")):
+        if isinstance(candidate, list):
+            values.extend(str(item).strip() for item in candidate if str(item).strip())
+        elif isinstance(candidate, str) and candidate.strip():
+            values.append(candidate.strip())
+    if values:
+        return list(dict.fromkeys(values))
+    reviewed = payload.get("sourceFactReview") if isinstance(payload.get("sourceFactReview"), dict) else {}
+    if reviewed.get("status") == "reviewed":
+        for item in reviewed.get("fixedWornAccessories", []) if isinstance(reviewed.get("fixedWornAccessories"), list) else []:
+            if isinstance(item, dict) and str(item.get("value") or "").strip():
+                values.append(str(item["value"]).strip())
+        if values:
+            return list(dict.fromkeys(values))
+    source = payload.get("sourceSnapshot") if isinstance(payload.get("sourceSnapshot"), dict) else {}
+    source_child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
+    observations = " ".join((
+        str(source.get("coreDescription") or ""),
+        str(source_child.get("原剧视觉形象描述") or ""),
+        str(source_child.get("原剧核心形象描述") or ""),
+    ))
+    # Recover only explicit wear/attachment language from the stored source
+    # observation. Carrying and handheld objects are intentionally excluded.
+    for clause in re.split(r"[，,；;。\n]", observations):
+        clause = clause.strip()
+        if clause and any(term in clause for term in ("佩戴", "别着", "别在", "系着", "戴着")):
+            if not any(term in clause for term in ("手持", "手拿", "携带", "肩扛", "背着")):
+                values.append(clause)
+    return list(dict.fromkeys(values))
 
 
 def role_gender_prompt_text(payload: dict[str, Any], child: dict[str, Any]) -> str:
@@ -1463,20 +1757,31 @@ def build_role_asset_image_prompt(
     structure = structure if isinstance(structure, dict) else {}
     clothing = structure.get("服装") if isinstance(structure.get("服装"), dict) else {}
     era = role_prompt_field(payload, child, "基础设定", "国家 / 时代 / 朝代")
-    fixed_accessories = child.get("固定穿戴配饰") or clothing.get("固定穿戴配饰") or structure.get("固定穿戴配饰") or []
+    fixed_accessories = fixed_worn_accessory_observations(payload, child, structure)
     if isinstance(fixed_accessories, str):
         fixed_accessories = [fixed_accessories]
     fixed_accessories_text = "、".join(strip_role_nonwearable_items(str(item).strip()) for item in fixed_accessories if str(item).strip()) if isinstance(fixed_accessories, list) else ""
     if not fixed_accessories_text:
         fixed_accessories_text = "无明确固定穿戴配饰"
+    profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
+    unobservable_paths = profile.get("nonBlockingSourceReviewPaths") if isinstance(profile.get("nonBlockingSourceReviewPaths"), list) else []
+    unobservable_clothing = [path for path in unobservable_paths if path in UNOBSERVABLE_LOWER_BODY_PATHS]
+    unobservable_clothing_block = (
+        "\n\n【源画面未观察到的下半身细节】\n"
+        f"原片下半身细节未显示或被遮挡，未确认字段：{'、'.join(unobservable_clothing)}。这些内容继续保持未知，不得把推测写成原片事实；完整角色展示只做与已确认服装颜色和场合相协调的低强调、中性延展，不突出具体裙长、摆型、拖尾、裙摆落地关系或鞋型。"
+        if unobservable_clothing else ""
+    )
     drape_tier = role_clothing_tier(payload, child) or "按已记录的摆型、拖尾程度与地面关系呈现，不额外增加拖尾"
     covered_foot_ceremony = drape_tier == "高位典礼遮鞋"
     garment_length_text = "外袍下摆连续垂至地面并覆盖全部脚部" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "衣长", target_country)
     lower_garment_text = "内层裤装与鞋履完整隐藏于袍摆内，不从开衩或侧视角露出" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "下装", target_country)
     hem_relation_text = localized_role_prompt_field(payload, child, "服装", "摆与地面关系", target_country)
+    hidden_by_explicit_hem = footwear_hidden_by_garment(structure)
     if covered_foot_ceremony:
         hem_relation_text = "前、侧、背外袍下摆连续触地，完整覆盖鞋履与脚踝；保留完整袍摆画幅，不露鞋尖或鞋面。" + hem_relation_text
-    shoe_text = "鞋履仅作衣摆内的穿着事实，不呈现鞋型、鞋面或鞋尖" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "鞋子", target_country)
+    elif hidden_by_explicit_hem:
+        hem_relation_text = "已确认长裙衣摆遮住鞋面与脚踝；资产图不展示未知鞋型。" + hem_relation_text
+    shoe_text = "鞋履被已确认长裙衣摆遮挡，源鞋款未知，不展示鞋型、鞋面或鞋尖" if hidden_by_explicit_hem else "鞋履仅作衣摆内的穿着事实，不呈现鞋型、鞋面或鞋尖" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "鞋子", target_country)
     shoe_visibility_text = "完全被袍摆遮挡，不露鞋面或鞋尖" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "鞋面可见性", target_country)
     ankle_visibility_text = "完全被袍摆遮挡，不露脚踝" if covered_foot_ceremony else localized_role_prompt_field(payload, child, "服装", "脚踝可见性", target_country)
     display_constraint = role_display_constraint(drape_tier)
@@ -1552,12 +1857,13 @@ def build_role_asset_image_prompt(
 纹样位置：{localized_role_prompt_field(payload, child, "服装", "纹样位置", target_country)}
 结构与廓形：{localized_role_prompt_field(payload, child, "服装", "结构与廓形", target_country)}
 工艺与重工程度：{localized_role_prompt_field(payload, child, "服装", "工艺与重工程度", target_country)}
-穿着状态：{localized_role_prompt_field(payload, child, "服装", "穿着状态", target_country)}
+穿着状态：{stable_wear_state_text(localized_role_prompt_field(payload, child, "服装", "穿着状态", target_country))}
 拖尾分级：{drape_tier}
 固定穿戴配饰：{fixed_accessories_text}。不添加手持物、武器或腰间悬挂物；此人物服装与发型只采用当前子资产这一套主视觉。
 
 【服装文字约束】
 {role_clothing_text_constraints(payload, child, target_language)}
+{unobservable_clothing_block}
 
 {override_block}
 
@@ -1597,7 +1903,11 @@ def make_display_variable(asset: dict[str, Any]) -> str:
     payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
     child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
     asset_type = str(asset.get("asset_type") or "")
-    base = compact_asset_token_part(str(asset.get("localized_name") or asset.get("name") or ""))
+    localized_name = str(asset.get("localized_name") or "").strip()
+    if localized_name.lower().startswith("unnamed"):
+        localized_name = ""
+    base_source = localized_name or str(asset.get("name") or payload.get("sourceSnapshot", {}).get("name") or "")
+    base = compact_asset_token_part(base_source)
     variant_source = pick_payload_text(child, ["差异标签", "本地化子资产名称", "原剧子资产名称"])
     variant = compact_asset_token_part(remove_duplicate_asset_prefix(str(asset.get("localized_name") or asset.get("name") or ""), variant_source))
     if asset_type in {"角色", "场景"} and variant and variant != base:
@@ -1613,7 +1923,9 @@ def make_display_variable(asset: dict[str, Any]) -> str:
 def attach_display_variable(asset: dict[str, Any]) -> dict[str, Any]:
     payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
     display_variable = payload.get("展示资产变量") if isinstance(payload.get("展示资产变量"), str) else ""
-    if not display_variable or "_" in display_variable or len(display_variable) > 48:
+    if not display_variable or "_" in display_variable or len(display_variable) > 48 or display_variable.lower().startswith("@unnamed"):
+        if display_variable and display_variable != make_display_variable(asset):
+            payload.setdefault("旧展示资产变量", display_variable)
         display_variable = make_display_variable(asset)
     asset["display_variable"] = display_variable
     payload["展示资产变量"] = display_variable
@@ -1621,37 +1933,116 @@ def attach_display_variable(asset: dict[str, Any]) -> dict[str, Any]:
     return asset
 
 
+# 归并主键规范化白名单：只含机位噪音（纯拍摄方式描述，不构成本体身份）。
+# 状态变体（常服/战斗服/夜景/受损/带血/带汗等）与功能词（计时牌/广告屏等）、
+# 颜色材质、位置词（场边/远端/看台等）一律不在名单内——宁可错拆，不可错并。
+ASSET_MAIN_KEY_CAMERA_TOKENS = (
+    "近景特写",
+    "大全景",
+    "低角度俯拍",
+    "高角度俯拍",
+    "低角度",
+    "高角度",
+    "全景",
+    "近景",
+    "远景",
+    "中景",
+    "特写",
+    "俯拍",
+    "仰拍",
+)
+# 场景空间分区后缀：同一物理场馆的不同机位区域（替补席/场边/看台等）应归并到
+# 同一主资产场馆，分区信息由子资产差异维度承载。
+ASSET_MAIN_KEY_SCENE_ZONE_SUFFIXES = (
+    "场边/替补席区域",
+    "场边替补席区域",
+    "替补席区域",
+    "场边区域",
+    "看台区域",
+    "顶棚区域",
+    "悬挂区域",
+    "休息区域",
+    "通道区域",
+)
+# 括号内纯机位噪音（如“电子记分牌（近景特写）”）可整体剥离；括号内容只要含
+# 非机位词（位置/状态/功能）就整体保留。
+ASSET_MAIN_KEY_SEPARATOR_CHARS = "、，,/ "
+
+
+def _strip_trailing_camera_parenthetical(text: str) -> tuple[str, list[str]]:
+    """剥离尾部括号内的纯机位噪音修饰；返回（剩余文本, 剥离记录）。"""
+    match = re.search(r"[（(]([^（）()]*)[）)]\s*$", text)
+    if not match:
+        return text, []
+    inner = match.group(1).strip()
+    tokens = [part.strip() for part in re.split(r"[、，,/]", inner) if part.strip()]
+    camera_set = set(ASSET_MAIN_KEY_CAMERA_TOKENS)
+    if tokens and all(token in camera_set for token in tokens):
+        return text[: match.start()].strip(), [f"（{inner}）"]
+    return text, []
+
+
+def normalize_asset_main_key_text(asset_type: str, text: str) -> tuple[str, list[str]]:
+    """规范化归并主键的身份文本：剥离封闭白名单内的机位噪音（全类型，含尾部
+    纯机位括号注释），场景资产额外剥离空间分区后缀。返回（规范化文本, 剥离修饰列表）。
+    剥离结果为空时回退原文并丢弃全部剥离记录，保证不因过度剥离而错并。"""
+    result = text.strip()
+    if not result:
+        return text, []
+    stripped: list[str] = []
+    result, parenthetical_stripped = _strip_trailing_camera_parenthetical(result)
+    stripped.extend(parenthetical_stripped)
+    changed = True
+    while changed:
+        changed = False
+        for token in sorted(ASSET_MAIN_KEY_CAMERA_TOKENS, key=len, reverse=True):
+            if result.startswith(token) and len(result) > len(token) + 1:
+                result = result[len(token):].strip(ASSET_MAIN_KEY_SEPARATOR_CHARS)
+                stripped.append(token)
+                changed = True
+            if result.endswith(token) and len(result) > len(token) + 1:
+                result = result[:-len(token)].strip(ASSET_MAIN_KEY_SEPARATOR_CHARS)
+                stripped.append(token)
+                changed = True
+    if asset_type == "场景":
+        changed = True
+        while changed:
+            changed = False
+            for zone in sorted(ASSET_MAIN_KEY_SCENE_ZONE_SUFFIXES, key=len, reverse=True):
+                if result.endswith(zone) and len(result) > len(zone) + 1:
+                    result = result[:-len(zone)].strip(ASSET_MAIN_KEY_SEPARATOR_CHARS)
+                    stripped.append(zone)
+                    changed = True
+    if not result:
+        return text, []
+    return result, stripped
+
+
 def asset_project_main_key(asset: dict[str, Any]) -> str:
     payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
     child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
     asset_type = str(asset.get("asset_type") or "")
+    source_name = str(asset.get("name") or "").strip()
     if asset_type == "角色":
-        source = " ".join(
-            value
-            for value in [
-                str(asset.get("localized_name") or asset.get("name") or ""),
-                pick_payload_text(payload, ["本地化角色名称", "原剧角色名称", "剧情身份", "稳定人设定位"]),
-            ]
-            if value
-        )
+        identity_fields = ["原剧角色名称", "剧情身份", "稳定人设定位"]
     elif asset_type == "场景":
-        source = " ".join(
-            value
-            for value in [
-                str(asset.get("localized_name") or asset.get("name") or ""),
-                pick_payload_text(payload, ["本地化场景名称", "原剧场景名称", "空间结构描述"]),
-            ]
-            if value
-        )
+        identity_fields = ["原剧场景名称", "空间结构描述"]
     else:
-        source = " ".join(
-            value
-            for value in [
-                str(asset.get("localized_name") or asset.get("name") or ""),
-                pick_payload_text(payload, ["本地化道具名称", "原剧道具名称", "剧情功能"]),
-            ]
-            if value
-        )
+        identity_fields = ["原剧道具名称", "剧情功能"]
+    # 逐字段剥离机位噪音/场景分区后缀；描述性字段（剧情身份/功能/空间结构）保持原样。
+    normalized_name, stripped = normalize_asset_main_key_text(asset_type, source_name)
+    normalized_identity, identity_stripped = normalize_asset_main_key_text(
+        asset_type, pick_payload_text(payload, identity_fields[:1])
+    ) if identity_fields else ("", [])
+    stripped.extend(identity_stripped)
+    source = " ".join(dict.fromkeys(
+        value
+        for value in [normalized_name, normalized_identity or pick_payload_text(payload, identity_fields)]
+        if value
+    ))
+    if stripped:
+        payload["归并规范化"] = {"原始身份文本": " ".join(dict.fromkeys(v for v in [source_name, pick_payload_text(payload, identity_fields)] if v)), "规范化身份文本": source, "剥离修饰": stripped}
+        asset["payload"] = payload
     compacted = significant_asset_text(source) or significant_asset_text(str(asset.get("variable") or asset.get("id") or "asset"))
     return f"{asset_type}:{compacted[:96]}"
 
@@ -1663,8 +2054,8 @@ def asset_project_variant_key(asset: dict[str, Any]) -> str:
         " ".join(
             value
             for value in [
-                pick_payload_text(child, ["差异类型", "差异标签", "本地化子资产名称", "原剧子资产名称", "状态差异"]),
-                pick_payload_text(payload, ["本地化道具名称", "原剧道具名称"]),
+                pick_payload_text(child, ["差异类型", "差异标签", "原剧子资产名称", "状态差异"]),
+                pick_payload_text(payload, ["原剧道具名称"]),
             ]
             if value
         )
@@ -1685,18 +2076,50 @@ def annotate_project_asset_keys(asset: dict[str, Any], episode_index: int | None
     return asset
 
 
-def variable_maps(assets: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-    old_to_display: dict[str, str] = {}
-    by_any_variable: dict[str, dict[str, Any]] = {}
+def ensure_unique_asset_display_variables(assets: list[dict[str, Any]]) -> None:
     for asset in assets:
         attach_display_variable(asset)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for asset in assets:
+        grouped.setdefault(str(asset.get("display_variable") or ""), []).append(asset)
+    for display, matches in grouped.items():
+        if len(matches) < 2:
+            continue
+        for asset in matches:
+            payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+            stable_suffix = compact_asset_token_part(str(asset.get("variable") or asset.get("id") or "Asset")) or "Asset"
+            unique_display = f"{display[:max(1, 62 - len(stable_suffix))]}-{stable_suffix}"
+            if display and payload.get("旧展示资产变量") != display:
+                payload["旧展示资产变量"] = display
+            payload["展示资产变量"] = unique_display
+            asset["display_variable"] = unique_display
+            asset["payload"] = payload
+
+
+def variable_maps(assets: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    ensure_unique_asset_display_variables(assets)
+    old_to_display: dict[str, str] = {}
+    by_any_variable: dict[str, dict[str, Any]] = {}
+    alias_candidates: dict[str, list[dict[str, Any]]] = {}
+    for asset in assets:
         old_variable = str(asset.get("variable") or "")
         display_variable = str(asset.get("display_variable") or "")
         if old_variable and display_variable:
             old_to_display[old_variable] = display_variable
-        for key in [old_variable, display_variable]:
-            if key:
-                by_any_variable[key] = asset
+            by_any_variable[old_variable] = asset
+        if display_variable:
+            by_any_variable[display_variable] = asset
+        payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+        for alias in (payload.get("旧展示资产变量"), asset.get("source_variable_alias"), payload.get("源变量别名")):
+            alias_text = str(alias or "").strip()
+            if alias_text and alias_text not in {old_variable, display_variable}:
+                alias_candidates.setdefault(alias_text, []).append(asset)
+    for alias, candidates in alias_candidates.items():
+        unique_candidates = {str(item.get("id") or item.get("variable") or id(item)): item for item in candidates}
+        if len(unique_candidates) == 1:
+            asset = next(iter(unique_candidates.values()))
+            old_to_display[alias] = str(asset.get("display_variable") or "")
+            by_any_variable[alias] = asset
     return old_to_display, by_any_variable
 
 
@@ -1994,6 +2417,21 @@ app.include_router(make_router(connect, lambda: DATA_DIR, lambda: PROJECTS_DIR, 
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    # This process has just started, so any persisted running task belongs to
+    # a terminated process and must not be presented as still making progress.
+    with connect() as conn:
+        running = conn.execute("SELECT id, result_json FROM tasks WHERE status = ?", ("运行中",)).fetchall()
+        for row in running:
+            result = json.loads(row["result_json"] or "{}")
+            result["中断原因"] = "服务进程已退出或重启，本次任务未完成；请创建新任务重试。"
+            update_task_status(
+                conn,
+                row["id"],
+                "失败",
+                "服务重启：上次任务已中断，请重试",
+                result,
+            )
+        conn.commit()
 
 
 @app.get("/api/health")
@@ -2358,6 +2796,7 @@ def list_assets(project_id: str) -> dict[str, Any]:
         for asset in raw_assets:
             episode_index = asset.pop("episode_index", None)
             asset["payload"] = enrich_asset_payload_urls(json.loads(asset.pop("payload_json")))
+            project_valid_target_profile_for_asset_view(asset, project)
             prepare_asset_prompt_fields(asset, project)
             asset["payload"].setdefault("原片资产描述", asset_source_description(asset["asset_type"], asset["payload"]) or "原片描述未留存")
             asset["payload"].setdefault("目标生成描述", "")
@@ -2370,6 +2809,10 @@ def list_assets(project_id: str) -> dict[str, Any]:
             asset["payload"]["当前有效外观描述"] = effective["description"]
             asset["payload"]["当前有效资产名"] = effective["name"]
             asset["payload"]["当前有效资产就绪"] = effective["ready"]
+            asset["payload"]["generationInProgress"] = conn.execute(
+                "SELECT 1 FROM asset_generation_jobs WHERE project_id=? AND asset_id=? AND status='running' LIMIT 1",
+                (project_id, asset["id"]),
+            ).fetchone() is not None
             attach_display_variable(asset)
             annotate_project_asset_keys(asset, episode_index if isinstance(episode_index, int) else None)
             image_rows = conn.execute(
@@ -2499,29 +2942,28 @@ def generate_asset_image(project_id: str, asset_id: str, payload: AssetImageRequ
         )
         if not asset:
             raise HTTPException(status_code=404, detail="Asset not found")
-        if project.get("remake_mode") == "asset_replacement" and ((asset["asset_type"] == "角色" and not project.get("replace_characters")) or (asset["asset_type"] == "场景" and not project.get("replace_scenes"))):
-            raise HTTPException(status_code=409, detail="该类型替换开关未启用，请在项目设置中开启后再生成。")
+        running_job = conn.execute(
+            "SELECT 1 FROM asset_generation_jobs WHERE project_id=? AND asset_id=? AND status='running' LIMIT 1",
+            (project_id, asset_id),
+        ).fetchone()
+        if running_job:
+            raise HTTPException(status_code=409, detail="当前资产正在生成，请等待本次生成完成。")
         asset_payload = json.loads(asset["payload_json"])
-        if project.get("remake_mode") == "asset_replacement" and asset_payload.get("目标资产来源") == "沿用原貌":
-            raise HTTPException(status_code=409, detail="当前资产设置为沿用原貌，请先编辑完整资产提示词或取消沿用原貌后再生成。")
+        refresh_role_source_review_profile(asset_payload)
         direct_final_prompt = payload.finalPrompt is not None or (payload.prompt is None and bool(str(asset_payload.get("用户编辑资产图生成提示词") or "").strip()))
         prompt = str(payload.finalPrompt if payload.finalPrompt is not None else asset_payload.get("用户编辑资产图生成提示词") or "") if direct_final_prompt else ""
         localized_profile = asset_payload.get("localizedProfile") if isinstance(asset_payload.get("localizedProfile"), dict) else {}
-        if localized_profile.get("status") == "source_review" and not direct_final_prompt:
-            paths = localized_profile.get("sourceReviewPaths") or localized_profile.get("needsReview") or []
-            raise HTTPException(status_code=409, detail="目标脸部本地化已完成，但自动生成仍被源视觉字段审核锁定：" + "、".join(paths))
+        stored_manual_prompt = str(asset_payload.get("用户编辑资产图生成提示词") or "")
+        sanitized_stored_manual_prompt = strip_resolved_source_review_status_block(stored_manual_prompt, localized_profile)
+        if sanitized_stored_manual_prompt != stored_manual_prompt:
+            history = asset_payload.get("resolvedStatusPromptArchive") if isinstance(asset_payload.get("resolvedStatusPromptArchive"), list) else []
+            if not any(item.get("prompt") == stored_manual_prompt for item in history if isinstance(item, dict)):
+                history.append({"prompt": stored_manual_prompt, "removedSystemBlock": "【源事实待核对：自动生图已锁定】", "reason": "all named source-review paths are now resolved or explicitly non-blocking"})
+            asset_payload["resolvedStatusPromptArchive"] = history[-10:]
         if direct_final_prompt:
             if not prompt.strip():
                 raise HTTPException(status_code=422, detail="完整资产提示词不能为空，请填写可直接生图的完整描述。")
-            if localized_profile.get("status") == "source_review" and re.search(r"unknown|needsreview|待核对|待核实|未明确|不确定", prompt, re.IGNORECASE):
-                paths = localized_profile.get("sourceReviewPaths") or localized_profile.get("needsReview") or []
-                raise HTTPException(status_code=422, detail="完整提示词仍含未解决占位；请明确填写以下源视觉字段：" + "、".join(paths))
-            if prompt.strip().startswith(("目标画像待本地化；", "目标画像需本地化；")):
-                raise HTTPException(status_code=422, detail="目标画像仍待本地化，不能把状态提示当作资产图提示词发送。")
-            if unresolved_asset_reference(prompt):
-                raise HTTPException(status_code=422, detail="完整资产提示词仍包含‘根据原片/参考原图/同上’等外部指代，请改成自包含的具体描述后再生成。")
-            automatic_prompt = build_project_asset_prompt(asset["asset_type"], asset_payload, project)
-            asset_payload["用户编辑资产图生成提示词"] = "" if prompt == automatic_prompt else prompt
+            asset_payload["用户编辑资产图生成提示词"] = prompt
             asset_payload["目标资产来源"] = "手动生成"
         elif payload.prompt is not None:
             # Legacy clients send a visual supplement in `prompt`; keep that contract
@@ -2533,42 +2975,14 @@ def generate_asset_image(project_id: str, asset_id: str, payload: AssetImageRequ
             if should_update_override:
                 asset_payload["目标生成描述"] = normalized_override
             asset_payload["目标资产来源"] = "手动生成"
-        completion_asset = {
-            "asset_type": asset["asset_type"],
-            "name": asset.get("name", ""),
-            "localized_name": asset.get("localized_name", ""),
-            "variable": asset.get("variable", ""),
-            "payload": asset_payload,
-        }
-        if not direct_final_prompt and asset_detail_missing_fields(completion_asset):
-            try:
-                detail_agent = prepare_agent("assetExtractionLocalization")
-            except ProviderError as exc:
-                raise HTTPException(status_code=422, detail=f"旧资产缺少可独立生图字段，且详情补全未能准备：{exc}") from exc
-            target_country, target_language, _ = asset_prompt_context(project)
-            detail_result = complete_asset_details(
-                detail_agent,
-                {"目标国家": target_country, "目标语言": target_language},
-                [completion_asset],
-            )
-            asset_payload = completion_asset["payload"]
-            if detail_result.get("补全资产数", 0):
-                # Persist only the targeted missing-field patch, even when the
-                # subsequent quality guard still needs the user to resolve unknowns.
-                conn.execute("UPDATE assets SET payload_json=? WHERE id=? AND project_id=?", (json.dumps(asset_payload, ensure_ascii=False), asset_id, project_id))
-                conn.commit()
         if not direct_final_prompt:
             prompt = build_project_asset_prompt(asset["asset_type"], asset_payload, project)
         prompt = enforce_role_cg_fixed_suffix(prompt, asset["asset_type"], project)
         if direct_final_prompt:
             automatic_prompt = build_project_asset_prompt(asset["asset_type"], asset_payload, project)
             asset_payload["用户编辑资产图生成提示词"] = "" if prompt == automatic_prompt else prompt
-        validation_errors = [] if direct_final_prompt else asset_prompt_validation_errors(asset["asset_type"], asset_payload, project, prompt)
-        if validation_errors:
-            detail_errors = "；".join(validation_errors)
-            if asset_detail_missing_fields(completion_asset):
-                detail_errors += "。该旧资产详情已尝试针对性补全；请按缺项补充目标外观描述后重试，源事实和有效字段已保留。"
-            raise HTTPException(status_code=422, detail="资产提示词尚未达到独立生图要求：" + detail_errors)
+        if not prompt.strip():
+            raise HTTPException(status_code=422, detail="资产提示词不能为空，请填写或编译可发送的提示词。")
         if direct_final_prompt or payload.prompt is not None:
             conn.execute("UPDATE assets SET payload_json=? WHERE id=? AND project_id=?", (json.dumps(asset_payload, ensure_ascii=False), asset_id, project_id))
             conn.commit()
@@ -2797,6 +3211,95 @@ def get_storyboard_response(conn: sqlite3.Connection, project_id: str, storyboar
     return {"storyboard": item}
 
 
+def recompute_active_storyboard_reference_review(
+    conn: sqlite3.Connection,
+    project_id: str,
+    episode_id: str,
+    payload: dict[str, Any],
+    current_body: str,
+) -> None:
+    """Project historical reference-review records onto the current editable draft.
+
+    Historical review entries remain available for audit, but only tokens still
+    present in the current body or explicit reference list can block generation.
+    Assets are scoped to the storyboard episode because stable variables such as
+    {{PROP_001}} are intentionally local to each episode.
+    """
+    previous = payload.get("资产引用待核对")
+    previous_reviews = [item for item in previous if isinstance(item, dict)] if isinstance(previous, list) else []
+    explicit_refs = payload.get("引用资产变量") if isinstance(payload.get("引用资产变量"), list) else []
+    active_text = current_body + "\n" + "\n".join(str(value) for value in explicit_refs)
+
+    rows = (
+        conn.execute("SELECT * FROM assets WHERE project_id=? AND episode_id=? ORDER BY created_at", (project_id, episode_id)).fetchall()
+        if episode_id
+        else conn.execute("SELECT * FROM assets WHERE project_id=? ORDER BY created_at", (project_id,)).fetchall()
+    )
+    candidates_by_token: dict[str, dict[str, dict[str, Any]]] = {}
+    known_tokens: set[str] = set()
+    for row in rows:
+        asset = row_to_dict(row)
+        raw_payload = json.loads(asset.pop("payload_json") or "{}")
+        asset_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        asset["payload"] = asset_payload
+        attach_display_variable(asset)
+        aliases = [
+            asset.get("variable"), asset.get("display_variable"), asset.get("source_variable_alias"),
+            asset_payload.get("展示资产变量"), asset_payload.get("旧展示资产变量"),
+            asset_payload.get("源变量别名"),
+        ]
+        historic_display_aliases = asset_payload.get("历史展示变量别名")
+        if isinstance(historic_display_aliases, list):
+            aliases.extend(historic_display_aliases)
+        for value in aliases:
+            token = str(value or "").strip()
+            if not token:
+                continue
+            known_tokens.add(token)
+            candidates_by_token.setdefault(token, {})[str(asset.get("id") or token)] = asset
+
+    # Match project-known aliases verbatim, then recognize unresolved ASCII
+    # @mentions / canonical variables without consuming adjacent Chinese prose.
+    present_tokens = {token for token in known_tokens if token in active_text}
+    present_tokens.update(re.findall(r"\{\{[A-Za-z0-9_-]+\}\}|@[A-Za-z][A-Za-z0-9_-]*", active_text))
+    active_reviews: list[dict[str, Any]] = []
+    for token in sorted(present_tokens):
+        candidates = list(candidates_by_token.get(token, {}).values())
+        distinct_variables = sorted({str(item.get("variable") or "") for item in candidates})
+        if len(candidates) == 1 and str(candidates[0].get("variable") or "") == token:
+            continue
+        if len(distinct_variables) == 1 and distinct_variables[0]:
+            # 同一稳定变量在历史归并中可能留下多行副本；映射目标唯一，不算歧义。
+            continue
+        if len(candidates) > 1:
+            active_reviews.append({
+                "token": token,
+                "candidateVariables": sorted(str(item.get("variable") or "") for item in candidates),
+                "reason": "当前正文或显式引用中的别名对应多个稳定资产，未猜测匹配对象",
+            })
+        elif not candidates:
+            active_reviews.append({
+                "token": token,
+                "candidateVariables": [],
+                "reason": "当前正文或显式引用中的资产标记未能关联到当前项目资产",
+            })
+
+    historical = payload.get("历史资产引用待核对")
+    historical_reviews = [item for item in historical if isinstance(item, dict)] if isinstance(historical, list) else []
+    active_keys = {(item.get("token"), tuple(item.get("candidateVariables", []))) for item in active_reviews}
+    for item in previous_reviews:
+        key = (item.get("token"), tuple(item.get("candidateVariables", [])))
+        if key not in active_keys and item not in historical_reviews:
+            historical_reviews.append(item)
+    if historical_reviews:
+        payload["历史资产引用待核对"] = historical_reviews
+    else:
+        payload.pop("历史资产引用待核对", None)
+    payload["资产引用待核对"] = active_reviews
+    check = payload.get("资产映射校验") if isinstance(payload.get("资产映射校验"), dict) else {}
+    payload["资产映射校验"] = {**check, "待核对引用": active_reviews}
+
+
 def apply_storyboard_project_prompt(conn: sqlite3.Connection, project: dict[str, Any], storyboard: dict[str, Any]) -> None:
     payload = storyboard.get("payload") if isinstance(storyboard.get("payload"), dict) else {}
     if payload.get("使用回退占位") is True:
@@ -2826,6 +3329,8 @@ def apply_storyboard_project_prompt(conn: sqlite3.Connection, project: dict[str,
                     break
     edited_body = payload.get("分镜生成正文")
     base = str(edited_body if isinstance(edited_body, str) else original_source).strip()
+    episode_id = str(storyboard.get("episode_id") or "").strip()
+    recompute_active_storyboard_reference_review(conn, str(project["id"]), episode_id, payload, base)
     # An exact legacy style phrase at the beginning is an explicit style field;
     # don't erase similarly named words inside actions, dialogue, or scenery.
     if style == "cg_3d":
@@ -2836,7 +3341,11 @@ def apply_storyboard_project_prompt(conn: sqlite3.Connection, project: dict[str,
     asset_details: list[str] = []
     target_asset_snapshot: list[dict[str, Any]] = []
     for ref in refs:
-        rows = conn.execute("SELECT * FROM assets WHERE project_id=? ORDER BY created_at", (project["id"],)).fetchall()
+        rows = (
+            conn.execute("SELECT * FROM assets WHERE project_id=? AND episode_id=? ORDER BY created_at", (project["id"], episode_id)).fetchall()
+            if episode_id
+            else conn.execute("SELECT * FROM assets WHERE project_id=? ORDER BY created_at", (project["id"],)).fetchall()
+        )
         matched = None
         for row in rows:
             candidate = dict(row)
@@ -2864,14 +3373,16 @@ def apply_storyboard_project_prompt(conn: sqlite3.Connection, project: dict[str,
         else:
             description = effective["description"]
         source_key = str(ap.get("源AssetKey") or asset["id"])
-        if effective_source == "target" and project.get("remake_mode") == "asset_replacement" and not effective["imageId"]:
+        if effective_source == "target_draft":
+            image_status = "；目标画像草稿待审核，原片图仅作源观察，不作为目标身份参考" if not image_path else "；目标画像草稿待审核，当前选中图仍待核对"
+        elif effective_source == "target" and project.get("remake_mode") == "asset_replacement" and not effective["imageId"]:
             image_status = "；缺少目标图，当前替换资产未就绪"
         elif image_path:
             image_status = "；当前确认资产图已关联" if effective_source == "target" and effective["imageId"] else "；原片资产图已关联"
         elif effective_source == "source":
             image_status = "；缺少原片资产图，当前沿用原貌未就绪"
         else:
-            image_status = "；未设置目标图，沿用原貌"
+            image_status = "；未设置目标图"
         asset_details.append(f"{ref}={target_name}；目标外观：{description}{image_status}")
         target_asset_snapshot.append({
             "reference": str(ref),
@@ -2885,13 +3396,15 @@ def apply_storyboard_project_prompt(conn: sqlite3.Connection, project: dict[str,
             "imageSource": effective["imageSource"],
         })
     source_language = project.get("source_language") or "原片语言"
-    language_rule = (
-        "保持海外本土化项目的目标国家和目标语言规则。"
-        if project.get("remake_mode") == "overseas_localization"
-        else f"3D画面使用指定目标语言（{project.get('target_language')}），保持3D资产策略，不进行地域本土化。"
-        if project.get("remake_mode") == "cg_3d" and project.get("target_language") not in {"沿用原片语言", "原片语言"}
-        else f"国内重制：沿用原片语言（{source_language}），不进行未经选择的翻译或地域本土化。"
-    )
+    target_country = str(project.get("target_country") or "").strip()
+    target_language = str(project.get("target_language") or "").strip()
+    has_foreign_target = target_country not in {"", "中国", "中国大陆"} and target_language not in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
+    if has_foreign_target:
+        language_rule = f"按目标国家（{target_country}）和目标语言（{target_language}）本地化剧情文本及可见场景文字；画面类型只决定视觉呈现，不取消地域与语言适配。源镜头中的招牌、屏幕字和姓名条仅供语义与版式参考，目标成片应以目标语言及当前目标角色名替换文字并保持原有位置与构图。保留源分镜原始观察作为证据，不机械删除所有汉字，不改写未要求翻译的对白含义。"
+    elif project.get("remake_mode") == "overseas_localization":
+        language_rule = "保持海外本土化项目已选目标国家和目标语言规则；原始画面文字保留为观察证据，目标可见文字按选定语言适配。"
+    else:
+        language_rule = f"国内重制：沿用原片语言（{source_language}），不进行未经选择的翻译或地域本土化。"
     addition = "\n".join(part for part in ["当前项目确认资产：" + "；".join(asset_details) if asset_details else "", language_rule, f"分镜画面类型约束：{constraint}"] if part)
     final_prompt = (base + "\n" + addition).strip()
     payload["源分镜文本"] = original_source
@@ -3097,6 +3610,13 @@ def get_video_generation_storyboard(
     storyboard["payload"] = json.loads(storyboard.pop("payload_json"))
     if storyboard["payload"].get("使用回退占位") is True:
         raise HTTPException(status_code=422, detail="当前分镜是未分析的回退占位；请先编辑并补入具体镜头事实，再生成。")
+    project = get_project_or_404(conn, project_id)
+    apply_storyboard_project_prompt(conn, project, storyboard)
+    unresolved_references = storyboard["payload"].get("资产引用待核对")
+    if isinstance(unresolved_references, list) and unresolved_references:
+        tokens = sorted({str(item.get("token") or "") for item in unresolved_references if isinstance(item, dict) and item.get("token")})
+        detail = "、".join(tokens) or "未能唯一关联的资产引用"
+        raise HTTPException(status_code=422, detail=f"当前分镜仍有资产引用待核对（{detail}）；请先在分镜中完成唯一资产关联。")
     return storyboard
 
 
@@ -3269,6 +3789,30 @@ def update_task_status(
     )
 
 
+def finish_or_create_task(
+    conn: sqlite3.Connection,
+    project_id: str,
+    episode_id: str | None,
+    task_type: str,
+    status: str,
+    message: str,
+    result: dict[str, Any],
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Complete the API-created task in place; retain standalone runner compatibility."""
+    if not task_id:
+        if status == "成功":
+            return create_task(conn, project_id, episode_id, task_type, message, result)
+        return create_task_with_status(conn, project_id, episode_id, task_type, status, message, result)
+    update_task_status(conn, task_id, status, message, result)
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    task = row_to_dict(row)
+    if not task:
+        raise RuntimeError(f"Task {task_id} disappeared while completing {task_type}")
+    task["result"] = result
+    return task
+
+
 def update_task_stream_progress(conn: sqlite3.Connection, task_id: str, stage: str, chars: int) -> None:
     task_row = conn.execute("SELECT result_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if not task_row:
@@ -3298,9 +3842,9 @@ def execute_task_background(
             if task_type == "asset_extraction":
                 completed = run_asset_extraction(conn, project, episode_id, task_id)
             elif task_type == "storyboard_generation":
-                completed = run_storyboard_generation(conn, project, episode_id, force=force)
+                completed = run_storyboard_generation(conn, project, episode_id, force=force, task_id=task_id)
             elif task_type == "video_generation":
-                completed = run_video_generation(conn, project, storyboard_id)
+                completed = run_video_generation(conn, project, storyboard_id, task_id=task_id)
             elif task_type == "series_analysis":
                 completed = run_series_analysis(conn, project, task_id)
             else:
@@ -3449,13 +3993,29 @@ def normalize_assets_from_agent(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     for prop in asset_root.get("道具资产") or []:
         if not isinstance(prop, dict):
             continue
-        variable = prop.get("道具资产变量") or f"{{{{{prop.get('道具编号') or '道具_001'}}}}}"
+        prop_id = str(prop.get("道具编号") or prop.get("道具ID") or "").strip()
+        variable = str(prop.get("道具资产变量") or prop.get("变量") or "").strip()
+        if not variable and prop_id:
+            variable = f"{{{{{prop_id}}}}}"
+        if not variable:
+            continue
+        source_name = str(prop.get("原剧道具名称") or prop.get("原剧名称") or prop.get("道具名称") or "").strip()
+        source_description = str(prop.get("原剧道具描述") or prop.get("原剧描述") or prop.get("原剧视觉描述") or "").strip()
+        payload = dict(prop)
+        payload.setdefault("道具编号", prop_id)
+        payload.setdefault("道具资产变量", variable)
+        if source_name:
+            payload.setdefault("原剧道具名称", source_name)
+        if source_description:
+            payload.setdefault("原剧道具描述", source_description)
+        if "原剧截图时间点候选" not in payload:
+            payload["原剧截图时间点候选"] = prop.get("截图候选") or []
         asset = {
             "asset_type": "道具",
-            "name": prop.get("原剧道具名称") or prop.get("道具编号") or "未命名道具",
+            "name": source_name or prop_id or "未命名道具",
             "localized_name": prop.get("本地化道具名称") or "Unnamed Prop",
             "variable": variable,
-            "payload": prop,
+            "payload": payload,
         }
         normalized.append(attach_display_variable(asset))
 
@@ -3498,6 +4058,24 @@ def insert_assets(
 ) -> None:
     timestamp = now_iso()
     for asset in assets:
+        existing_id = str(asset.get("_existingAssetId") or "")
+        existing = conn.execute(
+            "SELECT id,payload_json,status FROM assets WHERE id=? AND project_id=? AND episode_id=?",
+            (existing_id, project_id, episode_id),
+        ).fetchone() if existing_id else None
+        if existing:
+            previous_payload = json.loads(existing["payload_json"] or "{}")
+            next_payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+            previous_profile = previous_payload.get("localizedProfile")
+            next_profile = next_payload.get("localizedProfile")
+            if previous_profile != next_profile or asset.get("name") != asset.get("_previousName") or asset.get("localized_name") != asset.get("_previousLocalizedName"):
+                stale_asset = {**asset, "payload": previous_payload}
+                mark_storyboards_asset_stale(conn, project_id, stale_asset, "同一源资产的目标画像或名称已更新")
+            conn.execute(
+                "UPDATE assets SET name=?,localized_name=?,variable=?,payload_json=? WHERE id=? AND project_id=? AND episode_id=?",
+                (asset["name"], asset["localized_name"], asset["variable"], json.dumps(next_payload, ensure_ascii=False), existing_id, project_id, episode_id),
+            )
+            continue
         conn.execute(
             """
             INSERT INTO assets
@@ -3519,6 +4097,158 @@ def insert_assets(
         )
 
 
+def stable_asset_source_identity(asset: dict[str, Any]) -> str:
+    source = build_source_snapshot(asset)
+    identity = {
+        "assetType": str(asset.get("asset_type") or ""),
+        "childId": str(source.get("childId") or asset.get("variable") or ""),
+        "sourceName": str(source.get("name") or asset.get("name") or ""),
+        "sourceFacts": {
+            key: source.get(key)
+            for key in (
+                "coreDescription", "visualDescription", "identity", "sourceStructuredDescription",
+                "sourceSceneStructure", "sourcePropFacts", "facts",
+            )
+            if source.get(key) not in (None, "", {}, [])
+        },
+    }
+    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def reconcile_asset_extraction_rows(
+    conn: sqlite3.Connection,
+    project_id: str,
+    episode_id: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve exact source identities and histories; never guess fuzzy matches."""
+    rows = conn.execute(
+        "SELECT * FROM assets WHERE project_id=? AND episode_id=? ORDER BY created_at,id",
+        (project_id, episode_id),
+    ).fetchall()
+    existing: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json") or "{}")
+        existing.append(item)
+    old_by_identity: dict[str, list[dict[str, Any]]] = {}
+    old_by_variable: dict[str, list[dict[str, Any]]] = {}
+    for item in existing:
+        old_by_identity.setdefault(stable_asset_source_identity(item), []).append(item)
+        old_by_variable.setdefault(str(item.get("variable") or ""), []).append(item)
+    candidate_counts: dict[str, int] = {}
+    for candidate in candidates:
+        identity = stable_asset_source_identity(candidate)
+        candidate_counts[identity] = candidate_counts.get(identity, 0) + 1
+    matched_ids: set[str] = set()
+    conflicts: list[dict[str, Any]] = []
+    conflict_old_ids: set[str] = set()
+    for candidate in candidates:
+        identity = stable_asset_source_identity(candidate)
+        matches = old_by_identity.get(identity, [])
+        if len(matches) == 1 and candidate_counts[identity] == 1:
+            prior = matches[0]
+            previous_payload = prior["payload"]
+            next_payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+            # Keep explicit user-authored generation/name choices and original
+            # capture references while accepting newly normalized source and
+            # target profiles for the exact same source identity.
+            user_visual_lock = explicit_user_visual_lock(previous_payload)
+            if previous_payload.get("用户编辑资产图生成提示词"):
+                next_payload["用户编辑资产图生成提示词"] = previous_payload["用户编辑资产图生成提示词"]
+            if user_visual_lock:
+                for key in ("targetVisualLockProvenance", "目标生成描述", "legacyPreservedDesignConstraints"):
+                    if key in previous_payload:
+                        next_payload[key] = previous_payload[key]
+            if previous_payload.get("目标资产来源") in {"用户上传", "手动生成", "沿用原貌"}:
+                next_payload["目标资产来源"] = previous_payload["目标资产来源"]
+            reviewed_source_facts = previous_payload.get("sourceFactReview")
+            if isinstance(reviewed_source_facts, dict) and reviewed_source_facts.get("status") == "reviewed":
+                next_payload["sourceFactReview"] = json.loads(json.dumps(reviewed_source_facts, ensure_ascii=False))
+            for key in ("targetNameProvenance", "用户指定目标角色名称", "本地化角色名称", "本地化场景名称", "本地化道具名称"):
+                if key in previous_payload and explicit_user_localized_name(previous_payload):
+                    next_payload[key] = previous_payload[key]
+            for key in ("原资产图路径", "原资产截图URL", "原资产候选截图", "原资产截图候选"):
+                if key in previous_payload:
+                    next_payload[key] = previous_payload[key]
+            old_child = previous_payload.get("当前子资产") if isinstance(previous_payload.get("当前子资产"), dict) else {}
+            new_child = next_payload.get("当前子资产") if isinstance(next_payload.get("当前子资产"), dict) else {}
+            if isinstance(reviewed_source_facts, dict) and reviewed_source_facts.get("status") == "reviewed":
+                accessory_values = [
+                    str(item.get("value") or "").strip()
+                    for item in reviewed_source_facts.get("fixedWornAccessories", [])
+                    if isinstance(item, dict) and str(item.get("value") or "").strip()
+                ]
+                if accessory_values:
+                    new_child["固定穿戴配饰"] = list(dict.fromkeys([
+                        *(new_child.get("固定穿戴配饰") if isinstance(new_child.get("固定穿戴配饰"), list) else []),
+                        *accessory_values,
+                    ]))
+            for key in ("原资产图路径", "原资产截图URL", "原资产候选截图", "原资产截图候选"):
+                if key in old_child:
+                    new_child[key] = old_child[key]
+            if new_child:
+                next_payload["当前子资产"] = new_child
+            next_payload.pop("assetSourceRefreshReview", None)
+            candidate["_previousName"] = prior["name"]
+            candidate["_previousLocalizedName"] = prior["localized_name"]
+            candidate["_existingAssetId"] = prior["id"]
+            candidate["id"] = prior["id"]
+            candidate["variable"] = prior["variable"]
+            if explicit_user_localized_name(previous_payload):
+                candidate["localized_name"] = prior["localized_name"]
+            candidate["payload"] = next_payload
+            candidate["status"] = prior["status"]
+            matched_ids.add(str(prior["id"]))
+            continue
+        same_variable = old_by_variable.get(str(candidate.get("variable") or ""), [])
+        if matches or same_variable:
+            conflict = {
+                "variable": candidate.get("variable", ""),
+                "candidateName": candidate.get("name", ""),
+                "candidateCount": candidate_counts[identity],
+                "exactSourceIdentityMatches": len(matches),
+                "sameStableVariableCount": len(same_variable),
+                "reason": "源事实身份无法唯一匹配；保留现有资产待人工核对",
+            }
+            conflicts.append(conflict)
+            # 歧义候选不发布：不合并、不新增，涉及冲突的旧资产进入身份核对队列。
+            candidate["_withheld"] = conflict
+            for row in [*matches, *same_variable]:
+                conflict_old_ids.add(str(row["id"]))
+    stale_rows = [
+        item for item in existing
+        if str(item["id"]) not in matched_ids and str(item["id"]) not in conflict_old_ids
+    ]
+    review_rows = [item for item in existing if str(item["id"]) in conflict_old_ids]
+    for item in stale_rows:
+        payload = item["payload"]
+        payload["assetSourceRefreshReview"] = {
+            "status": "stale",
+            "reason": "本次提取未找到可精确关联的同源资产；保留旧资产、图片历史和分镜引用待人工核对",
+        }
+        conn.execute("UPDATE assets SET payload_json=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), item["id"]))
+        mark_storyboards_asset_stale(conn, project_id, item, "源资产提取结果无法精确关联，待人工核对")
+    for item in review_rows:
+        payload = item["payload"]
+        related = [c for c in conflicts if c["variable"] == str(item.get("variable") or "")]
+        payload["身份核对"] = {
+            "status": "待核对",
+            "reason": "重提取候选资产身份歧义，旧资产已保留未自动合并；请人工核对后重新提取或手动调整",
+            "conflicts": related,
+        }
+        conn.execute("UPDATE assets SET payload_json=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), item["id"]))
+    return {
+        "preservedExistingCount": len(matched_ids),
+        "newCandidateCount": sum(1 for item in candidates if not item.get("_existingAssetId") and not item.get("_withheld")),
+        "withheldCount": sum(1 for item in candidates if item.get("_withheld")),
+        "staleExistingIds": [str(item["id"]) for item in stale_rows],
+        "reviewExistingIds": [str(item["id"]) for item in review_rows],
+        "identityConflicts": conflicts,
+    }
+
+
 def normalize_asset_occurrence_index(raw_index: Any, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     old_to_display, by_variable = variable_maps(assets)
     normalized: list[dict[str, Any]] = []
@@ -3531,26 +4261,29 @@ def normalize_asset_occurrence_index(raw_index: Any, assets: list[dict[str, Any]
         # Legacy source extraction emits one parent-asset ID plus a list of
         # appearance timestamps. Resolve only when that parent maps to exactly
         # one normalized asset; never fan a shared parent reference across outfit variants.
-        source_id = str(segment.get("资产编号") or "").strip()
-        source_times = segment.get("出现时间点") if isinstance(segment.get("出现时间点"), list) else []
-        if source_id and source_times:
+        source_id = str(segment.get("资产编号") or segment.get("assetId") or "").strip()
+        direct_variable = str(segment.get("资产变量") or segment.get("变量") or "").strip()
+        source_ranges = source_asset_appearance_ranges(segment)
+        if source_id or direct_variable:
             matches = []
             for candidate in assets:
                 payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
                 parent_id = str(payload.get("主资产编号") or payload.get("道具编号") or "").strip()
-                if parent_id == source_id:
+                candidate_variables = {
+                    str(candidate.get("variable") or ""),
+                    str(candidate.get("source_variable_alias") or ""),
+                    str(payload.get("源变量别名") or ""),
+                }
+                if (direct_variable and direct_variable in candidate_variables) or (source_id and parent_id == source_id):
                     matches.append(candidate)
-            if len(matches) == 1:
+            if len(matches) == 1 and source_ranges:
                 candidate = matches[0]
-                for time_index, time_value in enumerate(source_times, start=1):
-                    time_text = str(time_value or "").strip()
-                    if not time_text:
-                        continue
+                for time_index, (start_text, end_text) in enumerate(source_ranges, start=1):
                     normalized.append({
                         "片段编号": f"{source_id}_出现_{time_index:03d}",
-                        "开始时间": time_text,
-                        "结束时间": time_text,
-                        "片段剧情简述": "来源片段资产编号与出现时间点索引",
+                        "开始时间": start_text,
+                        "结束时间": end_text,
+                        "片段剧情简述": "来源主资产编号与资产出现覆盖索引；不是镜头切分",
                         "出现资产": [{
                             "资产类型": candidate.get("asset_type", ""),
                             "资产变量": candidate.get("variable", ""),
@@ -3560,13 +4293,15 @@ def normalize_asset_occurrence_index(raw_index: Any, assets: list[dict[str, Any]
                         }],
                         "出现资产变量": [candidate.get("display_variable", "")],
                     })
-            else:
+            elif source_ranges:
+                start_text, end_text = source_ranges[0]
                 normalized.append({
                     "片段编号": segment.get("片段编号") or f"片段_{index:03d}",
-                    "开始时间": "", "结束时间": "", "片段剧情简述": "来源主资产编号无法唯一关联到一个子资产，保留原引用待审核",
-                    "出现资产": [], "出现资产变量": [], "unresolvedSourceAssetReference": {"assetId": source_id, "candidateCount": len(matches), "times": source_times},
+                    "开始时间": start_text, "结束时间": end_text, "片段剧情简述": "来源资产编号无法唯一关联到当前稳定资产，保留原引用待审核",
+                    "出现资产": [], "出现资产变量": [], "unresolvedSourceAssetReference": {"assetId": source_id, "assetVariable": direct_variable, "candidateCount": len(matches), "ranges": source_ranges},
                 })
-            continue
+            if source_ranges:
+                continue
         raw_assets = segment.get("出现资产") if isinstance(segment.get("出现资产"), list) else split_variable_text(segment.get("出现资产"))
         raw_variables = segment.get("出现资产变量") if isinstance(segment.get("出现资产变量"), list) else split_variable_text(segment.get("出现资产变量"))
         raw_assets.extend(raw_variables)
@@ -3606,6 +4341,45 @@ def normalize_asset_occurrence_index(raw_index: Any, assets: list[dict[str, Any]
             }
         )
     return normalized
+
+
+def source_asset_appearance_ranges(segment: dict[str, Any]) -> list[tuple[str, str]]:
+    raw_ranges = segment.get("出现时间片段")
+    if isinstance(raw_ranges, str):
+        raw_ranges = [raw_ranges]
+    parsed: list[tuple[str, str]] = []
+    for raw_range in raw_ranges if isinstance(raw_ranges, list) else []:
+        text = str(raw_range if raw_range is not None else "").strip()
+        match = re.match(r"^\s*(.+?)\s*(?:-|–|—|至|到)\s*(.+?)\s*(?:秒)?\s*$", text)
+        if match:
+            start, end = match.group(1).strip(), match.group(2).strip()
+            if parse_asset_timecode(start) or start.strip() in {"0", "0.0", "00:00:00"}:
+                if parse_asset_timecode(end) or end.strip() in {"0", "0.0", "00:00:00"}:
+                    parsed.append((start, end))
+            continue
+        time_match = re.match(r"^\s*(.+?)\s*秒?\s*$", text)
+        if time_match:
+            time_text = time_match.group(1).strip()
+            if parse_asset_timecode(time_text) or time_text in {"0", "0.0", "00:00:00"}:
+                parsed.append((time_text, time_text))
+    if parsed:
+        return list(dict.fromkeys(parsed))
+    first = segment.get("首次出现时间", segment.get("开始时间"))
+    last = segment.get("最后出现时间", segment.get("结束时间"))
+    if first not in (None, ""):
+        start_text = str(first).strip().removesuffix("秒")
+        end_text = str(last if last not in (None, "") else first).strip().removesuffix("秒")
+        if parse_asset_timecode(start_text) or start_text in {"0", "0.0", "00:00:00"}:
+            if parse_asset_timecode(end_text) or end_text in {"0", "0.0", "00:00:00"}:
+                return [(start_text, end_text)]
+    source_points = segment.get("出现时间点")
+    if isinstance(source_points, list):
+        return [
+            (text, text) for value in source_points
+            if (text := str(value if value is not None else "").strip().removesuffix("秒"))
+            and (parse_asset_timecode(text) or text in {"0", "0.0", "00:00:00"})
+        ]
+    return []
 
 
 def apply_capture_times_from_index(assets: list[dict[str, Any]], asset_occurrence_index: list[dict[str, Any]]) -> None:
@@ -3731,6 +4505,8 @@ def role_structured_missing_paths(structure: Any) -> list[str]:
     missing = []
     if unresolved_asset_reference(structure):
         missing.append("角色资产图结构化描述中的源指代字段")
+    footwear_hidden = footwear_hidden_by_garment(structure)
+    lower_body_unobservable = lower_body_details_unobservable(structure)
     for section, field in ROLE_REQUIRED_VISUAL_PATHS:
         value = structure.get(section, {})
         field_value = value.get(field) if isinstance(value, dict) else None
@@ -3738,6 +4514,10 @@ def role_structured_missing_paths(structure: Any) -> list[str]:
             gender = str(value.get("性别") or "") if isinstance(value, dict) else ""
             if gender in {"中性", "未知", "未明确", "不确定", "性别未明"}:
                 continue
+        if footwear_hidden and section == "服装" and field == "鞋子":
+            continue
+        if lower_body_unobservable and f"{section}.{field}" in UNOBSERVABLE_LOWER_BODY_PATHS:
+            continue
         if not usable_visual_value(field_value):
             missing.append(f"{section}.{field}")
     clothing = structure.get("服装", {})
@@ -3755,6 +4535,71 @@ def role_structured_missing_paths(structure: Any) -> list[str]:
                 if key not in missing:
                     missing.append(key)
     return missing
+
+
+UNOBSERVABLE_LOWER_BODY_PATHS = {
+    "服装.衣长", "服装.摆型", "服装.拖尾程度", "服装.摆与地面关系", "服装.鞋子",
+}
+
+
+def lower_body_details_unobservable(structure: Any) -> bool:
+    """A cropped/occluded lower body cannot supply hem or shoe source facts."""
+    clothing = structure.get("服装") if isinstance(structure, dict) else None
+    if not isinstance(clothing, dict):
+        return False
+
+    def explicitly_not_visible(value: Any) -> bool:
+        normalized = re.sub(r"\s+", "", str(value or "")).lower()
+        if not normalized:
+            return False
+        hidden_terms = ("不可见", "不外露", "未露出", "不显示", "被遮挡", "完全遮挡", "看不到", "notvisible", "hidden", "occluded")
+        return any(term in normalized for term in hidden_terms)
+
+    return explicitly_not_visible(clothing.get("鞋面可见性")) and explicitly_not_visible(clothing.get("脚踝可见性"))
+
+
+def refresh_role_source_review_profile(payload: dict[str, Any]) -> None:
+    """Reclassify source review metadata without changing any source facts."""
+    profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else None
+    if not profile or profile.get("status") not in {"complete", "source_review"}:
+        return
+    structure = profile.get("structuredDescription") if isinstance(profile.get("structuredDescription"), dict) else {}
+    snapshot = payload.get("sourceSnapshot") if isinstance(payload.get("sourceSnapshot"), dict) else {}
+    blocking = required_source_review_paths(structure, snapshot)
+    source_review = snapshot.get("needsReview") if isinstance(snapshot.get("needsReview"), list) else []
+    unobservable = lower_body_details_unobservable(structure)
+    non_blocking = list(dict.fromkeys(
+        path for path in source_review
+        if unobservable and path in UNOBSERVABLE_LOWER_BODY_PATHS and path not in blocking
+    ))
+    profile["sourceReviewPaths"] = blocking
+    profile["nonBlockingSourceReviewPaths"] = non_blocking
+    profile["needsReview"] = blocking
+    if non_blocking:
+        profile["sourceReviewNotes"] = [
+            "原片画面未显示或遮挡下半身；衣长、摆型、拖尾、摆与地面关系及鞋款继续保留未知，提示词不补造这些源事实。"
+        ]
+    if blocking:
+        profile["status"] = "source_review"
+        profile["reviewReason"] = "目标脸部本地化已完成；仍有可观察且未确认的源视觉字段，需核对后才能生成资产图。"
+    else:
+        profile["status"] = "complete"
+        profile.pop("reviewReason", None)
+
+
+def footwear_hidden_by_garment(structure: Any) -> bool:
+    """True only when explicit hem and both visibility fields prove full coverage."""
+    fields = structure if isinstance(structure, dict) else {}
+    clothing = fields.get("服装") if isinstance(fields.get("服装"), dict) else {}
+    hem = re.sub(r"\s+", "", str(clothing.get("摆与地面关系") or ""))
+    length = re.sub(r"\s+", "", str(clothing.get("衣长") or ""))
+    hem_covers = any(term in hem for term in ("及地", "触地", "接地", "落地", "完全覆盖脚", "覆盖鞋履", "遮住鞋履", "覆盖鞋面"))
+    if "近地面" in hem and any(term in length for term in ("长裙", "长摆", "及地", "拖地", "长袍", "礼服裙")):
+        hem_covers = True
+    hidden_states = ("不可见", "不外露", "不露出", "不显示", "完全遮挡", "完全覆盖", "被遮挡", "无外露", "未露出", "隐藏")
+    shoe = re.sub(r"\s+", "", str(clothing.get("鞋面可见性") or ""))
+    ankle = re.sub(r"\s+", "", str(clothing.get("脚踝可见性") or ""))
+    return hem_covers and any(term in shoe for term in hidden_states) and any(term in ankle for term in hidden_states)
 
 
 def merge_only_missing_visual(existing: Any, patch: Any) -> Any:
@@ -3983,6 +4828,19 @@ def normalize_legacy_role_source_structure(structure: Any) -> tuple[dict[str, An
                 canonical["袖型"] = labeled_sleeve.group(1).strip()
         if section == "服装" and canonical.get("纹样位置") == "unknown" and str(old.get("纹样") or "").strip() in {"无", "无明显纹样", "没有纹样"}:
             canonical["纹样位置"] = "不适用：源服装未观察到纹样"
+        if section == "服装":
+            merged_observations = []
+            for alias, label in (("内中外层", "已观察衣件组合（层次未拆分，原文保留）"), ("领袖", "已观察领袖组合（领型/袖型未拆分，原文保留）")):
+                raw_observation = str(old.get(alias) or "").strip()
+                if raw_observation:
+                    merged_observations.append(f"{label}：{raw_observation}")
+            if merged_observations:
+                existing_silhouette = str(canonical.get("结构与廓形") or "").strip()
+                if existing_silhouette.lower() == "unknown":
+                    canonical["结构与廓形"] = "；".join(merged_observations)
+                    review.append("服装.结构与廓形")
+                else:
+                    canonical["结构与廓形"] = "；".join([existing_silhouette, *merged_observations])
         result[section] = canonical
         result.setdefault("sourceAliasObservations", {})
         if isinstance(result["sourceAliasObservations"], dict):
@@ -4004,19 +4862,39 @@ def build_source_snapshot(asset: dict[str, Any]) -> dict[str, Any]:
     if asset.get("asset_type") == "角色":
         source_structure, normalized_review = normalize_legacy_role_source_structure(source_structure)
         source_review = list(dict.fromkeys([*source_review, *normalized_review]))
+    is_prop = asset.get("asset_type") == "道具"
+    prop_source_name = pick_payload_text(payload, ["原剧道具名称", "原剧名称", "道具名称"])
+    prop_source_description = pick_payload_text(payload, ["原剧道具描述", "原剧描述", "原剧视觉描述"])
+    prop_id = pick_payload_text(payload, ["道具编号", "道具ID"])
+    prop_variable = pick_payload_text(payload, ["道具资产变量", "变量"]) or str(asset.get("variable") or "")
+    prop_facts = {}
+    if is_prop:
+        prop_facts = {
+            "propId": prop_id,
+            "variable": prop_variable,
+            "sourceName": prop_source_name,
+            "sourceDescription": prop_source_description,
+            "function": pick_payload_text(payload, ["剧情功能", "剧情用途", "剧情作用"]),
+            "screenshotCandidates": payload.get("原剧截图时间点候选") or payload.get("截图候选") or [],
+        }
+    prop_needs_review = []
+    if is_prop and not prop_source_name:
+        prop_needs_review.append("原剧道具名称")
+    if is_prop and not prop_source_description:
+        prop_needs_review.append("原剧道具描述")
     source = {
         "schemaVersion": ASSET_SOURCE_SCHEMA_VERSION,
-        "coreDescription": pick_payload_text(payload, ["原剧核心形象描述", "原剧场景描述", "原剧道具描述"]),
-        "visualDescription": pick_payload_text(child, ["原剧视觉形象描述", "原剧视觉描述"]) or pick_payload_text(payload, ["原剧视觉形象描述", "原剧视觉描述"]),
-        "name": str(asset.get("name") or ""),
+        "coreDescription": prop_source_description if is_prop else pick_payload_text(payload, ["原剧核心形象描述", "原剧场景描述", "原剧道具描述"]),
+        "visualDescription": prop_source_description if is_prop else pick_payload_text(child, ["原剧视觉形象描述", "原剧视觉描述"]) or pick_payload_text(payload, ["原剧视觉形象描述", "原剧视觉描述"]),
+        "name": prop_source_name if is_prop else str(asset.get("name") or ""),
         "identity": pick_payload_text(payload, ["剧情身份", "剧情作用", "剧情功能"]),
         "sourceStructuredDescription": source_structure,
         "sourceSceneStructure": payload.get("原剧空间结构描述") or payload.get("原剧场景结构描述") or {},
-        "sourcePropFacts": payload.get("原剧道具事实") or {},
-        "childId": str(child.get("子资产编号") or payload.get("子资产编号") or ""),
-        "childName": pick_payload_text(child, ["原剧子资产名称"]),
+        "sourcePropFacts": prop_facts or payload.get("原剧道具事实") or {},
+        "childId": str(child.get("子资产编号") or payload.get("子资产编号") or prop_id),
+        "childName": prop_source_name if is_prop else pick_payload_text(child, ["原剧子资产名称"]),
         "facts": child.get("视觉事实来源") if isinstance(child.get("视觉事实来源"), dict) else {},
-        "needsReview": source_review,
+        "needsReview": list(dict.fromkeys([*source_review, *prop_needs_review])),
     }
     return source
 
@@ -4166,7 +5044,14 @@ def asset_localization_cache_key(source_assets: list[dict[str, Any]], project: d
     input_data = {
         "source_schema": ASSET_SOURCE_SCHEMA_VERSION,
         "localization_schema": ASSET_LOCALIZATION_SCHEMA_VERSION,
-        "source_assets": [asset.get("payload", {}).get("sourceSnapshot", {}) for asset in source_assets],
+        "source_assets": [
+            {
+                "assetType": asset.get("asset_type", ""),
+                "variable": asset.get("variable", ""),
+                "sourceSnapshot": asset.get("payload", {}).get("sourceSnapshot", {}),
+            }
+            for asset in source_assets
+        ],
         "legacy_preserved_design_constraints": [sanitize_legacy_preservation_constraints(asset.get("payload", {}).get("legacyPreservedDesignConstraints", {})) for asset in source_assets],
         "target_country": project.get("target_country", ""),
         "target_era": resolve_target_era(project, source_assets),
@@ -4253,7 +5138,10 @@ def canonical_localized_role_descriptions(profile: dict[str, Any]) -> tuple[str,
     face_text = segment("脸部：", face, ("目标族裔背景", "皮肤肤色", "脸型", "骨相", "眉形", "眼形", "虹膜颜色", "鼻形", "唇形", "面部毛发", "妆感", "皮肤质感"))
     hair_text = segment("发型：", hair, ("发色", "长度", "发型名称", "刘海 / 分线", "发丝质感", "整体状态"))
     body_text = segment("体态：", body, ("头身比", "身高体感", "体型", "肩颈", "腰腿", "肌肉 / 线条", "整体体态"))
-    clothing_text = segment("服装：", clothing, ("服装等级", "场合", "主色", "副色", "点缀色", "内衬", "中间层", "外层", "领型", "袖型", "腰线", "衣长", "下装", "摆型", "拖尾程度", "摆与地面关系", "鞋子", "鞋面可见性", "脚踝可见性", "面料", "纹样", "结构与廓形", "穿着状态"))
+    clothing_for_render = dict(clothing)
+    if usable_visual_value(clothing_for_render.get("穿着状态")):
+        clothing_for_render["穿着状态"] = stable_wear_state_text(str(clothing_for_render["穿着状态"]))
+    clothing_text = segment("服装：", clothing_for_render, ("服装等级", "场合", "主色", "副色", "点缀色", "内衬", "中间层", "外层", "领型", "袖型", "腰线", "衣长", "下装", "摆型", "拖尾程度", "摆与地面关系", "鞋子", "鞋面可见性", "脚踝可见性", "面料", "纹样", "结构与廓形", "穿着状态"))
     localized_name = str(profile.get("localizedName") or "").strip()
     if localized_name:
         identity = f"目标角色姓名：{localized_name}；{identity}" if identity else f"目标角色姓名：{localized_name}"
@@ -4342,11 +5230,16 @@ def required_source_review_paths(structure: Any, source_snapshot: dict[str, Any]
     source fields remain reviewable but do not hold the asset image pipeline.
     """
     target_supplied = {("基础设定", "国家 / 时代 / 朝代"), ("脸部特征", "脸型"), ("发型", "发型名称")}
+    lower_body_unobservable = lower_body_details_unobservable(structure)
     source_review = set(source_snapshot.get("needsReview") or []) if isinstance(source_snapshot.get("needsReview"), list) else set()
     result: list[str] = []
     fields = structure if isinstance(structure, dict) else {}
     for section, field in ROLE_REQUIRED_VISUAL_PATHS:
         if (section, field) in target_supplied:
+            continue
+        if lower_body_unobservable and f"{section}.{field}" in UNOBSERVABLE_LOWER_BODY_PATHS:
+            continue
+        if section == "服装" and field == "鞋子" and footwear_hidden_by_garment(fields):
             continue
         section_value = fields.get(section) if isinstance(fields.get(section), dict) else {}
         value = section_value.get(field)
@@ -4413,13 +5306,9 @@ def merge_localized_profiles(
             # The structured target profile is canonical. Never let separate
             # free-text fields reintroduce conflicting hair, skin or face traits.
             profile["coreDescription"], profile["visualDescription"] = canonical_localized_role_descriptions(profile)
-            source_snapshot = payload.get("sourceSnapshot", {})
-            source_review_paths = required_source_review_paths(localized_structure, source_snapshot)
-            profile["sourceReviewPaths"] = source_review_paths
-            if source_review_paths:
-                profile["status"] = "source_review"
-                profile["needsReview"] = source_review_paths
-                profile["reviewReason"] = "目标脸部本地化已完成；源视频中以下外观事实不可确认，需人工核对后才能生成资产图。"
+            payload["localizedProfile"] = profile
+            refresh_role_source_review_profile(payload)
+            profile = payload["localizedProfile"]
         payload["localizedProfile"] = profile
         errors.extend(f"{variable}: {error}" for error in profile_errors)
         projected = project_asset_profile_to_legacy(payload, {"remake_mode": "overseas_localization", "target_country": target_country or "非中国目标", "target_era": target_era or "当代", "target_language": target_language})
@@ -4540,6 +5429,8 @@ def localized_profile_validation_errors(asset: dict[str, Any], target_country: s
     if asset.get("asset_type") != "角色":
         if not usable_visual_value(profile.get("coreDescription")):
             errors.append("目标自包含视觉描述缺失")
+        if asset.get("asset_type") == "道具":
+            errors.extend(prop_source_target_category_errors(asset, profile))
         return errors
     structure = profile.get("structuredDescription") if isinstance(profile.get("structuredDescription"), dict) else {}
     basics = structure.get("基础设定") if isinstance(structure.get("基础设定"), dict) else {}
@@ -4554,22 +5445,81 @@ def localized_profile_validation_errors(asset: dict[str, Any], target_country: s
             errors.append(f"{label}缺失或不可用")
     if profile.get("status") != "source_review":
         errors.extend(role_structured_missing_paths(structure))
-    target_text = " ".join([
-        str(profile.get("coreDescription") or ""), str(profile.get("visualDescription") or ""),
-        str(basics.get("族裔外貌") or ""), str(face.get("目标族裔背景") or ""),
-        json.dumps(structure, ensure_ascii=False),
+    target_ethnicity_text = " ".join([
+        str(basics.get("族裔外貌") or ""),
+        str(face.get("目标族裔背景") or ""),
     ])
     lock = explicit_user_visual_lock(payload)
-    target_is_east_asian = any(term in target_text for term in (
-        "东亚裔", "东亚人", "华裔", "中国裔", "亚裔混血", "亚洲裔混血", "泛亚裔", "Asian-American", "Asian American", "East Asian",
-    ))
-    explicit_lock = any(term in lock.lower() for term in ("东亚", "华裔", "中国裔", "亚裔", "asian", "east asian", "chinese-american", "chinese american"))
-    if is_western_target_country(target_country) and target_is_east_asian and not explicit_lock:
+    normalized_ethnicity = re.sub(r"[\s_\-‐‑‒–—]+", "", target_ethnicity_text).casefold()
+    east_asian_ethnicity_markers = (
+        "东亚裔", "东亚人", "东亚混血", "华裔", "中国裔", "中国人", "韩裔", "韩国裔", "韩国人",
+        "日裔", "日本裔", "日本人", "亚洲裔混血", "亚裔混血", "泛亚裔",
+        "eastasian", "asianamerican", "chineseamerican", "chineseamerican", "koreanamerican", "japaneseamerican",
+        "eastasianamerican", "chineseamericanmixed", "koreanamericanmixed", "japaneseamericanmixed",
+    )
+    if is_western_target_country(target_country) and any(marker.casefold() in normalized_ethnicity for marker in east_asian_ethnicity_markers) and not lock:
         errors.append("欧美目标未提供用户族裔锁定但仍输出东亚/泛亚裔身份；需按目标背景重新设计具体族裔")
+    target_text = " ".join([
+        str(profile.get("coreDescription") or ""), str(profile.get("visualDescription") or ""),
+        json.dumps(structure, ensure_ascii=False),
+    ])
     chinese_scene_markers = ("现代中国", "中国婚礼", "中国传统婚礼", "中国古代", "当代中国", "Chinese wedding", "modern China")
     if is_western_target_country(target_country) and any(marker.lower() in target_text.lower() for marker in chinese_scene_markers):
         errors.append("目标画像仍含中国源国家/婚礼场景描述")
     return list(dict.fromkeys(errors))
+
+
+PROP_OBJECT_CATEGORY_TERMS: dict[str, tuple[str, ...]] = {
+    "chicken_crate": ("鸡笼", "塑料周转笼", "周转笼", "鸡运输笼", "chicken crate", "chicken cage", "plastic crate"),
+    "sack_or_bag": ("麻袋", "布袋", "布包", "行李包", "旅行包", "burlap sack", "duffel bag", "travel bag", "cloth bag", "sack"),
+    "boutonniere": ("胸花", "新郎胸花", "玫瑰胸花", "boutonniere", "corsage", "lapel flower"),
+    "bridal_necklace": ("项链", "钻饰项链", "necklace", "bridal necklace"),
+    "bridal_headpiece": ("头纱", "头饰", "发饰", "花朵发饰", "veil", "bridal headpiece", "hairpiece"),
+    "bow_tie": ("领结", "蝴蝶结领结", "bow tie", "bowtie", "necktie bow"),
+    "aisle_floral_decor": ("路引", "花艺", "花卉装饰", "鸟笼形装饰", "aisle arrangement", "floral stand", "wedding aisle decor"),
+}
+
+
+def prop_source_target_category_errors(asset: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    source = payload.get("sourceSnapshot") if isinstance(payload.get("sourceSnapshot"), dict) else {}
+    facts = source.get("sourcePropFacts") if isinstance(source.get("sourcePropFacts"), dict) else {}
+    source_text = str(facts.get("sourceName") or "")
+    target_text = str(profile.get("localizedName") or "")
+    source_categories: set[str] = set()
+    target_categories: set[str] = set()
+    for category, terms in PROP_OBJECT_CATEGORY_TERMS.items():
+        if any(term.lower() in source_text.lower() for term in terms):
+            source_categories.add(category)
+        if any(term.lower() in target_text.lower() for term in terms):
+            target_categories.add(category)
+    # Reject only a clear one-object swap. Composite names and unfamiliar valid
+    # translations remain reviewable instead of being blocked by a keyword list.
+    if len(source_categories) == len(target_categories) == 1 and source_categories != target_categories:
+        return [f"{asset.get('variable') or asset.get('name')}: 源道具主类别 {next(iter(source_categories))} 与目标主名称 {next(iter(target_categories))} 冲突"]
+    return []
+
+
+def prop_source_target_category_warnings(asset: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    source = payload.get("sourceSnapshot") if isinstance(payload.get("sourceSnapshot"), dict) else {}
+    facts = source.get("sourcePropFacts") if isinstance(source.get("sourcePropFacts"), dict) else {}
+    source_text = str(facts.get("sourceName") or "")
+    target_text = str(profile.get("localizedName") or "")
+    source_categories = {
+        category for category, terms in PROP_OBJECT_CATEGORY_TERMS.items()
+        if any(term.lower() in source_text.lower() for term in terms)
+    }
+    target_categories = {
+        category for category, terms in PROP_OBJECT_CATEGORY_TERMS.items()
+        if any(term.lower() in target_text.lower() for term in terms)
+    }
+    missing = source_categories - target_categories
+    if missing:
+        return [f"源道具名称包含的类别未完整反映在目标名称中，请核对目标描述：{', '.join(sorted(missing))}"]
+    if not target_categories:
+        return ["目标名称未匹配已知物件类别，需人工核对源物件身份"]
+    return []
 
 
 def run_target_localization(
@@ -4581,6 +5531,27 @@ def run_target_localization(
     target_country = str(project.get("target_country") or "").strip()
     if target_country in {"", "中国", "中国大陆"}:
         return {"stage": "source_only", "cache_hit": False, "cache_key": "", "errors": [], "profiles": []}
+    incomplete_source_props = []
+    for asset in assets:
+        if asset.get("asset_type") != "道具":
+            continue
+        source = asset.get("payload", {}).get("sourceSnapshot", {}) if isinstance(asset.get("payload"), dict) else {}
+        facts = source.get("sourcePropFacts") if isinstance(source.get("sourcePropFacts"), dict) else {}
+        missing = [
+            label for label, value in (
+                ("原剧道具名称", facts.get("sourceName")),
+                ("原剧道具描述", facts.get("sourceDescription")),
+                ("道具编号/稳定变量", facts.get("propId") or facts.get("variable")),
+            )
+            if not usable_visual_value(value)
+        ]
+        if missing:
+            incomplete_source_props.append(f"{asset.get('variable') or asset.get('name')}: 源道具事实缺失 {', '.join(missing)}")
+    if incomplete_source_props:
+        return {
+            "stage": "source_review", "cache_hit": False, "cache_key": "", "errors": incomplete_source_props,
+            "profiles": [], "rawAttempts": [],
+        }
     target_era = resolve_target_era(project, assets)
     cache_key = asset_localization_cache_key(assets, project, agent)
     cached = find_cached_asset_localization(conn, cache_key)
@@ -4969,6 +5940,7 @@ def load_reusable_storyboard_cache(
     project_id: str,
     episode_id: str,
     video_signature: str,
+    context_signature: str,
 ) -> list[dict[str, Any]]:
     if not video_signature:
         return []
@@ -4985,11 +5957,39 @@ def load_reusable_storyboard_cache(
             source.get("来源") == "storyboardPromptGeneration"
             and source.get("episodeId") == episode_id
             and source.get("videoSignature") == video_signature
+            and source.get("analysisContextSignature") == context_signature
             and storyboard_has_real_shot_facts(payload)
         ):
             item["payload"] = payload
             cached.append(item)
     return cached
+
+
+def storyboard_analysis_context_signature(project: dict[str, Any], assets: list[dict[str, Any]]) -> str:
+    config_prompt = str(load_agent_config("storyboardPromptGeneration").get("prompt") or "")
+    routed_agent = {"prompt": config_prompt}
+    route_project_agent_prompt(routed_agent, project, storyboard=True)
+    identity = {
+        "schemaVersion": "storyboard-analysis-context-v2",
+        "mode": project.get("remake_mode", "overseas_localization"),
+        "targetCountry": project.get("target_country", ""),
+        "targetLanguage": project.get("target_language", ""),
+        "sourceLanguage": project.get("source_language", ""),
+        "visualStyle": project.get("storyboard_visual_style", "live_action"),
+        "routedPrompt": routed_agent["prompt"],
+        "assets": [
+            {
+                "type": asset.get("asset_type", ""),
+                "variable": asset.get("variable", ""),
+                "name": asset.get("name", ""),
+                "localizedName": asset.get("localized_name", ""),
+                "profileSourceHash": localized_profile_source_hash(asset.get("payload", {}) if isinstance(asset.get("payload"), dict) else {}),
+            }
+            for asset in assets
+        ],
+    }
+    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def storyboard_time_fit_errors(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> list[str]:
@@ -5022,24 +6022,100 @@ def storyboard_times_fit_source(storyboards: list[dict[str, Any]], episode: dict
     return not storyboard_time_fit_errors(storyboards, episode)
 
 
+def parse_duration_seconds(value: Any) -> float | None:
+    """解析镜头声明时长（如 "1秒" / "2.5s" / 3）；无有效正时长时返回 None。"""
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        return seconds if seconds > 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower().replace(" ", "")
+    if not text:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)(?:秒|s|sec|secs|seconds)?$", text)
+    if not match:
+        return None
+    seconds = float(match.group(1))
+    return seconds if seconds > 0 else None
+
+
+def set_storyboard_shot_time_range(shot: dict[str, Any], start_text: str, end_text: str) -> None:
+    value = shot.get("时间范围") if isinstance(shot.get("时间范围"), (dict, str)) else shot.get("镜头时间范围")
+    if isinstance(value, dict):
+        value["开始时间"] = start_text
+        value["结束时间"] = end_text
+        shot["时间范围"] = value
+    else:
+        shot["时间范围"] = f"{start_text}-{end_text}"
+
+
+def storyboard_shot_range_text(shot: dict[str, Any]) -> str:
+    value = shot.get("时间范围") if isinstance(shot.get("时间范围"), (dict, str)) else shot.get("镜头时间范围")
+    if isinstance(value, dict):
+        start = str(value.get("开始时间") or "").strip()
+        end = str(value.get("结束时间") or "").strip()
+        return f"{start}-{end}" if start or end else ""
+    return str(value or "").strip()
+
+
 def repair_storyboard_time_bounds(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> list[str]:
-    """修复模型偶发的分镜边界笔误：分镜结束时间早于其内部镜头的结束时间
-    （如分镜标注 24-29 秒，但其最后一个镜头为 29-30 秒）。
+    """修复模型偶发的分镜边界笔误：
+    1. 零长度区间（结束时间误写成与开始时间相同）——仅当镜头/分镜声明了明确时长、
+       或内部镜头给出正长度区间时，才按该证据补足结束时间；证据不足或补足后与
+       下一分镜/视频时长碰撞时不动，交由校验拒绝并提示重试。
+    2. 分镜结束时间早于其内部镜头的结束时间（如分镜标注 24-29 秒，但其最后一个
+       镜头为 29-30 秒）。
     仅在“把分镜结束延长到最后一个镜头结束、且不越过下一段分镜的开始时间与
     视频实际时长”时执行；不改动任何镜头内容与事实。返回修复说明列表。"""
     notes: list[str] = []
     duration = next((float(episode[key]) for key in ("duration_seconds", "durationSeconds", "video_duration") if episode.get(key) not in (None, "")), None)
     for index, storyboard in enumerate(storyboards):
+        title = str(storyboard.get("title") or f"分镜 {index + 1}")
         board_start, board_end = parse_storyboard_range(str(storyboard.get("time_range") or ""))
+        next_start = parse_storyboard_range(str(storyboards[index + 1].get("time_range") or ""))[0] if index + 1 < len(storyboards) else None
+        upper_bound = next_start if next_start is not None else duration
+        shots = [shot for shot in (storyboard.get("payload") or {}).get("镜头列表", []) if isinstance(shot, dict)]
+        # 1a. 零长度镜头：按镜头自身声明时长补足结束时间（不越过本分镜可用上界）。
+        for shot in shots:
+            shot_text = storyboard_shot_range_text(shot)
+            if not re.search(r"\d", shot_text):
+                continue
+            shot_start, shot_end = parse_storyboard_range(shot_text)
+            if shot_end > shot_start:
+                continue
+            declared = parse_duration_seconds(shot.get("时长") or shot.get("镜头时长"))
+            if declared is None:
+                continue
+            candidate_end = shot_start + declared
+            shot_ceiling = board_end if board_end > board_start else upper_bound
+            if shot_ceiling is not None and candidate_end > shot_ceiling + 0.05:
+                continue
+            set_storyboard_shot_time_range(shot, format_timecode(shot_start), format_timecode(candidate_end))
+            shot_label = str(shot.get("镜头编号") or "未编号镜头")
+            notes.append(f"{title} 的{shot_label} 零长度区间 {shot_text} → {format_timecode(shot_start)}-{format_timecode(candidate_end)}（按声明时长补足，未改镜头内容）")
+        # 1b. 零长度分镜：按内部镜头的正长度区间（含 1a 修复后）补足结束时间。
+        if board_end <= board_start:
+            positive_ends = [
+                end
+                for end in (parse_storyboard_range(storyboard_shot_range_text(shot))[1] for shot in shots)
+                if end > board_start
+            ]
+            if positive_ends:
+                candidate_end = max(positive_ends)
+                if upper_bound is None or candidate_end <= upper_bound + 0.05:
+                    old_range_text = str(storyboard.get("time_range") or "空")
+                    new_end_text = format_timecode(candidate_end)
+                    storyboard["time_range"] = f"{format_timecode(board_start)}-{new_end_text}"
+                    board_range = (storyboard.get("payload") or {}).get("分镜时间范围")
+                    if isinstance(board_range, dict):
+                        board_range["结束时间"] = new_end_text
+                    notes.append(f"{title} 零长度区间 {old_range_text} → {format_timecode(board_start)}-{new_end_text}（按内部镜头结束补足，未改镜头内容）")
+                    board_end = candidate_end
         if board_end <= board_start:
             continue
         shot_ends: list[float] = []
-        for shot in (storyboard.get("payload") or {}).get("镜头列表", []):
-            if not isinstance(shot, dict):
-                continue
-            shot_range = shot.get("时间范围")
-            shot_text = f"{shot_range.get('开始时间', '')}-{shot_range.get('结束时间', '')}" if isinstance(shot_range, dict) else str(shot_range or "")
-            _, shot_end = parse_storyboard_range(shot_text)
+        for shot in shots:
+            _, shot_end = parse_storyboard_range(storyboard_shot_range_text(shot))
             if shot_end > 0:
                 shot_ends.append(shot_end)
         if not shot_ends:
@@ -5047,8 +6123,6 @@ def repair_storyboard_time_bounds(storyboards: list[dict[str, Any]], episode: di
         max_shot_end = max(shot_ends)
         if max_shot_end <= board_end + 0.05:
             continue
-        next_start = parse_storyboard_range(str(storyboards[index + 1].get("time_range") or ""))[0] if index + 1 < len(storyboards) else None
-        upper_bound = next_start if next_start is not None else duration
         if upper_bound is not None and max_shot_end > upper_bound + 0.05:
             continue
         old_end_text = format_timecode(board_end)
@@ -5057,7 +6131,6 @@ def repair_storyboard_time_bounds(storyboards: list[dict[str, Any]], episode: di
         board_range = (storyboard.get("payload") or {}).get("分镜时间范围")
         if isinstance(board_range, dict):
             board_range["结束时间"] = new_end_text
-        title = str(storyboard.get("title") or f"分镜 {index + 1}")
         notes.append(f"{title} 结束时间 {old_end_text} → {new_end_text}（含内部镜头结束，未改镜头内容）")
     return notes
 
@@ -5267,7 +6340,38 @@ def format_storyboard_prompt(
     refs: list[str],
     allowed_items: list[dict[str, str]],
 ) -> str:
-    roles, scenes, _ = storyboard_refs_by_type(refs, allowed_items)
+    roles, scenes, other_assets = storyboard_refs_by_type(refs, allowed_items)
+    observation_fields = ("人物站位", "出镜角色", "背景", "场景", "出镜场景")
+    shots = payload.get("镜头列表") if isinstance(payload.get("镜头列表"), list) else []
+    observation_text = " ".join(
+        storyboard_text_value(shot.get(field))
+        for shot in shots if isinstance(shot, dict)
+        for field in observation_fields
+        if storyboard_text_value(shot.get(field))
+    )
+    if not observation_text:
+        observation_text = " ".join(
+            storyboard_text_value(payload.get(field))
+            for field in observation_fields
+            if storyboard_text_value(payload.get(field))
+        )
+    if observation_text:
+        observed_roles: list[str] = []
+        observed_scenes: list[str] = []
+        for item in allowed_items:
+            asset_type = str(item.get("资产类型") or "")
+            token_values = [item.get("资产变量"), item.get("本地化资产名称"), item.get("源资产名称"), item.get("剧情身份")]
+            if not any(str(token or "").strip() and str(token).strip() in observation_text for token in token_values):
+                continue
+            if asset_type == "角色" and item.get("资产变量") not in observed_roles:
+                observed_roles.append(str(item["资产变量"]))
+            elif asset_type == "场景" and item.get("资产变量") not in observed_scenes:
+                observed_scenes.append(str(item["资产变量"]))
+        roles = observed_roles or ["待核对：人物站位未能唯一关联角色"]
+        scenes = observed_scenes or ["待核对：背景未能唯一关联场景"]
+    elif roles or scenes:
+        roles = [f"{value}（引用待核对，不表示全部出镜）" for value in roles] or ["待核对"]
+        scenes = [f"{value}（引用待核对，不表示当前背景）" for value in scenes] or ["待核对"]
     segments = prompt_segments_from_payload(payload, prompt, refs)
     lines = [
         f"镜头时长：{time_range}",
@@ -5275,6 +6379,8 @@ def format_storyboard_prompt(
         f"场景：{join_asset_refs(scenes)}",
         "画面描述：",
     ]
+    if other_assets:
+        lines.append(f"参考资产（被引用不表示全部出现在画面中）：{join_asset_refs(other_assets)}")
     for index, segment in enumerate(segments, start=1):
         clean = re.sub(r"^片段\d+[：:]\s*", "", segment).strip()
         if segment.startswith("片段说明：") or segment.startswith("分镜"):
@@ -5313,55 +6419,90 @@ def sanitize_storyboard_asset_references(
     storyboards: list[dict[str, Any]],
     asset_occurrence_index: list[dict[str, Any]],
     old_to_display: dict[str, str],
+    assets: list[dict[str, Any]] | None = None,
 ) -> None:
-    all_display_variables = set(old_to_display.values())
-    all_old_variables = set(old_to_display.keys())
+    current_assets = assets or []
+    token_candidates: dict[str, list[dict[str, Any]]] = {}
+    for asset in current_assets:
+        payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+        for token in (
+            asset.get("variable"), asset.get("display_variable"), payload.get("旧展示资产变量"),
+            asset.get("source_variable_alias"), payload.get("源变量别名"),
+        ):
+            text = str(token or "").strip()
+            if text:
+                token_candidates.setdefault(text, []).append(asset)
     for storyboard in storyboards:
-        allowed = allowed_asset_variables_for_time_range(storyboard.get("time_range", ""), asset_occurrence_index)
-        allowed_items = allowed_asset_items_for_time_range(storyboard.get("time_range", ""), asset_occurrence_index)
-        allowed_display: list[str] = []
-        for value in sorted(allowed):
-            display_variable = old_to_display.get(value, value if value.startswith("@") else "")
-            if display_variable and display_variable not in allowed_display:
-                allowed_display.append(display_variable)
         payload = storyboard.get("payload") if isinstance(storyboard.get("payload"), dict) else {}
         prompt = str(storyboard.get("prompt") or "")
         refs = payload.get("引用资产变量") if isinstance(payload.get("引用资产变量"), list) else []
-        normalized_refs = []
-        for value in refs:
-            text = old_to_display.get(str(value), str(value))
-            if text in allowed_display and text not in normalized_refs:
-                normalized_refs.append(text)
-        structured_text = json.dumps({"片段说明": payload.get("片段说明"), "镜头列表": payload.get("镜头列表")}, ensure_ascii=False)
-        for value in extract_display_variables(structured_text):
-            if value in allowed_display and value not in normalized_refs:
-                normalized_refs.append(value)
-        for value in extract_display_variables(prompt):
-            if value not in normalized_refs:
-                if value in allowed_display:
-                    normalized_refs.append(value)
-        if not normalized_refs:
-            for value in allowed_display:
-                if value not in normalized_refs:
-                    normalized_refs.append(value)
-        else:
-            normalized_refs = [value for value in normalized_refs if value in prompt or not extract_display_variables(prompt)]
-        for value in normalized_refs:
-            if value not in prompt:
-                prompt = f"{value} {prompt}"
-        for value in allowed_display:
-            if value in prompt and value not in normalized_refs:
-                normalized_refs.append(value)
-        invalid_display = (all_display_variables | all_old_variables) - allowed - set(allowed_display) - set(normalized_refs)
-        for variable in sorted(invalid_display, key=len, reverse=True):
-            prompt = prompt.replace(variable, "")
+        manual_override = payload.get("引用资产变量手动覆盖") is True
+        raw_tokens = [str(value).strip() for value in refs if str(value).strip()]
+        # Legacy boards keep their observed action in free text rather than
+        # structured shots. Resolve known tokens there too, but never scan the
+        # global segment summary or the coarse occurrence index.
+        raw_tokens.extend(token for token in token_candidates if token and token in prompt)
+        shots = payload.get("镜头列表") if isinstance(payload.get("镜头列表"), list) else []
+        shot_fields = ("机位与构图", "背景", "人物站位", "动作过程", "运镜", "台词与声音", "必要衔接", "衔接", "镜头描述")
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            shot_text = json.dumps({field: shot.get(field) for field in shot_fields}, ensure_ascii=False)
+            # Match known tokens verbatim. A generic @word regex consumes
+            # adjacent Chinese prose (for example @Stage前) as part of a name.
+            raw_tokens.extend(token for token in token_candidates if token and token in shot_text)
+
+        normalized_refs: list[str] = []
+        review_refs: list[dict[str, Any]] = []
+        resolved_items_by_variable: dict[str, dict[str, str]] = {}
+        for raw_token in dict.fromkeys(raw_tokens):
+            candidates = token_candidates.get(raw_token, [])
+            unique_candidates = {str(item.get("id") or item.get("variable") or id(item)): item for item in candidates}
+            if len(unique_candidates) != 1:
+                if len(unique_candidates) > 1:
+                    review_refs.append({
+                        "token": raw_token,
+                        "candidateVariables": sorted(str(item.get("variable") or "") for item in unique_candidates.values()),
+                        "reason": "展示变量对应多个稳定资产，未猜测匹配对象",
+                    })
+                continue
+            asset = next(iter(unique_candidates.values()))
+            stable_variable = str(asset.get("variable") or "").strip()
+            display_variable = str(asset.get("display_variable") or "")
+            if not stable_variable or not display_variable:
+                continue
+            if stable_variable not in normalized_refs:
+                normalized_refs.append(stable_variable)
+            resolved_items_by_variable[stable_variable] = {
+                "资产变量": display_variable,
+                "资产类型": str(asset.get("asset_type") or ""),
+                "本地化资产名称": str(asset.get("localized_name") or asset.get("name") or ""),
+                "源资产名称": str(asset.get("name") or ""),
+                "剧情身份": str(payload.get("剧情身份") or payload.get("身份定位") or ""),
+            }
+
+        # An appearance index is coarse coverage, not proof that an asset was
+        # absent from a particular shot. Keep it as audit context only.
+        display_refs = [resolved_items_by_variable[value]["资产变量"] for value in normalized_refs if value in resolved_items_by_variable]
+        allowed_items = list(resolved_items_by_variable.values())
+        if display_refs and not manual_override:
+            for value in display_refs:
+                if value not in prompt:
+                    prompt = f"{value} {prompt}"
+        for review in review_refs:
+            prompt = prompt.replace(review["token"], "")
         payload["引用资产变量"] = normalized_refs
+        payload["引用资产显示变量"] = display_refs
+        payload["资产引用待核对"] = review_refs
         payload["资产映射校验"] = {
-            "允许资产变量": sorted(allowed),
+            "允许资产变量": [],
             "采用资产变量": normalized_refs,
+            "索引可用于过滤": False,
+            "索引用途": "粗粒度出现覆盖，仅供核对，不据此删除逐镜明确引用",
+            "待核对引用": review_refs,
         }
         storyboard["payload"] = payload
-        formatted_prompt = format_storyboard_prompt(storyboard.get("time_range", ""), payload, prompt, normalized_refs, allowed_items)
+        formatted_prompt = format_storyboard_prompt(storyboard.get("time_range", ""), payload, prompt, display_refs, allowed_items)
         storyboard["prompt"] = enforce_no_subtitle_generation(formatted_prompt)
         payload["最终视频生成提示词"] = storyboard["prompt"]
         for text_key in ["分镜具体动作描述", "视频生成约束"]:
@@ -5379,9 +6520,10 @@ def normalize_storyboards_from_agent(parsed: dict[str, Any], old_to_display: dic
     for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
+        stable_references = item.get("引用资产变量") or item.get("引用资产") or item.get("资产变量")
         item = convert_storyboard_asset_variables(item, old_to_display)
         if isinstance(root_segment_summary, (dict, str)) and not item.get("片段说明"):
-            item["片段说明"] = convert_storyboard_asset_variables(root_segment_summary, old_to_display)
+            item["全局片段说明"] = convert_storyboard_asset_variables(root_segment_summary, old_to_display)
         prompt = item.get("最终视频生成提示词") or item.get("视频生成提示词") or item.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             prompt_parts = [
@@ -5408,9 +6550,9 @@ def normalize_storyboards_from_agent(parsed: dict[str, Any], old_to_display: dic
             has_legacy_body = bool(str(item.get("分镜具体动作描述") or item.get("分镜场景设定") or "").strip())
             if not has_shot_records and not has_legacy_body:
                 continue
-        references = item.get("引用资产变量") or item.get("引用资产") or item.get("资产变量")
+        references = stable_references
         if isinstance(references, list):
-            item["引用资产变量"] = [old_to_display.get(str(value), str(value)) for value in references]
+            item["引用资产变量"] = [str(value).strip() for value in references if str(value).strip()]
         item["最终视频生成提示词"] = prompt
         time_range = item.get("分镜时间范围") or item.get("时间范围") or item.get("time_range")
         if isinstance(time_range, dict):
@@ -5499,11 +6641,22 @@ def run_series_analysis(conn: sqlite3.Connection, project: dict[str, Any], paren
         update_series_progress("正在提取资产")
         try:
             asset_task = run_asset_extraction(conn, project, episode["id"])
+            if asset_task.get("status") != "成功":
+                raise RuntimeError(f"资产提取失败：{asset_task.get('message') or '未知错误'}")
             update_series_progress(
                 "正在生成分镜",
                 {"当前资产任务ID": asset_task["id"], "当前资产数量": asset_task.get("result", {}).get("资产数量", 0)},
             )
             storyboard_task = run_storyboard_generation(conn, project, episode["id"])
+            storyboard_result = storyboard_task.get("result") or {}
+            storyboard_count = int(storyboard_result.get("分镜数量") or 0)
+            storyboard_segment_count = int(storyboard_result.get("分镜片段数量") or 0)
+            if storyboard_task.get("status") != "成功":
+                raise RuntimeError(f"分镜生成失败：{storyboard_task.get('message') or '未知错误'}")
+            if storyboard_count == 0 or storyboard_segment_count == 0:
+                raise RuntimeError(
+                    f"分镜生成结果为空（分镜片段 {storyboard_segment_count}，镜头 {storyboard_count}），本集不计成功"
+                )
             successes.append(
                 {
                     "episodeId": episode["id"],
@@ -5511,7 +6664,7 @@ def run_series_analysis(conn: sqlite3.Connection, project: dict[str, Any], paren
                     "assetTaskId": asset_task["id"],
                     "storyboardTaskId": storyboard_task["id"],
                     "assetCount": asset_task.get("result", {}).get("资产数量", 0),
-                    "storyboardCount": storyboard_task.get("result", {}).get("分镜数量", 0),
+                    "storyboardCount": storyboard_count,
                 }
             )
             update_series_progress("已完成本集", {"当前分镜任务ID": storyboard_task["id"]})
@@ -5535,7 +6688,7 @@ def run_series_analysis(conn: sqlite3.Connection, project: dict[str, Any], paren
     }
     conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("整剧分析完成", now_iso(), project["id"]))
     message = f"整剧分析完成：成功 {len(successes)} 集，失败 {len(failures)} 集"
-    return {"message": message, "result": result}
+    return {"message": message, "result": result, "status": "成功" if not failures else "失败"}
 
 
 def run_asset_extraction(
@@ -5583,18 +6736,28 @@ def run_asset_extraction(
     cached_source = find_cached_asset_source(conn, source_cache_key) if source_cache_key else None
     legacy_source_cache_key = ""
     legacy_source_cache_hit = False
+    legacy_source_cache_version = ""
     if source_sha256 and not cached_source:
-        legacy_source_cache_key = asset_source_cache_key(
-            source_sha256, agent, project, history_assets,
-            prompt=ASSET_SOURCE_LEGACY_V1_PROMPT, pipeline_version="asset-source-snapshot-v1",
+        legacy_cache_candidates = (
+            (ASSET_SOURCE_LEGACY_V2_PROMPT, ASSET_SOURCE_SCHEMA_VERSION, ASSET_SOURCE_SCHEMA_VERSION),
+            (ASSET_SOURCE_LEGACY_V1_PROMPT, "asset-source-snapshot-v1", "asset-source-snapshot-v1"),
         )
-        cached_source = find_cached_asset_source(conn, legacy_source_cache_key)
-        if cached_source:
-            # Re-normalize the archived model payload under the current source
-            # contract and publish it with the current cache identity. Keep the
-            # consumed v1 identity only as provenance; never label v2 output as
-            # if it were still the old schema.
-            legacy_source_cache_hit = True
+        for legacy_prompt, legacy_pipeline_version, legacy_schema_version in legacy_cache_candidates:
+            candidate_key = asset_source_cache_key(
+                source_sha256, agent, project, history_assets,
+                prompt=legacy_prompt, pipeline_version=legacy_pipeline_version,
+            )
+            candidate_source = find_cached_asset_source(conn, candidate_key)
+            if candidate_source:
+                cached_source = candidate_source
+                legacy_source_cache_key = candidate_key
+                legacy_source_cache_version = legacy_schema_version
+                legacy_source_cache_hit = True
+                break
+        if legacy_source_cache_hit:
+            # Re-normalize the exact archived model payload under the current
+            # contract. The consumed cache identity remains explicit provenance.
+            pass
     raw_model_output = ""
     source_raw_audit_path = ""
     parsed_model_output: dict[str, Any] = {}
@@ -5675,7 +6838,7 @@ def run_asset_extraction(
             "流式事件": [(stage, chars) for stage, chars in stream_events],
         }
         message = f"资产提取失败：{model_error}"
-        task = create_task_with_status(conn, project["id"], episode["id"], "asset_extraction", "失败", message, result)
+        task = finish_or_create_task(conn, project["id"], episode["id"], "asset_extraction", "失败", message, result, task_id)
         record_agent_run(
             conn,
             task["id"],
@@ -5714,7 +6877,7 @@ def run_asset_extraction(
                     {
                         "consumedCacheKey": legacy_source_cache_key,
                         "cacheTaskId": cached_source.get("_source_task_id", ""),
-                        "schemaVersion": "asset-source-snapshot-v1",
+                        "schemaVersion": legacy_source_cache_version,
                         "renormalizedAs": ASSET_SOURCE_SCHEMA_VERSION,
                     }
                     if cached_source and legacy_source_cache_hit else {}
@@ -5727,42 +6890,69 @@ def run_asset_extraction(
                 "cache_hit": bool(cached_source),
             }
             message = "目标本地化校验失败，未发布目标资产；已保留可复用的纯源阶段结果。"
-            if task_id:
-                update_task_status(conn, task_id, "失败", message, failure_result)
-                failed_task = {"id": task_id, "project_id": project["id"], "episode_id": episode["id"], "task_type": "asset_extraction", "status": "失败", "message": message, "result": failure_result}
-            else:
-                failed_task = create_task_with_status(conn, project["id"], episode["id"], "asset_extraction", "失败", message, failure_result)
+            failed_task = finish_or_create_task(conn, project["id"], episode["id"], "asset_extraction", "失败", message, failure_result, task_id)
             record_agent_run(conn, failed_task["id"], project["id"], episode["id"], "assetSourceExtraction", agent, input_payload, {"sourceStageStatus": "complete", "资产源缓存键": source_cache_key, "资产源事实快照": source_fact_snapshot, "模型原始输出": raw_model_output})
             record_agent_run(conn, failed_task["id"], project["id"], episode["id"], "assetTargetLocalization", agent, {"targetCountry": target_country, "targetLanguage": target_language, "sourceSnapshotCount": len(source_fact_snapshot)}, {"cacheKey": localization_result.get("cache_key"), "rawAttempts": localization_result.get("rawAttempts", []), "errors": localization_result["errors"]})
             return failed_task
+    ensure_unique_asset_display_variables(assets_to_insert)
+    reconciliation = reconcile_asset_extraction_rows(conn, project["id"], episode["id"], assets_to_insert)
+    publishable_assets = [asset for asset in assets_to_insert if not asset.get("_withheld")]
+    if reconciliation["identityConflicts"] and not publishable_assets:
+        result = {
+            "当前集编号": f"第 {episode['episode_index']} 集",
+            "模型模式": agent["mode"],
+            "资产数量": 0,
+            "模型原始输出": raw_model_output,
+            "模型原始输出审计路径": source_raw_audit_path or str(cached_source.get("模型原始输出审计路径") or "") if cached_source else source_raw_audit_path,
+            "模型解析输出": parsed_model_output,
+            "sourceStageStatus": "complete",
+            "资产源缓存键": source_cache_key,
+            "sourceCacheProvenance": ({
+                "consumedCacheKey": legacy_source_cache_key,
+                "cacheTaskId": cached_source.get("_source_task_id", ""),
+                "schemaVersion": legacy_source_cache_version,
+                "renormalizedAs": ASSET_SOURCE_SCHEMA_VERSION,
+            } if cached_source and legacy_source_cache_hit else {}),
+            "资产身份匹配冲突": reconciliation["identityConflicts"],
+            "资产身份匹配统计": reconciliation,
+            "未发布资产": True,
+        }
+        message = "资产源事实与现有资产无法按稳定身份唯一匹配；旧资产、图像历史和分镜引用均已保留，未发布新结果。"
+        task = finish_or_create_task(conn, project["id"], episode["id"], "asset_extraction", "失败", message, result, task_id)
+        record_agent_run(conn, task["id"], project["id"], episode["id"], "assetSourceExtraction", agent, input_payload, result)
+        return task
     source_cache_ready = bool(cached_source) or (bool(extracted_assets) and not used_fallback_assets)
-    source_fact_snapshot = source_only_assets_snapshot(assets_to_insert) if source_cache_ready else []
-    conn.execute("DELETE FROM assets WHERE project_id = ? AND episode_id = ?", (project["id"], episode["id"]))
-    frame_stats = capture_asset_original_frames(project["id"], episode, assets_to_insert)
-    insert_assets(conn, project["id"], episode["id"], assets_to_insert)
+    source_fact_snapshot = source_only_assets_snapshot(publishable_assets) if source_cache_ready else []
+    new_assets = [asset for asset in publishable_assets if not asset.get("_existingAssetId")]
+    frame_stats = capture_asset_original_frames(project["id"], episode, new_assets)
+    insert_assets(conn, project["id"], episode["id"], publishable_assets)
+    withheld_count = int(reconciliation.get("withheldCount") or 0)
     result = {
         "当前集编号": f"第 {episode['episode_index']} 集",
         "模型模式": agent["mode"],
         "提示词文件": agent["prompt_file"],
-        "资产数量": len(assets_to_insert),
+        "资产数量": len(publishable_assets),
+        "身份待核对数量": withheld_count,
+        "身份待核对队列": reconciliation["identityConflicts"] if withheld_count else [],
         "使用回退资产": used_fallback_assets,
         "模型错误": model_error,
         "模型JSON已修复": model_json_repaired,
         "模型原始输出": raw_model_output,
         "模型原始输出审计路径": source_raw_audit_path or str(cached_source.get("模型原始输出审计路径") or "") if cached_source else source_raw_audit_path,
         "模型解析输出": parsed_model_output,
-        "资产变量映射": {asset["variable"]: asset.get("display_variable", "") for asset in assets_to_insert},
+        "资产变量映射": {asset["variable"]: asset.get("display_variable", "") for asset in publishable_assets},
         "资产出现片段索引": asset_occurrence_index,
         "资产处理阶段": {
             "sourceExtraction": {"schemaVersion": ASSET_SOURCE_SCHEMA_VERSION, "promptFile": "config/agents/asset_source_extraction.md", "cache_hit": bool(cached_source)},
             "targetLocalization": {"schemaVersion": ASSET_LOCALIZATION_SCHEMA_VERSION, **{key: localization_result.get(key) for key in ("stage", "cache_hit", "cache_key", "source_task_id", "errors")}},
         },
         "资产详情补全": {"补全批次": 0, "补全资产数": 0, "补全调用数": 0, "阶段": localization_result.get("stage", "not_run")},
+        "资产身份匹配统计": reconciliation,
         "资产本地化缓存键": localization_result.get("cache_key", ""),
         "localizedProfileSnapshot": localization_result.get("profiles", []),
         "资产本地化原始尝试": localization_result.get("rawAttempts", []),
         "sourceReviewAssetVariables": [
-            asset.get("variable") for asset in assets_to_insert
+            asset.get("variable") for asset in publishable_assets
             if isinstance(asset.get("payload", {}).get("localizedProfile"), dict)
             and asset["payload"]["localizedProfile"].get("status") == "source_review"
         ],
@@ -5773,7 +6963,7 @@ def run_asset_extraction(
             {
                 "consumedCacheKey": legacy_source_cache_key,
                 "cacheTaskId": cached_source.get("_source_task_id", ""),
-                "schemaVersion": "asset-source-snapshot-v1",
+                "schemaVersion": legacy_source_cache_version,
                 "renormalizedAs": ASSET_SOURCE_SCHEMA_VERSION,
             }
             if cached_source and legacy_source_cache_hit else {}
@@ -5799,7 +6989,9 @@ def run_asset_extraction(
         message_parts.append(f"资产与目标脸部本地化已保存；{source_review_count} 个角色仍有源视觉字段待审核，审核前不能生成角色资产图（共生成 {stream_chars} 字符）")
     else:
         message_parts.append(f"资产提取完成（共生成 {stream_chars} 字符）")
-    task = insert_task(conn, project["id"], episode["id"], "asset_extraction", "；".join(message_parts), result)
+    if withheld_count:
+        message_parts.append(f"{withheld_count} 项资产身份歧义待人工核对，已保留旧资产未自动合并")
+    task = finish_or_create_task(conn, project["id"], episode["id"], "asset_extraction", "成功", "；".join(message_parts), result, task_id)
     record_agent_run(
         conn,
         task["id"],
@@ -5830,6 +7022,7 @@ def run_storyboard_generation(
     episode_id: str | None,
     *,
     force: bool = False,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     episode = get_episode_or_first(conn, project["id"], episode_id)
     ark_upload_error = ""
@@ -5841,13 +7034,11 @@ def run_storyboard_generation(
             ark_upload_error = ark_result.get("error") or "Ark 文件上传失败"
     storyboard_target_language = str(project.get("target_language") or "").strip()
     keep_source_language = storyboard_target_language in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
-    # remake_mode 里的 cg_3d / asset_replacement 只是视觉或资产策略，不代表国内市场；
-    # 只要用户选择了具体目标语言（非保留原片语言），分镜上下文必须按海外本土化标记，
-    # 否则模型会被误导成“国内模式/不翻译”。
-    overseas_mode = (
-        project.get("remake_mode", "overseas_localization") == "overseas_localization"
-        or not keep_source_language
-    )
+    target_country = str(project.get("target_country") or "").strip()
+    country_requires_localization = target_country not in {"", "中国", "中国大陆"}
+    language_requires_localization = not keep_source_language and storyboard_target_language != "中文"
+    # Market/language selection is independent of visual remake mode.
+    overseas_mode = country_requires_localization or language_requires_localization
     asset_count = conn.execute(
         "SELECT COUNT(*) FROM assets WHERE project_id = ? AND episode_id = ?",
         (project["id"], episode["id"]),
@@ -5886,6 +7077,7 @@ def run_storyboard_generation(
     if not asset_occurrence_index:
         asset_occurrence_index = normalize_asset_occurrence_index([], assets)
     video_signature = episode_video_signature(episode)
+    analysis_context_signature = storyboard_analysis_context_signature(project, assets)
     asset_summary = [
         {
             "资产类型": asset["asset_type"],
@@ -5918,12 +7110,16 @@ def run_storyboard_generation(
         "白模参考素材": whitebox_reference or "未提供独立白模参考素材；当前剧情视频仅用于观察，不推定为白模。",
         "参考素材分工": "当前集视频用于观察真实切镜、画面、动作、站位和可听声音；资产摘要/资产出现片段索引用于资产外观与时间归属；独立白模素材仅在明确提供时约束机位、构图、站位、路径和动作。",
         "资产片段索引用途": "该索引是资产出现时间和剧情功能的粗粒度上下文，不代表真实切镜、镜头数量或镜头边界；必须直接观察当前集视频，按真实连续镜头切点独立确定分镜，不得按索引段数机械生成镜头。",
-        "目标国家": project["target_country"] if overseas_mode else "不适用（国内模式）",
-        "目标语言": project["target_language"] if overseas_mode else "保留原片语言，不翻译",
+        "目标国家": target_country if country_requires_localization else "不适用（国内模式）",
+        "目标语言": storyboard_target_language if language_requires_localization or country_requires_localization and not keep_source_language else "保留原片语言，不翻译",
         "重制模式": project.get("remake_mode", "overseas_localization"),
         "源语言": project.get("source_language", ""),
         "分镜画面类型": project.get("storyboard_visual_style", "live_action"),
-        "模式路由强约束": "仅海外模式使用目标国家/翻译；国内模式保留原片语言且不翻译，具体语言未知时也不猜测；资产描述读取当前项目已确认目标资产，保持源动作和时间码不变。" if not overseas_mode else "按既有海外本土化规则处理。",
+        "模式路由强约束": (
+            f"按明确目标国家（{target_country or '未指定'}）和目标语言（{storyboard_target_language if not keep_source_language else '沿用源语言'}）适配分镜；cg_3d/真人/资产替换只决定视觉或资产策略，不改变目标国家/语言路由。保留原始镜头观察作为证据，目标画面文字按选定语言和当前目标角色名替换；不得机械删除汉字或改写未要求翻译的对白含义。"
+            if overseas_mode else
+            "国内模式保留原片语言与源事实，不猜测语言或目标国家；画面类型只决定视觉呈现。"
+        ),
         "资产摘要": asset_summary,
         "资产出现片段索引": asset_occurrence_index,
         "资产变量映射": old_to_display,
@@ -5935,7 +7131,7 @@ def run_storyboard_generation(
     # substitute for a shot-by-shot video analysis result.
     if not force:
         cached_storyboards = load_reusable_storyboard_cache(
-            conn, project["id"], episode["id"], video_signature
+            conn, project["id"], episode["id"], video_signature, analysis_context_signature
         )
         if cached_storyboards:
             result = {
@@ -5947,14 +7143,7 @@ def run_storyboard_generation(
                 "使用回退分镜": False,
                 "sourceTaskId": "",
             }
-            return insert_task(
-                conn,
-                project["id"],
-                episode["id"],
-                "storyboard_generation",
-                "复用当前视频对应的完整逐镜分析结果",
-                result,
-            )
+            return finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "成功", "复用当前视频对应的完整逐镜分析结果", result, task_id)
 
     try:
         agent = prepare_agent("storyboardPromptGeneration")
@@ -6073,7 +7262,7 @@ def run_storyboard_generation(
         }
         conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("分镜分析失败", now_iso(), project["id"]))
         message = f"分镜分析失败，现有分镜已保留：{model_error}"
-        task = create_task_with_status(conn, project["id"], episode["id"], "storyboard_generation", "失败", message, payload)
+        task = finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "失败", message, payload, task_id)
         record_agent_run(
             conn,
             task["id"],
@@ -6087,6 +7276,10 @@ def run_storyboard_generation(
         return task
     if not generated_storyboards:
         generated_storyboards = build_fallback_storyboards_from_index(asset_occurrence_index)
+    for storyboard in generated_storyboards:
+        # apply_storyboard_project_prompt 按 episode_id 做集内资产解析；
+        # 生成路径的字典没有该键会让解析退化为项目级全量匹配，产生跨集假歧义。
+        storyboard.setdefault("episode_id", episode["id"])
     used_fallback_storyboard = any(
         (storyboard.get("payload") or {}).get("使用回退占位") is True
         for storyboard in generated_storyboards
@@ -6097,8 +7290,9 @@ def run_storyboard_generation(
                 "来源": "storyboardPromptGeneration",
                 "episodeId": episode["id"],
                 "videoSignature": video_signature,
+                "analysisContextSignature": analysis_context_signature,
             }
-    sanitize_storyboard_asset_references(generated_storyboards, asset_occurrence_index, old_to_display)
+    sanitize_storyboard_asset_references(generated_storyboards, asset_occurrence_index, old_to_display, assets)
     for storyboard in generated_storyboards:
         apply_storyboard_project_prompt(conn, project, storyboard)
     replaced_storyboard_backups: list[dict[str, Any]] = []
@@ -6166,9 +7360,9 @@ def run_storyboard_generation(
     if time_boundary_repairs and not used_fallback_storyboard:
         message_parts.append(f"已自动修复 {len(time_boundary_repairs)} 处分镜时间边界")
     if used_fallback_storyboard:
-        task = create_task_with_status(conn, project["id"], episode["id"], "storyboard_generation", "失败", "；".join(message_parts), payload)
+        task = finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "失败", "；".join(message_parts), payload, task_id)
     else:
-        task = insert_task(conn, project["id"], episode["id"], "storyboard_generation", "；".join(message_parts), payload)
+        task = finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "成功", "；".join(message_parts), payload, task_id)
     record_agent_run(
         conn,
         task["id"],
@@ -6182,13 +7376,35 @@ def run_storyboard_generation(
     return task
 
 
-def run_video_generation(conn: sqlite3.Connection, project: dict[str, Any], storyboard_id: str | None) -> dict[str, Any]:
+def run_video_generation(conn: sqlite3.Connection, project: dict[str, Any], storyboard_id: str | None, task_id: str | None = None) -> dict[str, Any]:
     storyboard = get_video_generation_storyboard(conn, project["id"], storyboard_id)
     try:
         agent = prepare_agent("videoGeneration")
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     apply_storyboard_project_prompt(conn, project, storyboard)
+    if agent.get("mode") != "mock":
+        message = "真实视频生成尚未接入；本任务没有调用视频模型，也未创建占位视频。"
+        result = {
+            "available": False,
+            "mock": False,
+            "模型模式": agent.get("mode", ""),
+            "提示词文件": agent.get("prompt_file", ""),
+            "error": "video_generation_not_implemented",
+            "storyboardId": storyboard["id"],
+        }
+        task = finish_or_create_task(conn, project["id"], storyboard["episode_id"], "video_generation", "失败", message, result, task_id)
+        record_agent_run(
+            conn,
+            task["id"],
+            project["id"],
+            storyboard["episode_id"],
+            "videoGeneration",
+            agent,
+            {"storyboardId": storyboard["id"], "prompt": storyboard["prompt"]},
+            result,
+        )
+        return task
     generation_id = new_id("video")
     output_dir = PROJECTS_DIR / project["id"] / "outputs" / "videos"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -6224,7 +7440,7 @@ def run_video_generation(conn: sqlite3.Connection, project: dict[str, Any], stor
         "模型模式": agent["mode"],
         "提示词文件": agent["prompt_file"],
     }
-    task = insert_task(conn, project["id"], storyboard["episode_id"], "video_generation", "mock 视频生成完成", result)
+    task = finish_or_create_task(conn, project["id"], storyboard["episode_id"], "video_generation", "成功", "mock 视频生成完成", result, task_id)
     record_agent_run(
         conn,
         task["id"],

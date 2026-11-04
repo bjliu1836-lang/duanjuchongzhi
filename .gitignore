@@ -32,6 +32,7 @@ tmp/
 temp/
 __pycache__/
 *.pyc
+backend/tests/.pytest-tmp/
 backend/tests/.pytest-tmp-*/
 backend/tests/.source-review-test-*/
 
@@ -49,3 +50,4 @@ archive/
 
 # personal tool config
 .claude/
+.workbuddy/

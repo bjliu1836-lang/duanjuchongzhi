@@ -255,29 +255,27 @@ def test_editable_final_prompt_persists_and_is_sent_exactly_without_retemplating
     assert "【基础设定】" not in provider_prompts[0]
 
 
-def test_blank_or_unresolved_manual_final_prompt_fails_before_job_or_provider(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_blank_manual_final_prompt_fails_but_nonempty_unresolved_text_is_sent(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="manual-final-prompt-guard", remakeMode="overseas_localization", sourceLanguage="中文")
     asset_id, _ = insert_source_records(project, selected_image=False)
-    called = False
-
-    class ProviderMustNotRun:
-        def generate_image(self, **_kwargs):
-            nonlocal called
-            called = True
-            raise AssertionError("invalid manual prompt must be blocked before provider")
-
-    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "must-not-run", "prompt": "", "prompt_file": "test"})
-    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderMustNotRun())
-    for value, expected in (("  \n", "不能为空"), ("根据原片补足衣摆细节", "外部指代")):
-        response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": value})
-        assert response.status_code == 422
-        assert expected in response.json()["detail"]
+    blank = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": "  \n"})
+    assert blank.status_code == 422
+    assert "不能为空" in blank.json()["detail"]
+    values = [
+        "根据原片补足衣摆细节",
+        "目标画像待本地化；当前旧资产共享描述不能作为目标提示词。",
+        "目标画像需本地化；旧共享描述不能作为目标提示词。",
+        "当前资产沿用原片外观与原片资产图；不使用历史目标候选。",
+    ]
+    for value in values:
+        accepted = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": value})
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["asset"]["images"][0]["prompt"] == value
     with main.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 0
-    assert called is False
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == len(values)
 
 
-def test_sending_unchanged_automatic_prompt_does_not_persist_manual_override(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_sending_unchanged_automatic_prompt_does_not_create_manual_override(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="unchanged-auto-prompt", remakeMode="overseas_localization", sourceLanguage="中文")
     asset_id, _ = insert_source_records(project, selected_image=False)
     prepare_valid_role_asset(asset_id)
@@ -304,13 +302,13 @@ def test_sending_unchanged_automatic_prompt_does_not_persist_manual_override(cli
     assert loaded["payload"]["最终资产图生成提示词"] == automatic
 
 
-def test_pending_cg_placeholder_cannot_be_sent_but_manual_self_contained_prompt_can(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_pending_cg_auto_status_is_not_prefilled_but_any_nonempty_user_text_can_generate(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="pending-cg-placeholder", remakeMode="cg_3d", sourceLanguage="中文", targetCountry="美国")
     asset_id, _ = insert_source_records(project, selected_image=False)
     asset = next(item for item in client.get(f"/api/projects/{project['id']}/assets").json()["assets"] if item["id"] == asset_id)
     pending = asset["payload"]["最终资产图生成提示词"]
     assert asset["payload"]["目标画像状态"] == "待本地化"
-    assert pending.startswith("目标画像待本地化；")
+    assert pending == "目标画像待本地化；当前旧资产共享描述不能作为目标提示词。"
     assert main.CG_ROLE_FIXED_TEMPLATE not in pending
     provider_calls: list[str] = []
 
@@ -324,19 +322,80 @@ def test_pending_cg_placeholder_cannot_be_sent_but_manual_self_contained_prompt_
     monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "", "prompt_file": "test"})
     monkeypatch.setattr(main, "load_models_config", lambda: {"volcengine": {"imageSize": "2K"}})
     monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderSpy())
-    rejected = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": pending})
-    assert rejected.status_code == 422
-    assert "待本地化" in rejected.json()["detail"]
-    assert provider_calls == []
+    status_text = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": pending})
+    assert status_text.status_code == 200, status_text.text
+    assert len(provider_calls) == 1
+    assert provider_calls[0].startswith(pending)
     with main.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 1
 
     manual = "手工完整角色设定：成年墨西哥裔美国男性，深棕短发，棕色眼睛，蓝色外套，白色背景。"
     accepted = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": manual})
     assert accepted.status_code == 200, accepted.text
-    assert len(provider_calls) == 1
-    assert provider_calls[0].startswith(manual)
-    assert provider_calls[0].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
+    assert len(provider_calls) == 2
+    assert provider_calls[1].startswith(manual)
+    assert provider_calls[1].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
+
+
+def test_group_portrait_generates_from_source_observations_without_single_role_prompt(client: TestClient):
+    project = create_project(client, title="group-prompt", remakeMode="cg_3d", sourceLanguage="中文", targetCountry="美国", targetLanguage="English")
+    with main.connect() as conn:
+        episode_id = "episode_group_prompt"
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            (episode_id, project["id"], 1, "source.mp4", "C:/test/source.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        payload = {
+            "sourceSnapshot": {
+                "assetKind": "群像",
+                "name": "婚礼宾客群像",
+                "coreDescription": "当代中国婚礼宾客群，黄皮为主，男女混合；女性穿浅色礼服，宾客分布在新娘身后。",
+                "visualDescription": "多人站立观看仪式，保留已观察到的服装颜色与前后站位。",
+            },
+            "当前子资产": {"原剧视觉形象描述": "多人站立观看仪式，保留已观察到的服装颜色与前后站位。"},
+            "localizedProfile": {"status": "pending", "needsReview": True},
+        }
+        conn.execute(
+            "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("asset_group_prompt", project["id"], episode_id, "角色", "婚礼宾客群像", "婚礼宾客群像", "{{group_1}}", "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+        )
+    asset = next(item for item in client.get(f"/api/projects/{project['id']}/assets").json()["assets"] if item["id"] == "asset_group_prompt")
+    prompt = asset["payload"]["自动编译资产图生成提示词"]
+    assert "群像角色资产图" in prompt
+    assert "婚礼宾客群" in prompt
+    assert "浅色礼服" in prompt
+    assert "宾客分布在新娘身后" in prompt
+    assert prompt.count("多人站立观看仪式") == 1
+    assert "多元族裔美国群像人物" in prompt
+    assert "黄皮" not in prompt
+    assert "当代中国" not in prompt
+    assert "单人四视图" in prompt
+    assert main.CG_ROLE_FIXED_TEMPLATE in prompt
+    assert prompt.count(main.CG_ROLE_FIXED_TEMPLATE) == 1
+    assert not prompt.startswith("目标画像待本地化；")
+    generated = client.post(f"/api/projects/{project['id']}/assets/asset_group_prompt/generate-image", json={"finalPrompt": prompt})
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["asset"]["images"][0]["prompt"].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
+
+
+def test_currently_generating_asset_rejects_duplicate_request(client: TestClient):
+    project = create_project(client, title="same-asset-in-flight", remakeMode="overseas_localization", sourceLanguage="中文")
+    asset_id, _ = insert_source_records(project, selected_image=False)
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO asset_generation_jobs (id,project_id,asset_id,remake_mode,template_version,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("asset_job_inflight", project["id"], asset_id, "overseas_localization", main.ASSET_PROMPT_TEMPLATE_VERSION, "running", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+    response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": "非空提示词。"})
+    assert response.status_code == 409
+    assert "正在生成" in response.json()["detail"]
+    reloaded = client.get(f"/api/projects/{project['id']}/assets").json()["assets"]
+    assert next(item for item in reloaded if item["id"] == asset_id)["payload"]["generationInProgress"] is True
+    with main.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 1
+        conn.execute("UPDATE asset_generation_jobs SET status='succeeded' WHERE id='asset_job_inflight'")
+    reloaded = client.get(f"/api/projects/{project['id']}/assets").json()["assets"]
+    assert next(item for item in reloaded if item["id"] == asset_id)["payload"]["generationInProgress"] is False
 
 
 def test_manual_prompt_restore_original_clears_override_and_edit_can_resume_generation(client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -346,8 +405,8 @@ def test_manual_prompt_restore_original_clears_override_and_edit_can_resume_gene
     restored = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/restore-original")
     assert restored.status_code == 200, restored.text
     assert restored.json()["asset"]["payload"]["用户编辑资产图生成提示词"] == ""
-    blocked = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": "完整自包含目标角色图，白底四视图。"})
-    assert blocked.status_code == 409
+    generated_from_original = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": "完整自包含目标角色图，白底四视图。"})
+    assert generated_from_original.status_code == 200, generated_from_original.text
 
     captured: list[str] = []
     class ProviderSpy:
@@ -367,74 +426,46 @@ def test_manual_prompt_restore_original_clears_override_and_edit_can_resume_gene
     assert captured == ["恢复后编辑的自包含角色图提示词。"]
 
 
-def test_disabled_replacement_type_cannot_send_reuse_prompt_to_image_provider(client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    project = create_project(client, title="replacement-switch-off", remakeMode="asset_replacement", sourceLanguage="中文", replaceCharacters=False)
-    asset_id, _ = insert_source_records(project, selected_image=False)
-    called = False
-
-    class ProviderMustNotRun:
-        def generate_image(self, **_kwargs):
-            nonlocal called
-            called = True
-            raise AssertionError("provider must not run for source-reuse assets")
-
-    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "must-not-run", "prompt": "", "prompt_file": "test"})
-    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderMustNotRun())
-    response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={})
-    assert response.status_code == 409
-    assert "替换开关未启用" in response.json()["detail"]
-    assert called is False
+@pytest.mark.parametrize("asset_type", ["角色", "场景", "道具"])
+def test_disabled_replacement_type_still_accepts_nonempty_manual_prompt(client: TestClient, asset_type: str):
+    project = create_project(client, title=f"replacement-switch-off-{asset_type}", remakeMode="asset_replacement", sourceLanguage="中文", replaceCharacters=False, replaceScenes=False)
+    with main.connect() as conn:
+        episode_id = f"episode_switch_off_{asset_type}"
+        asset_id = f"asset_switch_off_{asset_type}"
+        conn.execute("INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)", (episode_id, project["id"], 1, "source.mp4", "C:/test/source.mp4", "已上传", "2026-01-01T00:00:00Z"))
+        conn.execute("INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (asset_id, project["id"], episode_id, asset_type, f"{asset_type}资产", f"{asset_type}资产", f"{{{{{asset_type}_1}}}}", "已确认", json.dumps({}, ensure_ascii=False), "2026-01-01T00:00:00Z"))
+    value = f"人工指定的{asset_type}目标资产图提示词。"
+    response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": value})
+    assert response.status_code == 200, response.text
+    assert response.json()["asset"]["images"][0]["prompt"] == value
 
 
-def test_legacy_missing_visual_fields_return_actionable_422_before_job_or_image_provider(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_legacy_missing_visual_fields_compile_nonempty_prompt_without_generation_gate(client: TestClient):
     project = create_project(client, title="legacy-incomplete-role", remakeMode="asset_replacement", sourceLanguage="中文", replaceCharacters=True)
     asset_id, _ = insert_source_records(project, selected_image=False)
-    image_provider_called = False
-
-    class ProviderMustNotRun:
-        def generate_image(self, **_kwargs):
-            nonlocal image_provider_called
-            image_provider_called = True
-            raise AssertionError("image provider must not run when required visual fields are missing")
-
-    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderMustNotRun())
     response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={})
-    assert response.status_code == 422
-    assert "角色结构化视觉字段待补全" in response.json()["detail"]
-    assert image_provider_called is False
+    assert response.status_code == 200, response.text
+    assert response.json()["asset"]["images"][0]["prompt"].strip()
     with main.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 1
 
 
-def test_tier_and_manual_shoe_visibility_conflicts_block_provider_before_job(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+def test_tier_and_manual_shoe_visibility_conflicts_do_not_block_generation(client: TestClient):
     project = create_project(client, title="tier-conflict-guard", remakeMode="overseas_localization", sourceLanguage="中文", targetCountry="中国", targetLanguage="中文")
     asset_id, _ = insert_source_records(project, selected_image=False)
-    called = False
-
-    class ProviderMustNotRun:
-        def generate_image(self, **_kwargs):
-            nonlocal called
-            called = True
-            raise AssertionError("conflicting visual prompt must be blocked before provider")
-
-    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "must-not-run", "prompt": "", "prompt_file": "test"})
-    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderMustNotRun())
     high_daily = valid_role_visual_structure(服装={"服装等级": "高位礼服", "场合": "日常", "拖尾程度": "高位典礼遮鞋", "鞋面可见性": "不露鞋面", "脚踝可见性": "不露脚踝"})
     prepare_valid_role_asset(asset_id, structure=high_daily)
     tier_response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={})
-    assert tier_response.status_code == 422
-    assert "服装等级/场合/拖尾级别冲突" in tier_response.json()["detail"]
+    assert tier_response.status_code == 200, tier_response.text
     with main.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 1
 
     high_ceremony = valid_role_visual_structure(服装={"服装等级": "帝后礼服", "场合": "宫廷登基典礼", "拖尾程度": "高位典礼遮鞋", "摆与地面关系": "裙摆压地遮鞋", "鞋面可见性": "不露鞋面", "脚踝可见性": "不露脚踝"})
     prepare_valid_role_asset(asset_id, structure=high_ceremony)
     override_response = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"prompt": "靴尖微露"})
-    assert override_response.status_code == 422
-    assert "用户目标外观补充要求露出鞋面或脚踝" in override_response.json()["detail"]
+    assert override_response.status_code == 200, override_response.text
     with main.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 0
-    assert called is False
+        assert conn.execute("SELECT COUNT(*) FROM asset_generation_jobs WHERE asset_id=?", (asset_id,)).fetchone()[0] == 2
 
 
 def test_provider_receives_exact_final_role_prompt_snapshot_and_size(client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -1061,6 +1092,590 @@ def test_real_legacy_source_fixture_normalizes_ids_scenes_and_review_without_fab
         assert structure["服装"]["纹样"]  # original pattern observation remains intact
     index = main.normalize_asset_occurrence_index(fixture["资产出现片段索引"], assets)
     assert len({entry["出现资产"][0]["资产变量"] for entry in index if entry["出现资产"]}) == 4
+    assert main.source_asset_appearance_ranges({"出现时间点": [0, 1.5]}) == [("0", "0"), ("1.5", "1.5")]
+
+
+def test_run_task_completes_one_outer_task_and_keeps_agent_audit_linked(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="single-task-run")
+    episode_id, _ = insert_source_records(project)
+    provider_calls = {"count": 0}
+
+    def fake_runner(conn, db_project, selected_episode_id, task_id=None):
+        provider_calls["count"] += 1
+        result = {"模型原始输出": "{\"ok\":true}", "解析": {"ok": True}}
+        task = main.finish_or_create_task(
+            conn, db_project["id"], selected_episode_id, "asset_extraction", "成功", "mock extraction complete", result, task_id
+        )
+        main.record_agent_run(
+            conn, task["id"], db_project["id"], selected_episode_id,
+            "assetSourceExtraction", {"mode": "mock", "model_name": "once"}, {"video": "fixture"}, result,
+        )
+        return task
+
+    monkeypatch.setattr(main, "run_asset_extraction", fake_runner)
+    response = client.post(f"/api/projects/{project['id']}/tasks/run", json={"taskType": "asset_extraction", "episodeId": episode_id})
+    assert response.status_code == 200
+    task_id = response.json()["task"]["id"]
+    details = client.get(f"/api/tasks/{task_id}")
+    assert details.status_code == 200
+    assert details.json()["task"]["status"] == "成功"
+    assert details.json()["task"]["result"]["模型原始输出"] == "{\"ok\":true}"
+    assert len(details.json()["agentRuns"]) == 1
+    assert details.json()["agentRuns"][0]["task_id"] == task_id
+    assert provider_calls["count"] == 1
+    with main.connect() as conn:
+        rows = conn.execute("SELECT id FROM tasks WHERE project_id=? AND task_type='asset_extraction'", (project["id"],)).fetchall()
+    assert [row["id"] for row in rows] == [task_id]
+
+
+def test_legacy_prop_aliases_preserve_source_identity_change_cache_and_block_empty_source(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    source_prompt = (main.CONFIG_DIR / "agents" / "asset_source_extraction.md").read_text(encoding="utf-8")
+    assert '"原剧道具名称"' in source_prompt and '"原剧道具描述"' in source_prompt
+    assert '"道具资产变量"' in source_prompt and '"道具编号"' in source_prompt
+    raw = {"资产库": {"道具资产": [
+        {"道具编号": "PROP_002", "变量": "{{PROP_002}}", "原剧名称": "黑色塑料鸡笼", "原剧描述": "长方形黑色塑料周转笼，笼内有一只红棕色鸡。", "原剧截图时间点候选": ["15.0秒"]},
+        {"道具编号": "PROP_003", "变量": "{{PROP_003}}", "原剧名称": "顾霜肩扛的麻袋与葱", "原剧描述": "米黄色布麻袋，袋口露出绿色长葱叶。", "原剧截图时间点候选": ["19.0秒"]},
+        {"道具编号": "PROP_006", "变量": "{{PROP_006}}", "原剧名称": "新郎黑色领结", "原剧描述": "黑色蝴蝶结领结，中央有金色金属装饰。", "原剧截图时间点候选": ["2.0秒"]},
+    ]}}
+    assets = main.normalize_assets_from_agent(raw)
+    assert [(asset["name"], asset["variable"]) for asset in assets] == [
+        ("黑色塑料鸡笼", "{{PROP_002}}"),
+        ("顾霜肩扛的麻袋与葱", "{{PROP_003}}"),
+        ("新郎黑色领结", "{{PROP_006}}"),
+    ]
+    snapshots = [asset["payload"]["sourceSnapshot"] for asset in assets]
+    assert [snapshot["coreDescription"] for snapshot in snapshots] == [
+        "长方形黑色塑料周转笼，笼内有一只红棕色鸡。",
+        "米黄色布麻袋，袋口露出绿色长葱叶。",
+        "黑色蝴蝶结领结，中央有金色金属装饰。",
+    ]
+    assert [snapshot["sourcePropFacts"]["sourceName"] for snapshot in snapshots] == [asset["name"] for asset in assets]
+    assert main.prop_source_target_category_errors(assets[0], {
+        "localizedName": "Burlap Sack with Scallions",
+        "coreDescription": "认亲母亲肩扛米黄色粗麻袋，袋口露出绿葱。",
+        "visualDescription": "Burlap sack with scallions.",
+    })
+    assert main.prop_source_target_category_errors(assets[1], {
+        "localizedName": "Black Plastic Chicken Crate",
+        "coreDescription": "父亲抱着一只黑色塑料鸡笼，里面有红棕色鸡。",
+        "visualDescription": "Black plastic chicken crate.",
+    })
+    assert main.prop_source_target_category_errors(assets[2], {
+        "localizedName": "Crystal Bridal Necklace and Earrings",
+        "coreDescription": "新娘佩戴钻饰项链和耳饰。",
+        "visualDescription": "Crystal bridal necklace and earrings.",
+    })
+    composite = json.loads(json.dumps(assets[1], ensure_ascii=False))
+    composite["payload"]["sourceSnapshot"]["sourcePropFacts"]["sourceName"] = "婚礼携带物"
+    composite["payload"]["sourceSnapshot"]["sourcePropFacts"]["sourceDescription"] = "麻袋靠着黑色鸡笼放置。"
+    assert main.prop_source_target_category_errors(composite, {
+        "localizedName": "Scallion Satchel", "coreDescription": "A cloth satchel with scallions, placed beside a crate.",
+    }) == []
+    assert main.prop_source_target_category_errors(composite, {
+        "localizedName": "Ceremonial Carry Bag", "coreDescription": "A locally appropriate carry bag with visible green leaves.",
+    }) == []  # unknown valid synonym remains a review item, not a localization failure
+
+    project = create_project(client, title="prop-source-bound-cache", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语")
+    agent = {"mode": "volcengine", "model_name": "prop-cache", "temperature": 0, "output_format": "json"}
+    key_before = main.asset_localization_cache_key(assets, project, agent)
+    changed = json.loads(json.dumps(assets, ensure_ascii=False))
+    changed[0]["payload"]["sourceSnapshot"]["sourcePropFacts"]["sourceDescription"] = "米黄色麻袋与绿色长葱。"
+    changed[0]["payload"]["sourceSnapshot"]["coreDescription"] = "米黄色麻袋与绿色长葱。"
+    key_after = main.asset_localization_cache_key(changed, project, agent)
+    assert key_before != key_after
+
+    empty = main.normalize_assets_from_agent({"资产库": {"道具资产": [
+        {"道具编号": "PROP_EMPTY", "变量": "{{PROP_EMPTY}}", "原剧名称": "", "原剧描述": ""},
+    ]}})
+    monkeypatch.setattr(main, "call_compact_video_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty source prop must not be localized")))
+    with main.connect() as conn:
+        gate = main.run_target_localization(conn, empty, project, agent)
+    assert gate["stage"] == "source_review"
+    assert "原剧道具名称" in gate["errors"][0] and "原剧道具描述" in gate["errors"][0]
+    assert gate["rawAttempts"] == []
+
+
+def test_source_prop_aliases_keep_identity_keys_and_storyboard_references_real():
+    assets = main.normalize_assets_from_agent({"资产库": {"道具资产": [
+        {"道具编号": "PROP_003", "原剧名称": "矿泉水瓶", "原剧描述": "透明塑料矿泉水瓶，蓝色标签。"},
+        {"道具编号": "PROP_007", "原剧名称": "篮球场边广告挡板", "原剧描述": "蓝色场边广告挡板。"},
+    ]}})
+    for asset in assets:
+        main.annotate_project_asset_keys(asset, 1)
+    main.ensure_unique_asset_display_variables(assets)
+    assert [asset["display_variable"] for asset in assets] == ["@矿泉水瓶", "@篮球场边广告挡板"]
+    assert [asset["payload"]["项目主资产Key"] for asset in assets] == ["道具:矿泉水瓶", "道具:篮球场边广告挡板"]
+    assert len({asset["payload"]["项目主资产Key"] for asset in assets}) == 2
+
+    old_to_display, _ = main.variable_maps(assets)
+    boards = main.normalize_storyboards_from_agent({"分镜列表": [{
+        "分镜编号": "分镜_001",
+        "分镜时间范围": "00:00:00-00:00:02",
+        "引用资产变量": ["@矿泉水瓶"],
+        "分镜具体动作描述": "@矿泉水瓶被放在@篮球场边广告挡板前。",
+    }]}, old_to_display)
+    main.sanitize_storyboard_asset_references(boards, [], old_to_display, assets)
+    payload = boards[0]["payload"]
+    assert payload["引用资产变量"] == ["{{PROP_003}}", "{{PROP_007}}"]
+    assert payload["引用资产显示变量"] == ["@矿泉水瓶", "@篮球场边广告挡板"]
+    assert payload["资产引用待核对"] == []
+    assert "@UnnamedProp" not in boards[0]["prompt"]
+
+
+@pytest.mark.parametrize("ethnicity", ["Korean-American woman", "Japanese  American woman", "韩裔美国女性", "华裔与爱尔兰裔混血女性"])
+def test_target_east_asian_ethnicity_requires_explicit_user_visual_lock(ethnicity: str):
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "legacy_source_alias_collisions.json").read_text(encoding="utf-8"))
+    asset = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+    structure = valid_role_visual_structure()
+    structure["基础设定"]["族裔外貌"] = ethnicity
+    structure["脸部特征"]["目标族裔背景"] = ethnicity
+    asset["payload"]["localizedProfile"] = {
+        "status": "complete", "coreDescription": ethnicity, "visualDescription": ethnicity,
+        "structuredDescription": structure,
+    }
+    errors = main.localized_profile_validation_errors(asset, "美国")
+    assert any("未提供用户族裔锁定" in error for error in errors)
+
+    asset["payload"]["targetVisualLockProvenance"] = "user"
+    asset["payload"]["目标生成描述"] = ethnicity + "，用户明确选择保留该族裔设定。"
+    assert not any("未提供用户族裔锁定" in error for error in main.localized_profile_validation_errors(asset, "美国"))
+
+
+def test_target_non_east_asian_ethnicity_is_not_rejected():
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "legacy_source_alias_collisions.json").read_text(encoding="utf-8"))
+    asset = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+    structure = valid_role_visual_structure()
+    structure["基础设定"]["族裔外貌"] = "Mexican-American woman"
+    structure["脸部特征"]["目标族裔背景"] = "Mexican-American woman"
+    asset["payload"]["localizedProfile"] = {
+        "status": "complete", "coreDescription": "Mexican-American woman with an original oval facial structure.",
+        "visualDescription": "A locally designed Mexican-American woman.", "structuredDescription": structure,
+    }
+    assert not any("族裔锁定" in error for error in main.localized_profile_validation_errors(asset, "美国"))
+
+
+def test_source_review_storyboard_uses_target_draft_without_source_frame_or_asset_sheet_prompt():
+    project = {"target_country": "美国", "target_language": "英语", "remake_mode": "cg_3d"}
+    payload = {
+        "原剧核心形象描述": "源观察：短发女性，穿红色外套。",
+        "原资产图路径": "C:/source/frame.png",
+        "目标生成描述": "",
+        "用户编辑资产图生成提示词": "A target woman. Four-view grid, front side back, white background. " + main.CG_ROLE_FIXED_TEMPLATE,
+        "sourceSnapshot": {"coreDescription": "源观察：短发女性，穿红色外套。"},
+        "localizedProfile": {
+            "status": "source_review",
+            "coreDescription": "A target-design woman with an original oval face and locally designed features.",
+            "visualDescription": "A target-design woman with a tailored green coat.",
+            "structuredDescription": {},
+        },
+    }
+    payload["localizedProfile"]["targetContext"] = main.localized_profile_target_context(payload, project)
+    asset = {"id": "asset-review", "asset_type": "角色", "name": "原片角色", "localized_name": "Lena Brooks", "variable": "{{CHAR_001}}", "payload": payload}
+    implicit = main.resolve_effective_asset_reference(asset, project)
+    assert implicit["effectiveAssetSource"] == "target_draft"
+    assert implicit["description"] == payload["localizedProfile"]["coreDescription"]
+    assert implicit["imagePath"] == ""
+    assert implicit["ready"] is False
+    assert "Four-view" not in implicit["description"] and "front side back" not in implicit["description"]
+
+    uploaded = {
+        "id": "image-user", "file_path": "C:/project/user-upload.png",
+        "payload_json": json.dumps({"source": "user_upload"}),
+    }
+    selected = main.resolve_effective_asset_reference(asset, project, uploaded)
+    assert selected["effectiveAssetSource"] == "target_draft"
+    assert selected["imagePath"] == "C:/project/user-upload.png"
+    assert selected["imageSource"] == "user_upload"
+    assert selected["ready"] is False
+
+
+def test_storyboard_reference_uses_static_role_appearance_not_temporary_wear_action_or_sheet_layout():
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "liam_dynamic_wardrobe_profile.json").read_text(encoding="utf-8"))["evidence"]
+    project = {"target_country": "美国", "target_language": "英语", "remake_mode": "cg_3d"}
+    source_clothing = fixture["sourceSnapshotClothing"]
+    target_clothing = dict(fixture["localizedProfileClothing"])
+    target_clothing["穿着状态"] = "整齐，后被掀开露出腹部"
+    profile = {
+        "status": "source_review",
+        "coreDescription": fixture["localizedProfileCoreDescription"],
+        "visualDescription": fixture["localizedProfileVisualDescription"],
+        "structuredDescription": {
+            "基础设定": {"性别": "男", "视觉年龄": "约25-35岁", "身份定位": "新郎", "族裔外貌": "白人（爱尔兰裔美国人）"},
+            "脸部特征": {"脸型": "长方脸", "骨相": "轮廓清晰，下颌线利落", "眼形": "深眼窝长眼", "虹膜颜色": "浅蓝绿", "肤色": "浅白偏暖"},
+            "发型": {"发型名称": "男士侧分短发", "发色": "深棕", "长度": "短", "刘海 / 分线": "侧分"},
+            "服装": target_clothing,
+        },
+        "targetContext": {},
+    }
+    payload = {
+        "sourceSnapshot": {"coreDescription": fixture["sourceSnapshotCoreDescription"], "sourceStructuredDescription": {"服装": source_clothing}},
+        "原资产图路径": "C:/source/frame.jpg",
+        "sourceFactReview": {"status": "reviewed", "fixedWornAccessories": [
+            {"value": "左胸红色缎面胸花（礼服左胸佩戴）"},
+            {"value": "黑色领结，中央金色几何金属饰件（不复制品牌标识）"},
+        ]},
+        "localizedProfile": profile,
+    }
+    profile["targetContext"] = main.localized_profile_target_context(payload, project)
+    asset = {"id": fixture["assetId"], "asset_type": "角色", "name": "林浩", "localized_name": "Liam Hale", "variable": fixture["variable"], "payload": payload}
+    reference = main.resolve_effective_asset_reference(asset, project)
+    assert reference["effectiveAssetSource"] == "target_draft"
+    assert reference["ready"] is False
+    assert "脸型：长方脸" in reference["description"]
+    assert "衣长：及臀" in reference["description"]
+    assert "左胸红色缎面胸花" in reference["description"]
+    assert "黑色领结" in reference["description"]
+    assert "后被掀开露出腹部" not in reference["description"]
+    assert "四视图" not in reference["description"] and "single-row grid" not in reference["description"]
+    assert fixture["localizedProfileCoreDescription"] == profile["coreDescription"]
+    assert profile["structuredDescription"]["服装"]["穿着状态"] == "整齐，后被掀开露出腹部"
+
+
+def test_role_reference_keeps_user_appearance_edit_but_drops_asset_sheet_layout_and_style():
+    profile = {
+        "structuredDescription": {
+            "基础设定": {"族裔外貌": "欧洲裔美国女性"},
+            "脸部特征": {"脸型": "椭圆脸"},
+            "发型": {"长度": "长发"},
+            "服装": {"衣长": "及膝", "主色": "深蓝"},
+        },
+        "coreDescription": "椭圆脸的欧洲裔女性，深蓝连衣裙。",
+    }
+    payload = {
+        "localizedProfile": profile,
+        "用户编辑资产图生成提示词": (
+            "【基础设定】人物外观\n【服装】主色深蓝\n"
+            "[Style & Render] UE5 character asset sheet\n"
+            "【用户指定目标外观覆盖】穿红色丝绒晚礼服，衣长及地。\n优先于同字段"
+            "\n【共同展示构图】左侧面部特写，右侧前侧背四视图，白底。"
+            "\n【目标视觉风格】三维CG\n固定约束 " + main.CG_ROLE_FIXED_TEMPLATE
+        ),
+    }
+    description = main.localized_role_reference_appearance(payload, profile)
+    assert "用户指定目标外观：穿红色丝绒晚礼服，衣长及地" in description
+    assert "四视图" not in description
+    assert "白底" not in description
+    assert "Style & Render" not in description and "CG_ROLE_FIXED_TEMPLATE" not in description
+
+
+def test_role_reference_extracts_only_changed_fields_from_user_edited_full_prompt():
+    profile = {
+        "structuredDescription": {
+            "服装": {"主色": "白色", "外层": "白色抹胸蓬裙婚纱", "衣长": "长裙摆"},
+            "发型": {"发色": "深黑棕", "长度": "长发盘起"},
+        },
+        "coreDescription": "白色婚纱，长发盘起。",
+    }
+    original = (
+        "【基础设定】\n性别：女\n身份定位：新娘\n本地化视觉锚点：整齐，后被掀开露出腹部\n"
+        "【发型】\n发色：深黑棕\n长度：长发盘起\n"
+        "【服装】\n主色：红色\n外层：红色丝绒婚纱\n衣长：长裙摆\n"
+        "【共同展示构图】左侧特写，右侧正面、侧面、背面四视图，白色干净背景。\n"
+        "【目标视觉风格】高端3D角色资产图。\n固定约束 " + main.CG_ROLE_FIXED_TEMPLATE
+    )
+    payload = {"用户编辑资产图生成提示词": original}
+    appearance = main.role_asset_prompt_user_appearance(original, profile)
+    description = main.localized_role_reference_appearance(payload, profile)
+    assert appearance == "服装.主色：红色；服装.外层：红色丝绒婚纱"
+    assert "用户指定目标外观：服装.主色：红色；服装.外层：红色丝绒婚纱" in description
+    assert "白色干净背景" not in description
+    assert "四视图" not in description
+    assert "高端3D角色资产图" not in description
+    assert "衣长：长裙摆" in description
+    assert "本地化视觉锚点" not in appearance and "后被掀开露出腹部" not in description
+    unchanged = original.replace("主色：红色", "主色：白色").replace("外层：红色丝绒婚纱", "外层：白色抹胸蓬裙婚纱")
+    assert main.role_asset_prompt_user_appearance(unchanged, profile) == ""
+
+
+def test_real_wuyuehong_get_to_post_removes_only_resolved_shoe_lock_banner_and_archives_original(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "wuyuehong_saved_manual_prompt_review_block.json").read_text(encoding="utf-8"))
+    project = create_project(client, title="wuyuehong-resolved-review-banner", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语")
+    profile = json.loads(json.dumps(fixture["localizedProfile"], ensure_ascii=False))
+    profile["status"] = "complete"
+    profile["sourceReviewPaths"] = []
+    profile["nonBlockingSourceReviewPaths"] = ["服装.鞋子"]
+    profile["sourceReviewNotes"] = ["鞋款仍未知；已确认婚纱长裙近地面且鞋面与脚踝不可见，生图时遮住鞋型。"]
+    payload = {
+        "sourceSnapshot": fixture["sourceSnapshot"],
+        "localizedProfile": profile,
+        "用户编辑资产图生成提示词": fixture["savedManualPrompt"],
+        "当前子资产": {},
+        "原剧核心形象描述": fixture["sourceDescription"],
+    }
+    profile["targetContext"] = main.localized_profile_target_context(payload, project)
+    episode_id = "episode_wuyuehong_resolved_banner"
+    with main.connect() as conn:
+        conn.execute("INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)", (episode_id, project["id"], 1, "source.mp4", "C:/fixture/source.mp4", "已上传", "2026-01-01T00:00:00Z"))
+        main.insert_assets(conn, project["id"], episode_id, [{"asset_type": fixture["assetType"], "name": fixture["name"], "localized_name": fixture["localizedName"], "variable": fixture["variable"], "payload": payload}], status="待确认")
+        asset_id = conn.execute("SELECT id FROM assets WHERE project_id=? AND episode_id=? AND variable=?", (project["id"], episode_id, fixture["variable"])).fetchone()[0]
+    observed: list[str] = []
+
+    class ProviderSpy:
+        def generate_image(self, **kwargs):
+            observed.append(kwargs["prompt"])
+            image = io.BytesIO()
+            Image.new("RGB", (4, 4), (30, 40, 50)).save(image, format="PNG")
+            return {"image_bytes": image.getvalue(), "mime_type": "image/png", "size": kwargs["size"], "model": "provider-spy", "raw": {}}
+
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "", "prompt_file": "test"})
+    monkeypatch.setattr(main, "load_models_config", lambda: {"volcengine": {"imageSize": "2K"}})
+    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderSpy())
+    loaded = client.get(f"/api/projects/{project['id']}/assets")
+    assert loaded.status_code == 200, loaded.text
+    loaded_asset = next(item for item in loaded.json()["assets"] if item["id"] == asset_id)
+    final_prompt = loaded_asset["payload"]["最终资产图生成提示词"]
+    original_manual = fixture["savedManualPrompt"]
+    assert "【源事实待核对：自动生图已锁定】" not in final_prompt
+    assert "服装.鞋子" not in final_prompt
+    assert "固定约束" in final_prompt
+    assert loaded_asset["payload"]["用户编辑资产图生成提示词"] == original_manual
+    generated = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": final_prompt})
+    assert generated.status_code == 200, generated.text
+    assert len(observed) == 1
+    assert observed[0] == generated.json()["asset"]["images"][0]["prompt"]
+    assert "【源事实待核对：自动生图已锁定】" not in observed[0]
+    persisted = client.get(f"/api/projects/{project['id']}/assets").json()["assets"]
+    persisted_asset = next(item for item in persisted if item["id"] == asset_id)
+    assert persisted_asset["payload"]["用户编辑资产图生成提示词"] == final_prompt
+    archived = persisted_asset["payload"]["resolvedStatusPromptArchive"]
+    assert archived and archived[-1]["prompt"] == original_manual
+
+
+def test_asset_extraction_reconciles_exact_identity_without_losing_images_or_storyboard_refs(client: TestClient):
+    project = create_project(client, title="asset-upsert-preserve")
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "legacy_source_alias_collisions.json").read_text(encoding="utf-8"))
+    candidate = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+    episode_id = "episode_upsert_1"
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            (episode_id, project["id"], 1, "source.mp4", "C:/fixture/source.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        candidate["payload"]["目标生成描述"] = "用户手工确认的目标外观。"
+        candidate["payload"]["用户编辑资产图生成提示词"] = "用户手工生图提示词。"
+        candidate["payload"]["targetVisualLockProvenance"] = "user_override"
+        candidate["payload"]["localizedProfile"] = {"status": "complete", "localizedName": "Old target", "coreDescription": "Old target appearance."}
+        candidate["localized_name"] = "Old target"
+        candidate["payload"]["原资产图路径"] = "C:/fixture/original-frame.png"
+        main.insert_assets(conn, project["id"], episode_id, [candidate], status="已确认")
+        persisted = conn.execute("SELECT id,variable,payload_json FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+        stable_asset_id = persisted["id"]
+        conn.execute(
+            "INSERT INTO asset_images (id,project_id,asset_id,status,prompt,file_path,is_selected,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("image_keep", project["id"], stable_asset_id, "成功", "selected", "C:/fixture/selected.png", 1, json.dumps({"source": "user_upload"}), "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("storyboard_keep", project["id"], episode_id, "shot", "00:00:01-00:00:02", candidate["variable"] + " action", json.dumps({"引用资产变量": [candidate["variable"]]}), "已生成", "2026-01-01T00:00:00Z"),
+        )
+        repeat = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+        repeat["localized_name"] = "New target"
+        repeat["payload"]["localizedProfile"] = {"status": "complete", "localizedName": "New target", "coreDescription": "New target appearance."}
+        repeat["payload"]["原资产图路径"] = "C:/fixture/newly-captured-frame.png"
+        result = main.reconcile_asset_extraction_rows(conn, project["id"], episode_id, [repeat])
+        assert result["preservedExistingCount"] == 1 and result["newCandidateCount"] == 0
+        assert repeat["_existingAssetId"] == stable_asset_id
+        assert repeat["variable"] == persisted["variable"]
+        main.insert_assets(conn, project["id"], episode_id, [repeat])
+        stored = conn.execute("SELECT id,status,payload_json FROM assets WHERE id=?", (stable_asset_id,)).fetchone()
+        assert stored["status"] == "已确认"
+        stored_payload = json.loads(stored["payload_json"])
+        assert stored_payload["目标生成描述"] == "用户手工确认的目标外观。"
+        assert stored_payload["用户编辑资产图生成提示词"] == "用户手工生图提示词。"
+        assert stored_payload["localizedProfile"]["coreDescription"] == "New target appearance."
+        assert stored_payload["原资产图路径"] == "C:/fixture/original-frame.png"
+        assert conn.execute("SELECT localized_name FROM assets WHERE id=?", (stable_asset_id,)).fetchone()[0] == "New target"
+        assert conn.execute("SELECT id,is_selected FROM asset_images WHERE asset_id=?", (stable_asset_id,)).fetchone()["id"] == "image_keep"
+        assert json.loads(conn.execute("SELECT payload_json FROM storyboards WHERE id='storyboard_keep'").fetchone()[0])["引用资产变量"] == [candidate["variable"]]
+
+        changed = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+        changed["payload"]["当前子资产"]["原剧视觉形象描述"] += "；新增可见伤疤。"
+        changed["payload"]["sourceSnapshot"] = main.build_source_snapshot(changed)
+        mismatch = main.reconcile_asset_extraction_rows(conn, project["id"], episode_id, [changed])
+        assert mismatch["identityConflicts"]
+        assert conn.execute("SELECT COUNT(*) FROM assets WHERE project_id=?", (project["id"],)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM asset_images WHERE asset_id=?", (stable_asset_id,)).fetchone()[0] == 1
+
+    derived = create_project(client, title="asset-upsert-derived-copy")
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("episode_derived", derived["id"], 1, "source.mp4", "C:/fixture/source.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        copied = next(item for item in main.normalize_assets_from_agent(fixture) if item["asset_type"] == "角色")
+        copied["_existingAssetId"] = stable_asset_id  # foreign-project IDs must never suppress a derived row
+        main.insert_assets(conn, derived["id"], "episode_derived", [copied])
+        derived_row = conn.execute("SELECT id FROM assets WHERE project_id=?", (derived["id"],)).fetchone()
+        assert derived_row and derived_row["id"] != stable_asset_id
+
+
+def test_main_key_normalization_merges_camera_noise_and_scene_zones():
+    def key(name: str, asset_type: str) -> str:
+        return main.asset_project_main_key({"asset_type": asset_type, "name": name, "payload": {}})
+
+    # 机位噪音（含纯机位括号注释）剥离后归并为同一主键
+    assert key("电子记分牌（近景特写）", "道具") == key("电子记分牌", "道具")
+    assert key("近景电子记分牌", "道具") == key("电子记分牌", "道具")
+    # 场景空间分区后缀归并到同一物理场馆
+    assert key("京北大学室内篮球馆替补席区域", "场景") == key("京北大学室内篮球馆", "场景")
+    assert key("京北大学室内篮球馆场边/替补席区域", "场景") == key("京北大学室内篮球馆", "场景")
+    assert key("京北大学室内篮球馆场边区域", "场景") == key("京北大学室内篮球馆", "场景")
+
+
+def test_main_key_normalization_never_strips_state_variants_or_functional_words():
+    def key(name: str, asset_type: str) -> str:
+        return main.asset_project_main_key({"asset_type": asset_type, "name": name, "payload": {}})
+
+    # 状态变体是子资产核心价值，永不合并
+    assert key("大殿夜景", "场景") != key("大殿", "场景")
+    assert key("大殿受损状态", "场景") != key("大殿", "场景")
+    assert key("张三战斗服", "角色") != key("张三常服", "角色")
+    assert key("张三战斗服", "角色") != key("张三", "角色")
+    # 功能词保持拆分
+    assert key("篮球架24秒计时牌", "道具") != key("电子记分牌", "道具")
+    assert key("篮球馆场边电子广告屏/记分牌", "道具") != key("电子记分牌", "道具")
+    # 括号内容含非机位词（位置/颜色）时整体保留
+    assert key("电子记分牌（场边远端大屏）", "道具") != key("电子记分牌", "道具")
+    assert key("红色数字电子记分牌", "道具") != key("电子记分牌", "道具")
+    # 剥离为空时回退原文，防止错并
+    assert key("全景", "道具") == "道具:全景"
+
+
+def test_main_key_normalization_records_stripped_modifiers_for_audit():
+    asset = {"asset_type": "场景", "name": "京北大学室内篮球馆替补席区域", "payload": {}}
+    key = main.asset_project_main_key(asset)
+    assert key == "场景:京北大学室内篮球馆"
+    audit = asset["payload"]["归并规范化"]
+    assert audit["规范化身份文本"] == "京北大学室内篮球馆"
+    assert "替补席区域" in audit["剥离修饰"]
+    clean = {"asset_type": "道具", "name": "矿泉水瓶", "payload": {}}
+    main.asset_project_main_key(clean)
+    assert "归并规范化" not in clean["payload"]
+
+
+def test_reconcile_publishes_unambiguous_candidates_and_withholds_conflicts(client: TestClient):
+    project = create_project(client, title="reconcile-per-asset-granularity")
+    episode_id = "episode_partial_reconcile"
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            (episode_id, project["id"], 1, "source.mp4", "C:/fixture/source.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        existing = []
+        for asset_id, variable, name in (
+            ("asset_stable_1", "{{CHAR_001_SUB_01}}", "林浩"),
+            ("asset_stable_2", "{{CHAR_002_SUB_01}}", "顾霜"),
+            ("asset_stable_3", "{{PROP_001}}", "矿泉水瓶"),
+            ("asset_conflict", "{{PROP_009}}", "旧记分牌"),
+        ):
+            payload = {
+                "sourceSnapshot": {"name": name, "coreDescription": f"{name}的源事实。", "childId": variable.lstrip("{").rstrip("}")},
+                "原剧核心形象描述": f"{name}的源事实。",
+            }
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (asset_id, project["id"], episode_id, "角色" if "CHAR" in variable else "道具", name, name, variable, "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+            )
+            existing.append((asset_id, variable, name))
+
+        def candidate(variable: str, name: str, description: str) -> dict:
+            asset_type = "角色" if "CHAR" in variable else "道具"
+            payload = {
+                "sourceSnapshot": {"name": name, "coreDescription": description, "childId": variable.lstrip("{").rstrip("}")},
+                "原剧核心形象描述": description,
+            }
+            return {"asset_type": asset_type, "name": name, "localized_name": name, "variable": variable, "status": "待确认", "payload": payload}
+
+        merged = [
+            candidate("{{CHAR_001_SUB_01}}", "林浩", "林浩的源事实。"),
+            candidate("{{CHAR_002_SUB_01}}", "顾霜", "顾霜的源事实。"),
+            candidate("{{PROP_001}}", "矿泉水瓶", "矿泉水瓶的源事实。"),
+        ]
+        conflicted = candidate("{{PROP_009}}", "新记分牌", "全新记分牌，与旧资产身份不同。")
+        fresh = candidate("{{PROP_100}}", "全新道具", "全新道具的源事实。")
+        result = main.reconcile_asset_extraction_rows(conn, project["id"], episode_id, [*merged, conflicted, fresh])
+
+        assert result["identityConflicts"] and result["identityConflicts"][0]["variable"] == "{{PROP_009}}"
+        assert result["preservedExistingCount"] == 3
+        assert result["withheldCount"] == 1
+        assert result["newCandidateCount"] == 1
+        assert conflicted.get("_withheld")
+        assert [item["_existingAssetId"] for item in merged] == ["asset_stable_1", "asset_stable_2", "asset_stable_3"]
+        review_payload = json.loads(conn.execute("SELECT payload_json FROM assets WHERE id='asset_conflict'").fetchone()[0])
+        assert review_payload["身份核对"]["status"] == "待核对"
+        stale_payload = json.loads(conn.execute("SELECT payload_json FROM assets WHERE id='asset_stable_1'").fetchone()[0])
+        assert "assetSourceRefreshReview" not in stale_payload
+
+
+def test_exact_source_cache_replay_keeps_reviewed_liam_accessories_from_prop006(client: TestClient):
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "liam_prop006_source_replay.json").read_text(encoding="utf-8"))
+    replay_assets = main.normalize_reused_source_assets(fixture["assets"])
+    liam = next(asset for asset in replay_assets if asset["variable"] == "{{CHAR_001_SUB_01}}")
+    prop = next(asset for asset in replay_assets if asset["variable"] == "{{PROP_006}}")
+    prop_evidence = prop["payload"]["原剧描述"]
+    assert "佩戴在林浩白色衬衫领口" in prop_evidence
+
+    project = create_project(client, title="liam-reviewed-wear-cache-replay", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语")
+    episode_id = "episode-liam-cache-replay"
+    reviewed = {
+        "status": "reviewed",
+        "fixedWornAccessories": [
+            {"value": "左胸红色胸花（礼服左胸佩戴）", "evidenceVariable": "{{CHAR_001_SUB_01}}", "evidenceText": "新郎左胸佩戴红色胸花"},
+            {"value": "黑色领结，中央为金色几何金属饰件（不复制品牌标识）", "evidenceVariable": "{{PROP_006}}", "evidenceText": prop_evidence},
+        ],
+    }
+    old_payload = json.loads(json.dumps(liam["payload"], ensure_ascii=False))
+    old_payload["sourceFactReview"] = reviewed
+    old_payload.setdefault("当前子资产", {})["固定穿戴配饰"] = [item["value"] for item in reviewed["fixedWornAccessories"]]
+    prior_id = "asset_liam-reviewed-cache-replay"
+    with main.connect() as conn:
+        conn.execute("INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)", (episode_id, project["id"], 1, "source.mp4", "C:/missing/source.mp4", "已上传", "2026-10-28T00:00:00Z"))
+        conn.execute("INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (prior_id, project["id"], episode_id, "角色", liam["name"], "Liam Hale", liam["variable"], "已确认", json.dumps(old_payload, ensure_ascii=False), "2026-10-28T00:00:00Z"))
+        outcome = main.reconcile_asset_extraction_rows(conn, project["id"], episode_id, [liam])
+
+    assert not outcome["identityConflicts"]
+    assert liam["id"] == prior_id
+    assert liam["payload"]["sourceFactReview"] == reviewed
+    assert liam["payload"]["当前子资产"]["固定穿戴配饰"] == [item["value"] for item in reviewed["fixedWornAccessories"]]
+    assert main.fixed_worn_accessory_observations(liam["payload"], liam["payload"]["当前子资产"], {}) == [item["value"] for item in reviewed["fixedWornAccessories"]]
+
+
+def test_video_generation_nonmock_agent_fails_without_creating_placeholder_or_generation(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="video-not-connected")
+    episode_id, _ = insert_source_records(project)
+    storyboard_id = "storyboard_video_not_connected"
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (storyboard_id, project["id"], episode_id, "shot", "00:00:01-00:00:02", "A woman crosses the room.", json.dumps({"分镜具体动作描述": "A woman crosses the room."}), "已生成", "2026-01-01T00:00:00Z"),
+        )
+    monkeypatch.setattr(main, "prepare_agent", lambda key: {"mode": "volcengine", "model_name": "configured-video", "prompt": "", "prompt_file": "video"})
+    response = client.post(f"/api/projects/{project['id']}/tasks/run", json={"taskType": "video_generation", "storyboardId": storyboard_id})
+    assert response.status_code == 200
+    task_id = response.json()["task"]["id"]
+    detail = client.get(f"/api/tasks/{task_id}").json()["task"]
+    assert detail["status"] == "失败"
+    assert detail["result"]["error"] == "video_generation_not_implemented"
+    assert "没有调用视频模型" in detail["message"]
+    with main.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM video_generations WHERE project_id=?", (project["id"],)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE project_id=? AND task_type='video_generation'", (project["id"],)).fetchone()[0] == 1
+    output_dir = main.PROJECTS_DIR / project["id"] / "outputs" / "videos"
+    assert not list(output_dir.glob("*.txt")) if output_dir.exists() else True
+
+
+@pytest.mark.parametrize("remake_mode", ["cg_3d", "overseas_localization"])
+def test_visual_style_does_not_disable_selected_target_localization(client: TestClient, remake_mode: str):
+    project = create_project(client, title="cg-target-language", remakeMode=remake_mode, targetCountry="美国", targetLanguage="英语")
+    storyboard = {"id": "shot-cg", "time_range": "00:00:01-00:00:02", "prompt": "背景中可见中文‘我们结婚’。", "payload": {"镜头列表": [{"背景": "墙面有中文‘我们结婚’标识", "人物站位": "新人站在门口"}]}}
+    with main.connect() as conn:
+        main.apply_storyboard_project_prompt(conn, project, storyboard)
+    assert "目标国家（美国）和目标语言（英语）" in storyboard["prompt"]
+    assert "画面类型只决定视觉呈现，不取消地域与语言适配" in storyboard["prompt"]
+    assert "不进行地域本地化" not in storyboard["prompt"]
+    assert "招牌、屏幕字和姓名条仅供语义与版式参考" in storyboard["prompt"]
+    assert "我们结婚" in storyboard["prompt"]  # source observation stays intact; compiler carries target replacement rule
 
 
 def test_source_review_profile_keeps_target_face_but_blocks_automatic_generation_and_duplicate_keys():
@@ -1082,12 +1697,14 @@ def test_source_review_profile_keeps_target_face_but_blocks_automatic_generation
     assert profile["status"] == "source_review"
     assert profile["structuredDescription"]["基础设定"]["族裔外貌"] == "Mexican American"
     assert profile["structuredDescription"]["服装"]["袖型"] == "unknown"
+    assert "已观察衣件组合（层次未拆分，原文保留）" in profile["structuredDescription"]["服装"]["结构与廓形"]
     assert profile["sourceReviewPaths"]
     assert not main.localized_profile_validation_errors(asset, "美国")
     project = {"remake_mode": "overseas_localization", "target_country": "美国", "target_language": "英语", "target_era": "现代"}
     main.prepare_asset_prompt_fields(asset, project)
     assert asset["payload"]["目标画像状态"] == "待源事实核对"
-    assert "源事实待核对" in asset["payload"]["自动编译资产图生成提示词"]
+    assert "源事实待核对" not in asset["payload"]["自动编译资产图生成提示词"]
+    assert "已观察衣件组合（层次未拆分，原文保留）" in asset["payload"]["自动编译资产图生成提示词"]
     assert "Mexican American" in asset["payload"]["自动编译资产图生成提示词"]
     duplicated = {"localizedAssets": [response["localizedAssets"][0], response["localizedAssets"][0]]}
     duplicate_errors = main.merge_localized_profiles([asset], duplicated, "美国", "现代", "英语")
@@ -1220,7 +1837,214 @@ def test_legacy_alias_adapter_preserves_canonical_values_and_unresolved_observat
     assert normalized["服装"]["鞋面可见性"] == "被裙摆遮挡不可见"
     assert normalized["固定穿戴配饰"] == ["红色胸花"]
     assert normalized["sourceAliasObservations"]["服装.内中外层"] == structure["服装"]["内中外层"]
+    assert "已观察衣件组合（层次未拆分，原文保留）：内层白衬衫+中层灰马甲+外层蓝色外套" in normalized["服装"]["结构与廓形"]
+    assert "已观察领袖组合（领型/袖型未拆分，原文保留）：旧合并领袖观察" in normalized["服装"]["结构与廓形"]
+    assert "服装.结构与廓形" in review
     assert "服装.鞋面可见性" not in review
+
+
+def test_prop_asset_image_prompt_uses_canonical_target_facts_over_stale_free_prompt():
+    project = {
+        "remake_mode": "overseas_localization", "target_country": "美国",
+        "target_language": "英语", "source_language": "中文", "storyboard_visual_style": "cg_3d",
+    }
+    payload = {
+        "资产类型": "道具", "原剧道具名称": "黑色塑料鸡笼",
+        "原剧道具描述": "黑色长方形网格塑料周转笼，笼内有红棕色鸡。",
+        "道具资产图生成提示词": "旧模型自由提示：麻布袋，袋口露出青葱。",
+        "本地化道具描述": "旧缓存：Burlap sack with scallions.",
+        "localizedProfile": {
+            "schemaVersion": main.ASSET_LOCALIZATION_SCHEMA_VERSION,
+            "status": "complete", "localizedName": "Black Plastic Chicken Crate",
+            "coreDescription": "A black rectangular plastic poultry crate with grid openings and a reddish-brown chicken inside.",
+            "visualDescription": "Black rectangular plastic poultry crate with grid openings.",
+            "assetImagePrompt": "STALE FREE PROMPT: burlap sack with scallions, leafy greens spilling out.",
+        },
+    }
+    payload["sourceSnapshot"] = main.build_source_snapshot({"asset_type": "道具", "name": "黑色塑料鸡笼", "variable": "{{PROP_002}}", "payload": payload})
+    payload["localizedProfile"]["targetContext"] = main.localized_profile_target_context(payload, project)
+
+    prompt = main.build_project_asset_prompt("道具", payload, project)
+
+    assert "A black rectangular plastic poultry crate" in prompt
+    assert "Burlap sack" not in prompt
+    assert "scallions" not in prompt
+    assert "STALE FREE PROMPT" not in prompt
+
+
+def test_stored_liam_dynamic_wardrobe_is_filtered_at_automatic_get_final_prompt_boundary(client: TestClient):
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "liam_dynamic_wardrobe_profile.json").read_text(encoding="utf-8"))["evidence"]
+    source_clothing = fixture["sourceSnapshotClothing"]
+    target_clothing = fixture["localizedProfileClothing"]
+    assert source_clothing["穿着状态"] == "整齐，后被掀开露出腹部"
+    assert target_clothing["穿着状态"] == "整齐，后被掀开露出腹部"
+    assert "后被掀开露出腹部" in fixture["localizedProfileCoreDescription"]
+    assert "后被掀开露出腹部" in fixture["storedImagePrompt"]
+
+    project = create_project(client, title="liam-real-wardrobe-evidence", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语", sourceLanguage="中文", targetEra="现代", storyboardVisualStyle="cg_3d")
+    with main.connect() as conn:
+        project_for_compile = main.get_project_or_404(conn, project["id"])
+    structure = valid_role_visual_structure()
+    structure["服装"].update(target_clothing)
+    payload = {
+        "资产类型": "角色", "剧情身份": "新郎", "本地化角色名称": "Liam Hale",
+        "sourceSnapshot": {
+            "schemaVersion": main.ASSET_SOURCE_SCHEMA_VERSION,
+            "coreDescription": fixture["sourceSnapshotCoreDescription"],
+            "sourceStructuredDescription": {"服装": source_clothing},
+        },
+        "localizedProfile": {
+            "schemaVersion": main.ASSET_LOCALIZATION_SCHEMA_VERSION, "status": "complete",
+            "localizedName": "Liam Hale", "coreDescription": fixture["localizedProfileCoreDescription"],
+            "visualDescription": fixture["localizedProfileVisualDescription"], "structuredDescription": structure,
+            "assetImagePrompt": fixture["storedImagePrompt"],
+        },
+        "当前子资产": {"角色资产图结构化描述": structure, "本地化视觉形象描述": fixture["localizedProfileVisualDescription"]},
+    }
+    payload["localizedProfile"]["targetContext"] = main.localized_profile_target_context(payload, project_for_compile)
+    original_source_state = payload["sourceSnapshot"]["sourceStructuredDescription"]["服装"]["穿着状态"]
+    original_target_state = payload["localizedProfile"]["structuredDescription"]["服装"]["穿着状态"]
+    asset = {"id": fixture["assetId"], "asset_type": "角色", "name": "林浩", "localized_name": "Liam Hale", "variable": fixture["variable"], "payload": payload}
+    with main.connect() as conn:
+        conn.execute("INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (fixture["assetId"], project["id"], None, "角色", "林浩", "Liam Hale", fixture["variable"], "已确认", json.dumps(payload, ensure_ascii=False), "2026-10-28T00:00:00Z"))
+    response = client.get(f"/api/projects/{project['id']}/assets")
+    assert response.status_code == 200, response.text
+    response_asset = next(item for item in response.json()["assets"] if item["id"] == fixture["assetId"])
+    prompt = response_asset["payload"]["最终资产图生成提示词"]
+
+    assert "衣长：及臀" in prompt
+    assert "深蓝马甲" in prompt and "深蓝西装外套" in prompt and "深蓝西裤" in prompt
+    assert "左胸佩戴红色胸花" in prompt
+    assert "后被掀开露出腹部" not in prompt
+    assert response_asset["payload"]["sourceSnapshot"]["sourceStructuredDescription"]["服装"]["穿着状态"] == original_source_state
+    assert response_asset["payload"]["localizedProfile"]["structuredDescription"]["服装"]["穿着状态"] == original_target_state
+
+
+def test_static_wear_state_keeps_short_top_and_distress_without_length_normalization():
+    project = {"remake_mode": "overseas_localization", "target_country": "美国", "target_language": "英语", "source_language": "中文"}
+    structure = valid_role_visual_structure(服装={
+        "衣长": "短款上衣下摆位于腰线以上，明确露腰",
+        "结构与廓形": "短款直身剪裁，原有下摆破损与泥污",
+        "穿着状态": "下摆撕裂，袖口有泥污与磨损",
+    })
+    payload = {"资产类型": "角色", "剧情身份": "幸存者", "本地化角色名称": "Alex",
+               "当前子资产": {"角色资产图结构化描述": structure, "固定穿戴配饰": []}}
+    prompt = main.build_role_asset_image_prompt(payload, "美国", "英语", "live_action")
+    assert "短款上衣下摆位于腰线以上，明确露腰" in prompt
+    assert "短款直身剪裁，原有下摆破损与泥污" in prompt
+    assert "下摆撕裂，袖口有泥污与磨损" in prompt
+
+
+def test_unknown_shoes_are_nonblocking_only_when_explicit_hem_and_both_visibility_fields_cover_them():
+    hidden = valid_role_visual_structure(服装={
+        "衣长": "婚纱及地", "摆型": "连续长摆", "拖尾程度": "拖地",
+        "摆与地面关系": "婚纱下摆及地并覆盖鞋履",
+        "鞋子": "unknown", "鞋面可见性": "不可见，被婚纱遮挡", "脚踝可见性": "不可见，被婚纱遮挡",
+    })
+    assert main.footwear_hidden_by_garment(hidden)
+    assert not any("服装.鞋子" in path for path in main.role_structured_missing_paths(hidden))
+    prompt = main.build_role_asset_image_prompt({"资产类型": "角色", "当前子资产": {"角色资产图结构化描述": hidden}}, "美国", "英语", "live_action")
+    assert "已确认长裙衣摆遮住鞋面与脚踝" in prompt and "不展示鞋型、鞋面或鞋尖" in prompt
+    assert "鞋子：unknown" not in prompt
+
+    source_structure = valid_role_visual_structure(服装=hidden["服装"])
+    source_snapshot = {"sourceStructuredDescription": source_structure, "needsReview": ["服装.鞋子"]}
+    assert "服装.鞋子" not in main.required_source_review_paths(hidden, source_snapshot)
+    asset = {"asset_type": "角色", "variable": "{{BRIDE}}", "name": "新娘", "localized_name": "Bride", "payload": {"sourceSnapshot": source_snapshot, "当前子资产": {}}}
+    target = {"基础设定": {"族裔外貌": "白人美国女性"}, "脸部特征": valid_role_visual_structure()["脸部特征"], "发型": valid_role_visual_structure()["发型"]}
+    target["脸部特征"]["目标族裔背景"] = "白人美国女性"
+    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Bride", "structuredDescription": target}}]}, "美国", "当代", "英语")
+    profile = asset["payload"]["localizedProfile"]
+    assert not errors
+    assert profile["status"] == "complete"
+    assert profile["sourceReviewPaths"] == []
+    assert profile["nonBlockingSourceReviewPaths"] == ["服装.鞋子"]
+    assert profile["sourceReviewNotes"]
+
+    uncertain = valid_role_visual_structure(服装={
+        "衣长": "unknown", "摆型": "unknown", "拖尾程度": "unknown", "摆与地面关系": "unknown",
+        "鞋子": "unknown", "鞋面可见性": "清晰可见", "脚踝可见性": "可见",
+    })
+    assert not main.footwear_hidden_by_garment(uncertain)
+    missing = main.role_structured_missing_paths(uncertain)
+    assert any("服装.鞋子" in path for path in missing)
+    assert any("服装.衣长" in path for path in missing)
+    assert any("服装.摆型" in path for path in missing)
+    assert any("服装.拖尾程度" in path for path in missing)
+    assert any("服装.摆与地面关系" in path for path in missing)
+
+
+def test_real_wuyuehong_long_skirt_hides_unknown_shoes_without_guessing_shoe_type():
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "wuyuehong_hidden_shoes_source_review.json").read_text(encoding="utf-8"))["evidence"]
+    assert fixture["targetProfileStatus"] == "source_review"
+    assert fixture["targetNeedsReview"] == ["服装.鞋子"]
+    assert fixture["targetClothing"]["衣长"] == "长裙摆"
+    assert fixture["targetClothing"]["摆与地面关系"] == "近地面"
+    assert fixture["targetClothing"]["鞋面可见性"] == "不可见"
+    assert fixture["targetClothing"]["脚踝可见性"] == "不可见"
+
+    source_structure = valid_role_visual_structure(服装=fixture["sourceClothing"])
+    source_snapshot = {"sourceStructuredDescription": source_structure, "needsReview": fixture["sourceNeedsReview"]}
+    asset = {"asset_type": "角色", "variable": "{{BRIDE}}", "name": "吴月红", "localized_name": "Maya Carter", "payload": {"sourceSnapshot": source_snapshot, "当前子资产": {}}}
+    target = {"基础设定": {"族裔外貌": "白人美国女性"}, "脸部特征": valid_role_visual_structure()["脸部特征"], "发型": valid_role_visual_structure()["发型"]}
+    target["脸部特征"]["目标族裔背景"] = "白人美国女性"
+    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Maya Carter", "structuredDescription": target}}]}, "美国", "当代", "英语")
+    profile = asset["payload"]["localizedProfile"]
+    assert not errors
+    assert profile["status"] == "complete"
+    assert profile["sourceReviewPaths"] == []
+    assert profile["nonBlockingSourceReviewPaths"] == ["服装.鞋子"]
+    prompt = main.build_project_asset_prompt("角色", asset["payload"], {"remake_mode": "overseas_localization", "target_country": "美国", "target_language": "英语", "storyboard_visual_style": "live_action"})
+    assert "鞋面可见性：不可见" in prompt and "脚踝可见性：不可见" in prompt
+    assert "鞋履被已确认长裙衣摆遮挡，源鞋款未知" in prompt
+    assert "不展示鞋型、鞋面或鞋尖" in prompt
+    assert "鞋子：unknown" not in prompt
+
+    exposed = valid_role_visual_structure(服装={
+        "衣长": "unknown", "摆型": "unknown", "拖尾程度": "unknown", "摆与地面关系": "unknown",
+        "鞋子": "unknown", "鞋面可见性": "可见", "脚踝可见性": "可见",
+    })
+    assert not main.footwear_hidden_by_garment(exposed)
+    assert any("服装.鞋子" in path for path in main.role_structured_missing_paths(exposed))
+
+
+def test_unobservable_lower_body_unknowns_do_not_lock_automatic_asset_prompt():
+    structure = valid_role_visual_structure(服装={
+        "衣长": "unknown", "摆型": "unknown", "拖尾程度": "unknown", "摆与地面关系": "unknown",
+        "鞋子": "unknown", "鞋面可见性": "不可见", "脚踝可见性": "不可见",
+        "外层": "浅香槟色带领伴娘裙上身", "下装": "同色裙装",
+    })
+    review_paths = ["服装.衣长", "服装.摆型", "服装.拖尾程度", "服装.摆与地面关系", "服装.鞋子"]
+    snapshot = {"needsReview": review_paths, "sourceStructuredDescription": structure}
+    payload = {
+        "sourceSnapshot": snapshot,
+        "localizedProfile": {
+            "status": "source_review", "localizedName": "Chloe Bennett",
+            "localizedChildName": "Chloe Bennett Champagne Bridesmaid Look",
+            "coreDescription": "A Mexican American bridesmaid with a target-localized face.",
+            "visualDescription": "A champagne bridesmaid dress with a red accent.",
+            "structuredDescription": structure,
+            "sourceReviewPaths": review_paths, "needsReview": review_paths,
+        },
+        "当前子资产": {"角色资产图结构化描述": structure},
+    }
+
+    main.refresh_role_source_review_profile(payload)
+    profile = payload["localizedProfile"]
+    assert profile["status"] == "complete"
+    assert profile["sourceReviewPaths"] == []
+    assert profile["nonBlockingSourceReviewPaths"] == review_paths
+    assert all(path not in main.role_structured_missing_paths(structure) for path in review_paths)
+
+    prompt = main.build_project_asset_prompt("角色", payload, {
+        "remake_mode": "cg_3d", "target_country": "美国", "target_language": "英语",
+        "storyboard_visual_style": "cg_3d",
+    })
+    assert "源画面未观察到的下半身细节" in prompt
+    assert "不得把推测写成原片事实" in prompt
+    assert "unknown" not in prompt.lower()
+    assert main.CG_ROLE_FIXED_TEMPLATE in prompt
 
 
 def test_source_review_get_post_auto_draft_blocks_provider_but_manual_complete_prompt_keeps_cg_suffix(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
@@ -1265,16 +2089,17 @@ def test_source_review_get_post_auto_draft_blocks_provider_but_manual_complete_p
     assert loaded.status_code == 200, loaded.text
     loaded_asset = next(item for item in loaded.json()["assets"] if item["id"] == asset_id)
     auto = loaded_asset["payload"]["最终资产图生成提示词"]
-    assert "源事实待核对" in auto
-    blocked = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": auto})
-    assert blocked.status_code == 422
-    assert "未解决占位" in blocked.json()["detail"]
-    assert observed == []
+    assert "源事实待核对" not in auto
+    assert loaded_asset["payload"]["目标画像状态"] == "待源事实核对"
+    generated_auto = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": auto})
+    assert generated_auto.status_code == 200, generated_auto.text
+    assert len(observed) == 1
     manual = "完整自包含角色设定：成年墨西哥裔美国男性，深棕短发，穿合身深蓝西装、白衬衫与长裤，鞋面与袖口清晰设定，白色背景资产展示。"
     accepted = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={"finalPrompt": manual})
     assert accepted.status_code == 200, accepted.text
-    assert len(observed) == 1
+    assert len(observed) == 2
     assert observed[0].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
+    assert observed[1].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
 
 
 def test_invalid_localized_profile_is_not_marked_complete_or_projected():
@@ -1558,9 +2383,10 @@ def test_effective_asset_source_ignores_historical_candidates_when_reusing_origi
     assert restored.json()["asset"]["payload"]["effectiveAssetSource"] == "source"
     assert len(restored.json()["asset"]["images"]) == 1
     assert restored.json()["asset"]["images"][0]["is_selected"] == 0
-    blocked_restore_generation = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={})
-    assert blocked_restore_generation.status_code == 409
-    assert "沿用原貌" in blocked_restore_generation.json()["detail"]
+    generated_after_restore = client.post(f"/api/projects/{project['id']}/assets/{asset_id}/generate-image", json={})
+    assert generated_after_restore.status_code == 200, generated_after_restore.text
+    switched_off_again = client.patch(f"/api/projects/{project['id']}", json={"replaceCharacters": False})
+    assert switched_off_again.status_code == 200, switched_off_again.text
     restored_board = client.get(board_url).json()["storyboards"][0]["payload"]["目标资产映射快照"][0]
     assert restored_board["effectiveAssetSource"] == "source"
     assert restored_board["imagePath"] == str(source_path)
@@ -1726,8 +2552,8 @@ def test_storyboard_structured_contract_preserves_root_summary_and_mixed_legacy_
     assert "机位与构图" in config_prompt and "人物站位" in config_prompt and "台词与声音" in config_prompt
     assert "仅在输入明确提供白模素材时启用" in config_prompt
     assert "以下样例仅展示字段排列与格式" in config_prompt
-    assert "海外本土化项目才按目标国家/语言适配；国内重制、3DCG和资产替换按输入保留源剧情/源语言" in config_prompt
-    assert "仅当项目模式是`overseas_localization`且目标语言明确不是中文" in config_prompt
+    assert "目标国家与目标语言由项目输入独立决定" in config_prompt
+    assert "`cg_3d`和`asset_replacement`不改变这一路由" in config_prompt
 
     root_summary = {
         "场景": "@夜间办公室",
@@ -1768,12 +2594,13 @@ def test_storyboard_structured_contract_preserves_root_summary_and_mixed_legacy_
     }
     normalized = main.normalize_storyboards_from_agent(parsed)
     assert len(normalized) == 2
-    assert all(board["payload"]["片段说明"] == root_summary for board in normalized)
+    assert all("片段说明" not in board["payload"] for board in normalized)
+    assert all(board["payload"]["全局片段说明"] == root_summary for board in normalized)
 
     first = normalized[0]
     first_payload = first["payload"]
     first_prompt = main.format_storyboard_prompt(first["time_range"], first_payload, first["prompt"], ["@林浩-常服"], [])
-    assert first_prompt.count("片段说明：") == 1
+    assert "夜间办公室" not in first_prompt
     assert "1.5秒" in first_prompt
     assert "[机位与构图]" in first_prompt and "[人物站位]" in first_prompt and "[台词与声音]" in first_prompt
     assert "\\n" not in first_prompt
@@ -1782,7 +2609,7 @@ def test_storyboard_structured_contract_preserves_root_summary_and_mixed_legacy_
     second_prompt = main.format_storyboard_prompt(second["time_range"], second["payload"], second["prompt"], ["@林浩-常服"], [])
     assert "@林浩-常服向门外走出一步。" in second_prompt
     assert "旧记录的第二条具体描述仍保留。" in second_prompt
-    assert second_prompt.count("片段说明：") == 1
+    assert "夜间办公室" not in second_prompt
 
 
 def test_storyboard_normalize_keeps_structured_only_shots_for_compilation():
@@ -1807,12 +2634,176 @@ def test_storyboard_normalize_keeps_structured_only_shots_for_compilation():
     assert normalized[0]["prompt"] == ""
     main.sanitize_storyboard_asset_references(normalized, [], {})
     prompt = normalized[0]["prompt"]
-    assert prompt.count("片段说明：") == 1
+    assert "片段说明：" not in prompt
     assert "[机位与构图] 近景，视线高度" in prompt
     assert "[背景] 走廊墙面" in prompt
     assert "[人物站位] 角色在画面中央" in prompt
     assert "分镜01｜00:00:00.0-00:00:01.5｜1.5秒" in prompt
     assert "[动作过程] 抬手敲门" in prompt
+
+
+def test_storyboard_refs_ignore_coarse_index_and_global_summary_and_store_stable_variables():
+    assets = [
+        {"id": "asset-bride", "asset_type": "角色", "name": "新娘", "localized_name": "Bride", "variable": "{{CHAR_BRIDE}}", "display_variable": "@Bride"},
+        {"id": "asset-groom", "asset_type": "角色", "name": "新郎", "localized_name": "Groom", "variable": "{{CHAR_GROOM}}", "display_variable": "@Groom"},
+        {"id": "asset-extra", "asset_type": "角色", "name": "母亲", "localized_name": "Mother", "variable": "{{CHAR_MOTHER}}", "display_variable": "@Mother"},
+        {"id": "scene-one", "asset_type": "场景", "name": "主舞台", "localized_name": "Wedding Stage", "variable": "{{SCENE_STAGE}}", "display_variable": "@WeddingStage"},
+        {"id": "scene-two", "asset_type": "场景", "name": "宴席区", "localized_name": "Reception", "variable": "{{SCENE_RECEPTION}}", "display_variable": "@Reception"},
+    ]
+    storyboard = {
+        "title": "opening",
+        "time_range": "00:00:01-00:00:03",
+        "prompt": "新娘与新郎站在婚礼主舞台前。",
+        "payload": {
+            "全局片段说明": {"场景": "@WeddingStage；@Reception", "角色": "@Bride；@Groom；@Mother"},
+            "引用资产变量": ["{{CHAR_BRIDE}}", "{{CHAR_GROOM}}"],
+            "镜头列表": [{"人物站位": "@Bride与@Groom并肩站在@WeddingStage前", "背景": "舞台灯光"}],
+        },
+    }
+    coarse_index = [{"开始时间": "00:00:00", "结束时间": "00:00:10", "出现资产": [
+        {"资产变量": "{{CHAR_MOTHER}}", "资产类型": "角色", "展示资产变量": "@Mother"},
+        {"资产变量": "{{SCENE_RECEPTION}}", "资产类型": "场景", "展示资产变量": "@Reception"},
+    ]}]
+    main.sanitize_storyboard_asset_references([storyboard], coarse_index, {}, assets)
+    payload = storyboard["payload"]
+    assert payload["引用资产变量"] == ["{{CHAR_BRIDE}}", "{{CHAR_GROOM}}", "{{SCENE_STAGE}}"]
+    assert payload["引用资产显示变量"] == ["@Bride", "@Groom", "@WeddingStage"]
+    assert payload["资产映射校验"]["索引可用于过滤"] is False
+    assert "@Mother" not in storyboard["prompt"] and "@Reception" not in storyboard["prompt"]
+    assert "@WeddingStage" in storyboard["prompt"]
+    assert "出镜角色：@Bride、@Groom" in storyboard["prompt"]
+
+
+def test_storyboard_reference_resolution_is_episode_scoped(client: TestClient):
+    project = create_project(client, title="episode-scoped-storyboard-assets")
+    with main.connect() as conn:
+        for episode_id, index in (("episode_one", 1), ("episode_two", 2)):
+            conn.execute(
+                "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+                (episode_id, project["id"], index, f"{episode_id}.mp4", f"C:/test/{episode_id}.mp4", "已上传", "2026-01-01T00:00:00Z"),
+            )
+        for asset_id, episode_id, name, localized_name, display in (
+            ("asset_ep1_prop", "episode_one", "第一集矿泉水瓶", "Bottle", "@矿泉水瓶"),
+            ("asset_ep2_prop", "episode_two", "第二集篮球", "Basketball", "@篮球"),
+        ):
+            payload = {
+                "资产类型": "道具",
+                "原剧道具名称": name,
+                "原剧道具描述": f"{name}的清晰外观。",
+                "展示资产变量": display,
+                "sourceSnapshot": {"name": name, "coreDescription": f"{name}的清晰外观。"},
+                "localizedProfile": {"status": "complete", "localizedName": localized_name, "coreDescription": f"Target {name}."},
+            }
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (asset_id, project["id"], episode_id, "道具", name, localized_name, "{{PROP_001}}", "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+            )
+        storyboard = {
+            "id": "storyboard_ep1",
+            "episode_id": "episode_one",
+            "time_range": "00:00:00-00:00:02",
+            "prompt": "{{PROP_001}}被放在场边。",
+            "payload": {
+                "源分镜文本": "{{PROP_001}}被放在场边。",
+                "分镜生成正文": "{{PROP_001}}被放在场边。",
+                "引用资产变量": ["{{PROP_001}}"],
+            },
+        }
+        main.apply_storyboard_project_prompt(conn, project, storyboard)
+
+    payload = storyboard["payload"]
+    assert payload["资产引用待核对"] == []
+    assert [item["projectAssetId"] for item in payload["目标资产映射快照"]] == ["asset_ep1_prop"]
+    assert "第一集矿泉水瓶" not in storyboard["prompt"] and "第二集篮球" not in storyboard["prompt"]
+    assert "{{PROP_001}}=Bottle" in storyboard["prompt"]
+    assert "Basketball" not in storyboard["prompt"]
+
+
+def test_generated_storyboards_resolve_references_within_episode_without_ambiguity(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # 生成路径回归：两集复用同一稳定变量与展示变量时，run_storyboard_generation
+    # 入库的分镜不得因缺 episode_id 退化为项目级匹配而产生假歧义（第 6 集真实缺陷）。
+    project = create_project(client, title="generated-episode-scoped-refs")
+    video_path = tmp_path / "generated-refs.mp4"
+    video_path.write_bytes(b"isolated video fixture")
+    display = "@篮球场观众群像-篮球场观众群像看台观赛造型"
+    with main.connect() as conn:
+        for episode_id, index, asset_id, name in (
+            ("episode_refs_one", 1, "asset_refs_ep1", "第一集观众群像"),
+            ("episode_refs_two", 2, "asset_refs_ep2", "第二集观众群像"),
+        ):
+            conn.execute(
+                "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at,ark_file_id,ark_file_status) VALUES (?,?,?,?,?,?,?,?,?)",
+                (episode_id, project["id"], index, f"{episode_id}.mp4", str(video_path), "已上传并同步 Ark", "2026-01-01T00:00:00Z", f"ark-{episode_id}", "active"),
+            )
+            payload = {
+                "资产类型": "角色",
+                "原剧角色名称": name,
+                "原剧角色描述": f"{name}的群像外观。",
+                "展示资产变量": display,
+                "sourceSnapshot": {"name": name, "coreDescription": f"{name}的群像外观。"},
+                "localizedProfile": {"status": "complete", "localizedName": "Crowd", "coreDescription": "Target crowd."},
+            }
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (asset_id, project["id"], episode_id, "角色", name, "Crowd", "{{CHAR_001_SUB_01}}", "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+            )
+        conn.execute(
+            "INSERT INTO tasks (id,project_id,episode_id,task_type,status,message,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("task_refs_asset_index", project["id"], "episode_refs_two", "asset_extraction", "成功", "资产提取完成", json.dumps({"资产出现片段索引": [{"片段编号": "片段_001", "开始时间": "00:00:00", "结束时间": "00:00:11", "出现资产变量": [display]}]}, ensure_ascii=False), "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+    model_output = json.dumps({
+        "片段说明": {"场景": display, "分镜数量": 1, "目标风格": "按项目设置", "参考素材分工": "视频提供镜头事实", "成片语言与字幕": "保留原话", "共用要求": "无水印"},
+        "分镜列表": [{
+            "分镜编号": "分镜_001",
+            "分镜时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:11"},
+            "引用资产变量": ["{{CHAR_001_SUB_01}}"],
+            "镜头列表": [{
+                "时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:11"},
+                "机位与构图": {"角度": "平视", "景别": "全景", "主体构图": f"{display}位于看台"},
+                "背景": {"可见环境": "篮球馆看台"},
+                "人物站位": [{"资产变量": "{{CHAR_001_SUB_01}}", "画面左右": "中央"}],
+                "动作过程": {"起始": "坐着观赛", "变化": "鼓掌"},
+                "运镜": {"方式": "固定"},
+                "台词与声音": [{"原话": "待确认", "环境音": "观众声"}],
+            }],
+            "最终视频生成提示词": f"{display}坐在看台观赛并鼓掌。",
+        }],
+    }, ensure_ascii=False)
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "video storyboard", "prompt_file": "test"})
+    monkeypatch.setattr(main, "call_agent_chat", lambda *_args: model_output)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        task = main.run_storyboard_generation(conn, db_project, "episode_refs_two", force=True)
+        conn.commit()
+        rows = conn.execute("SELECT payload_json FROM storyboards WHERE project_id=? AND episode_id=?", (project["id"], "episode_refs_two")).fetchall()
+    assert task["status"] == "成功", task["message"]
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["资产引用待核对"] == []
+    assert [item["projectAssetId"] for item in payload["目标资产映射快照"]] == ["asset_refs_ep2"]
+
+
+def test_manual_reference_assets_do_not_all_become_on_screen_cast_or_scene():
+    assets = [
+        {"id": "bride", "asset_type": "角色", "name": "新娘", "localized_name": "Bride", "variable": "{{CHAR_BRIDE}}", "display_variable": "@Bride"},
+        {"id": "groom", "asset_type": "角色", "name": "新郎", "localized_name": "Groom", "variable": "{{CHAR_GROOM}}", "display_variable": "@Groom"},
+        {"id": "mother", "asset_type": "角色", "name": "母亲", "localized_name": "Mother", "variable": "{{CHAR_MOTHER}}", "display_variable": "@Mother"},
+        {"id": "stage", "asset_type": "场景", "name": "主舞台", "localized_name": "Wedding Stage", "variable": "{{SCENE_STAGE}}", "display_variable": "@WeddingStage"},
+        {"id": "prop", "asset_type": "道具", "name": "鸡笼", "localized_name": "Chicken Crate", "variable": "{{PROP_002}}", "display_variable": "@ChickenCrate"},
+    ]
+    refs = ["{{CHAR_BRIDE}}", "{{CHAR_GROOM}}", "{{CHAR_MOTHER}}", "{{SCENE_STAGE}}", "{{PROP_002}}"]
+    storyboard = {
+        "title": "opening", "time_range": "00:00:01-00:00:03", "prompt": "新娘与新郎站在主舞台。",
+        "payload": {"引用资产变量": refs, "引用资产变量手动覆盖": True,
+                    "镜头列表": [{"人物站位": "新娘与新郎并肩站在门口", "背景": "婚礼主舞台背景"}]},
+    }
+    main.sanitize_storyboard_asset_references([storyboard], [], {}, assets)
+
+    assert storyboard["payload"]["引用资产变量"] == refs
+    assert "出镜角色：@Bride、@Groom" in storyboard["prompt"]
+    assert "@Mother" not in storyboard["prompt"].split("出镜角色：", 1)[1].splitlines()[0]
+    assert "场景：@WeddingStage" in storyboard["prompt"]
+    assert "参考资产（被引用不表示全部出现在画面中）：@ChickenCrate" in storyboard["prompt"]
 
 
 def test_video_generation_rejects_only_explicit_unanalysed_fallback_before_task_creation(client: TestClient):
@@ -1858,6 +2849,203 @@ def test_video_generation_rejects_only_explicit_unanalysed_fallback_before_task_
     legacy = client.post(task_url, json={"taskType": "video_generation", "storyboardId": old_id})
     assert legacy.status_code == 200, legacy.text
     assert len(client.get(f"/api/projects/{project['id']}/video-generations").json()["videoGenerations"]) == 2
+
+
+def test_video_generation_blocks_ambiguous_asset_reference_before_task_creation(client: TestClient):
+    project = create_project(client, title="storyboard-ambiguous-reference-guard")
+    storyboard_id = "storyboard_ambiguous_prop_reference"
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                storyboard_id,
+                project["id"],
+                "episode_test",
+                storyboard_id,
+                "00:00:00-00:00:01",
+                "胸前佩戴@UnnamedProp胸花。",
+                json.dumps({"分镜生成正文": "胸前佩戴@UnnamedProp胸花。", "资产引用待核对": [{"token": "@UnnamedProp", "candidateVariables": ["{{PROP_001}}", "{{PROP_002}}"], "reason": "歧义"}]}, ensure_ascii=False),
+                "待分析",
+                "2026-10-27T00:00:00Z",
+            ),
+        )
+    tasks_before = len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"])
+    rejected = client.post(f"/api/projects/{project['id']}/tasks/run", json={"taskType": "video_generation", "storyboardId": storyboard_id})
+    assert rejected.status_code == 422
+    assert "资产引用待核对" in rejected.json()["detail"]
+    assert "@UnnamedProp" in rejected.json()["detail"]
+    assert len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"]) == tasks_before
+    assert client.get(f"/api/projects/{project['id']}/video-generations").json()["videoGenerations"] == []
+
+
+def _insert_reference_guard_assets(project_id: str, *, duplicate_alias: bool = False) -> None:
+    with main.connect() as conn:
+        for index in range(1, 3 if duplicate_alias else 2):
+            token = "@UnnamedProp" if duplicate_alias else "@RoseBoutonniere"
+            payload = {"源变量别名": token, "展示资产变量": token}
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"asset_reference_guard_{index}", project_id, "episode_test", "道具",
+                    f"道具{index}", f"Prop {index}", f"{{{{PROP_{index:03d}}}}}", "已确认",
+                    json.dumps(payload, ensure_ascii=False), f"2026-01-01T00:00:0{index}Z",
+                ),
+            )
+
+
+def _insert_reference_guard_storyboard(project_id: str, storyboard_id: str, body: str, refs: list[str], stale_review: list[dict]) -> None:
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                storyboard_id, project_id, "episode_test", storyboard_id, "00:00:00-00:00:01", body,
+                json.dumps({"源分镜文本": body, "分镜生成正文": body, "引用资产变量": refs, "资产引用待核对": stale_review}, ensure_ascii=False),
+                "待分析", "2026-01-01T00:00:00Z",
+            ),
+        )
+
+
+def test_stale_asset_reference_review_does_not_block_canonical_storyboard(client: TestClient):
+    project = create_project(client, title="stale-reference-review-clears")
+    _insert_reference_guard_assets(project["id"])
+    storyboard_id = "storyboard_stale_reference_review"
+    stale = [{"token": "@OldUnnamedProp", "candidateVariables": ["{{PROP_001}}", "{{PROP_002}}"], "reason": "旧歧义记录"}]
+    _insert_reference_guard_storyboard(project["id"], storyboard_id, "胸前佩戴{{PROP_001}}红花胸花。", ["{{PROP_001}}"], stale)
+
+    response = client.get(f"/api/projects/{project['id']}/storyboards")
+    assert response.status_code == 200, response.text
+    storyboard = next(item for item in response.json()["storyboards"] if item["id"] == storyboard_id)
+    assert storyboard["payload"]["资产引用待核对"] == []
+    assert storyboard["payload"]["历史资产引用待核对"] == stale
+
+    tasks_before = len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"])
+    with main.connect() as conn:
+        preflight = main.get_video_generation_storyboard(conn, project["id"], storyboard_id)
+    assert preflight["payload"]["资产引用待核对"] == []
+    assert len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"]) == tasks_before
+
+
+def test_ambiguous_current_reference_blocks_until_patch_uses_canonical_asset(client: TestClient):
+    project = create_project(client, title="ambiguous-reference-patch-clears")
+    _insert_reference_guard_assets(project["id"], duplicate_alias=True)
+    storyboard_id = "storyboard_current_ambiguous_reference"
+    old_review = [{"token": "@UnnamedProp", "candidateVariables": ["{{PROP_001}}", "{{PROP_002}}"], "reason": "旧歧义记录"}]
+    _insert_reference_guard_storyboard(project["id"], storyboard_id, "胸前佩戴@UnnamedProp胸花。", ["{{PROP_001}}"], old_review)
+
+    tasks_before = len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"])
+    rejected = client.post(f"/api/projects/{project['id']}/tasks/run", json={"taskType": "video_generation", "storyboardId": storyboard_id})
+    assert rejected.status_code == 422
+    assert "@UnnamedProp" in rejected.json()["detail"]
+    assert len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"]) == tasks_before
+
+    patched = client.patch(
+        f"/api/projects/{project['id']}/storyboards/{storyboard_id}",
+        json={"generatedBody": "胸前佩戴{{PROP_001}}红花胸花。", "payload": {"引用资产变量": ["{{PROP_001}}"]}},
+    )
+    assert patched.status_code == 200, patched.text
+    patched_payload = patched.json()["storyboard"]["payload"]
+    assert patched_payload["资产引用待核对"] == []
+    assert patched_payload["历史资产引用待核对"] == old_review
+
+    with main.connect() as conn:
+        preflight = main.get_video_generation_storyboard(conn, project["id"], storyboard_id)
+    assert preflight["payload"]["资产引用待核对"] == []
+    assert len(client.get(f"/api/projects/{project['id']}/tasks").json()["tasks"]) == tasks_before
+
+
+def test_asset_get_projects_matching_localized_profile_over_stale_legacy_targets(client: TestClient):
+    project = create_project(
+        client, title="asset-get-canonical-profile-projection", remakeMode="cg_3d",
+        sourceLanguage="中文", targetCountry="美国", targetLanguage="英语",
+    )
+    role_source = {
+        "schemaVersion": main.ASSET_SOURCE_SCHEMA_VERSION,
+        "coreDescription": "源观察：婚礼宾客，深色长发。",
+        "visualDescription": "源观察保留；不改族裔原文。",
+        "childId": "CHAR_006_SUB_01",
+        "sourceStructuredDescription": {},
+    }
+    role_structure = valid_role_visual_structure()
+    role_structure["基础设定"]["族裔外貌"] = "欧洲裔美国女性"
+    role_structure["脸部特征"]["目标族裔背景"] = "欧洲裔美国女性"
+    role_payload = {
+        "资产类型": "角色", "原剧角色名称": "夏一曼",
+        "本地化核心形象描述": "旧字段：韩裔美国人，Lena Park。",
+        "目标生成描述": "", "sourceSnapshot": role_source,
+        "localizedProfile": {
+            "schemaVersion": main.ASSET_LOCALIZATION_SCHEMA_VERSION, "status": "complete",
+            "localizedName": "Lena Brooks", "localizedChildName": "Lena Brooks",
+            "coreDescription": "欧洲裔美国女性，明确的椭圆脸骨相与杏仁眼。",
+            "visualDescription": "欧洲裔美国女性，长发半扎，浅香槟色伴娘礼服。",
+            "structuredDescription": role_structure, "childId": "CHAR_006_SUB_01",
+            "assetImagePrompt": "",
+        },
+        "当前子资产": {
+            "子资产编号": "CHAR_006_SUB_01", "本地化子资产名称": "旧名 Lena Park",
+            "本地化视觉形象描述": "旧字段：韩裔美国人，旧脸部画像。",
+        },
+        "子资产": [{
+            "子资产编号": "CHAR_006_SUB_01", "原剧子资产名称": "源服装事实保留",
+            "本地化子资产名称": "旧镜像 Lena Park",
+            "本地化视觉形象描述": "旧镜像：韩裔美国人。",
+        }],
+    }
+    role_payload["localizedProfile"]["targetContext"] = main.localized_profile_target_context(role_payload, project)
+
+    prop_source = {
+        "schemaVersion": main.ASSET_SOURCE_SCHEMA_VERSION,
+        "coreDescription": "长方形黑色塑料鸡笼，网格镂空，笼内有红棕色鸡。",
+        "visualDescription": "源道具原始事实。", "childId": "", "sourceStructuredDescription": {},
+    }
+    prop_payload = {
+        "资产类型": "道具", "原剧名称": "黑色塑料鸡笼", "原剧描述": prop_source["coreDescription"],
+        "本地化道具描述": "旧字段：米黄色麻袋与绿葱。", "目标生成描述": "",
+        "sourceSnapshot": prop_source,
+        "localizedProfile": {
+            "schemaVersion": main.ASSET_LOCALIZATION_SCHEMA_VERSION, "status": "complete",
+            "localizedName": "Black Plastic Poultry Crate", "localizedChildName": "Black Plastic Poultry Crate",
+            "coreDescription": "黑色长方形塑料周转笼，网格镂空结构，笼内有一只红棕色鸡。",
+            "visualDescription": "黑色长方形塑料周转笼，网格镂空结构，笼内有一只红棕色鸡。",
+            "structuredDescription": {}, "childId": "", "assetImagePrompt": "",
+        },
+        "当前子资产": {"本地化子资产名称": "Darlene's Burlap Sack with Green Onions", "本地化视觉形象描述": "米黄色麻袋和绿葱。"},
+    }
+    prop_payload["localizedProfile"]["targetContext"] = main.localized_profile_target_context(prop_payload, project)
+
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("asset_05380f960822", project["id"], None, "角色", "夏一曼", "Lena Park", "{{CHAR_006_SUB_01}}", "待确认", json.dumps(role_payload, ensure_ascii=False), "2026-10-28T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("asset_4dfcaab24953", project["id"], None, "道具", "黑色塑料鸡笼", "Darlene's Burlap Sack with Green Onions", "{{PROP_002}}", "待确认", json.dumps(prop_payload, ensure_ascii=False), "2026-10-28T00:00:01Z"),
+        )
+
+    response = client.get(f"/api/projects/{project['id']}/assets")
+    assert response.status_code == 200, response.text
+    by_id = {asset["id"]: asset for asset in response.json()["assets"]}
+    role = by_id["asset_05380f960822"]
+    role_payload_after = role["payload"]
+    assert role["localized_name"] == "Lena Brooks"
+    assert role_payload_after["目标生成描述"] == ""
+    assert "欧洲裔美国女性" in role_payload_after["当前目标画像描述"]
+    assert "韩裔" not in role_payload_after["当前目标画像描述"]
+    assert "韩裔" not in role_payload_after["当前子资产"]["本地化视觉形象描述"]
+    assert "韩裔" not in role_payload_after["子资产"][0]["本地化视觉形象描述"]
+    assert role_payload_after["当前子资产"]["本地化子资产名称"] == "Lena Brooks"
+    assert role_payload_after["子资产"][0]["本地化子资产名称"] == "Lena Brooks"
+    assert role_payload_after["sourceSnapshot"] == role_source
+
+    prop = by_id["asset_4dfcaab24953"]
+    prop_payload_after = prop["payload"]
+    assert prop["localized_name"] == "Black Plastic Poultry Crate"
+    assert prop_payload_after["目标生成描述"] == ""
+    assert prop_payload_after["当前目标画像描述"] == prop_payload["localizedProfile"]["coreDescription"]
+    assert prop_payload_after["当前子资产"]["本地化子资产名称"] == "Black Plastic Poultry Crate"
+    assert "麻袋" not in prop_payload_after["当前目标画像描述"]
+    assert "麻袋" not in prop_payload_after["当前子资产"]["本地化视觉形象描述"]
+    assert prop_payload_after["sourceSnapshot"] == prop_source
 
 
 def _seed_storyboard_agent_input(project: dict, video_path: Path) -> tuple[str, list[dict]]:
@@ -1981,6 +3169,34 @@ def test_storyboard_uses_video_agent_not_asset_index_as_shot_cache_and_protects_
         after_rows = conn.execute("SELECT id,payload_json FROM storyboards WHERE project_id=? AND episode_id=?", (project["id"], episode_id)).fetchall()
         assert {row["id"] for row in after_rows} == before_ids
         assert any(row["id"] == "storyboard_manual_fixture" and json.loads(row["payload_json"])["分镜生成正文"] == "用户手工编辑的正文" for row in after_rows)
+
+
+def test_us_cg_storyboard_provider_context_uses_target_rules_and_separate_context_cache(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="us-cg-routing", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语", sourceLanguage="中文")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "us-cg-source.mp4")
+    calls: list[dict] = []
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "base prompt", "prompt_file": "test"})
+
+    def capture_call(_key, agent, payload):
+        calls.append({"agent": dict(agent), "payload": dict(payload)})
+        return _valid_storyboard_model_output()
+
+    monkeypatch.setattr(main, "call_agent_chat", capture_call)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        first_signature = main.storyboard_analysis_context_signature(db_project, [{"asset_type": "角色", "name": "林浩", "localized_name": "Lin Hao", "variable": "{{role_1}}", "payload": {}}])
+        generated = main.run_storyboard_generation(conn, db_project, episode_id, force=True)
+        assert generated["status"] == "成功", generated["message"]
+        captured = calls[0]
+        assert captured["payload"]["目标国家"] == "美国"
+        assert captured["payload"]["目标语言"] == "英语"
+        assert "国内模式" not in captured["payload"]["模式路由强约束"]
+        assert "仅海外模式使用目标国家/翻译" not in captured["payload"]["模式路由强约束"]
+        assert "当前是国内重制项目" not in captured["agent"]["prompt"]
+        assert "cg_3d/真人/资产替换只决定视觉或资产策略" in captured["payload"]["模式路由强约束"]
+        changed_project = {**db_project, "target_country": "加拿大"}
+        second_signature = main.storyboard_analysis_context_signature(changed_project, [{"asset_type": "角色", "name": "林浩", "localized_name": "Lin Hao", "variable": "{{role_1}}", "payload": {}}])
+        assert first_signature != second_signature
 
 
 def test_mock_storyboard_fallback_is_reported_as_pending_and_get_hides_placeholder_prompt(client: TestClient, tmp_path: Path):
@@ -2337,6 +3553,132 @@ def test_storyboard_time_boundary_collision_is_not_repaired_and_reports_offender
     assert main.storyboard_times_fit_source(boards, {}) is False
 
 
+def test_zero_length_shot_and_board_ranges_are_repaired_from_declared_duration():
+    # 第 6 集真实缺陷形态：模型把分镜_002 写成 00:00:03-00:00:03（零长度），
+    # 但镜头声明时长 1 秒，下一分镜从 00:00:04 开始——按声明时长补足即可消除歧义。
+    boards = [
+        {
+            "title": "分镜_001",
+            "time_range": "00:00:00-00:00:02",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:02"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:00", "结束时间": "00:00:02"}, "时长": "2秒"}],
+            },
+        },
+        {
+            "title": "分镜_002",
+            "time_range": "00:00:03-00:00:03",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"}, "时长": "1秒"}],
+            },
+        },
+        {
+            "title": "分镜_003",
+            "time_range": "00:00:04-00:00:06",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:04", "结束时间": "00:00:06"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:04", "结束时间": "00:00:06"}, "时长": "2秒"}],
+            },
+        },
+    ]
+    notes = main.repair_storyboard_time_bounds(boards, {"duration_seconds": 15})
+    assert any("分镜_002" in note and "零长度" in note for note in notes)
+    assert boards[1]["time_range"] == "00:00:03-00:00:04"
+    assert boards[1]["payload"]["分镜时间范围"]["结束时间"] == "00:00:04"
+    assert boards[1]["payload"]["镜头列表"][0]["时间范围"]["结束时间"] == "00:00:04"
+    assert main.storyboard_time_fit_errors(boards, {"duration_seconds": 15}) == []
+    assert main.storyboard_times_fit_source(boards, {"duration_seconds": 15}) is True
+
+
+def test_zero_length_range_without_declared_duration_is_not_repaired():
+    boards = [
+        {
+            "title": "分镜_002",
+            "time_range": "00:00:03-00:00:03",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"}}],
+            },
+        },
+    ]
+    notes = main.repair_storyboard_time_bounds(boards, {"duration_seconds": 15})
+    assert notes == []
+    errors = main.storyboard_time_fit_errors(boards, {"duration_seconds": 15})
+    assert errors and "分镜_002" in errors[0] and "分镜区间非法" in errors[0]
+    assert main.storyboard_times_fit_source(boards, {"duration_seconds": 15}) is False
+
+
+def test_zero_length_repair_does_not_extend_into_next_storyboard():
+    # 声明时长 3 秒会撞上下一分镜起点 00:00:04，属于无法无歧义修复的情况，保持不动。
+    boards = [
+        {
+            "title": "分镜_002",
+            "time_range": "00:00:03-00:00:03",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:03", "结束时间": "00:00:03"}, "时长": "3秒"}],
+            },
+        },
+        {
+            "title": "分镜_003",
+            "time_range": "00:00:04-00:00:06",
+            "payload": {
+                "分镜时间范围": {"开始时间": "00:00:04", "结束时间": "00:00:06"},
+                "镜头列表": [{"镜头编号": "镜头1", "时间范围": {"开始时间": "00:00:04", "结束时间": "00:00:06"}, "时长": "2秒"}],
+            },
+        },
+    ]
+    notes = main.repair_storyboard_time_bounds(boards, {"duration_seconds": 15})
+    assert notes == []
+    assert boards[0]["time_range"] == "00:00:03-00:00:03"
+
+
+def test_series_analysis_counts_failed_or_empty_storyboard_episode_as_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="series-failure-accounting")
+    with main.connect() as conn:
+        for episode_id, episode_index in (("episode_series_bad", 1), ("episode_series_empty", 2), ("episode_series_ok", 3)):
+            conn.execute(
+                "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+                (episode_id, project["id"], episode_index, f"ep{episode_index}.mp4", f"C:/test/ep{episode_index}.mp4", "已上传", "2026-01-01T00:00:00Z"),
+            )
+
+    def fake_asset_extraction(_conn, _project, episode_id):
+        return {"id": f"asset_task_{episode_id}", "status": "成功", "message": "资产提取完成", "result": {"资产数量": 4}}
+
+    def fake_storyboard_generation(_conn, _project, episode_id):
+        if episode_id == "episode_series_bad":
+            return {
+                "id": "storyboard_task_bad",
+                "status": "失败",
+                "message": "分镜分析失败，现有分镜已保留：模型返回的分镜时间超出当前视频或镜头区间（分镜_002 分镜区间非法（00:00:03-00:00:03）），未替换现有分镜；请重试分析。",
+                "result": {"分镜数量": 0},
+            }
+        if episode_id == "episode_series_empty":
+            return {"id": "storyboard_task_empty", "status": "成功", "message": "完成", "result": {"分镜数量": 0, "分镜片段数量": 0}}
+        return {"id": f"storyboard_task_{episode_id}", "status": "成功", "message": "分镜生成完成", "result": {"分镜数量": 5, "分镜片段数量": 2}}
+
+    monkeypatch.setattr(main, "run_asset_extraction", fake_asset_extraction)
+    monkeypatch.setattr(main, "run_storyboard_generation", fake_storyboard_generation)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        parent_task = main.create_task(conn, project["id"], None, "series_analysis", "整剧分析中", {})
+        conn.commit()
+        completed = main.run_series_analysis(conn, db_project, parent_task["id"])
+        conn.commit()
+        parent_row = conn.execute("SELECT status, result_json FROM tasks WHERE id=?", (parent_task["id"],)).fetchone()
+    assert completed["result"]["成功集数"] == 1
+    assert completed["result"]["失败集数"] == 2
+    assert completed["message"] == "整剧分析完成：成功 1 集，失败 2 集"
+    failure_ids = {item["episodeId"]: item["error"] for item in completed["result"]["失败明细"]}
+    assert "episode_series_bad" in failure_ids and "分镜生成失败" in failure_ids["episode_series_bad"]
+    assert "分镜区间非法" in failure_ids["episode_series_bad"]
+    assert "episode_series_empty" in failure_ids and "分镜生成结果为空" in failure_ids["episode_series_empty"]
+    success_ids = {item["episodeId"] for item in completed["result"]["成功明细"]}
+    assert success_ids == {"episode_series_ok"}
+    assert json.loads(parent_row["result_json"])["失败集数"] == 2
+
+
 def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="cg3d-overseas-context")
     episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "cg3d-context.mp4")
@@ -2361,6 +3703,6 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
     payload = captured[0]
     assert payload["目标国家"] == "美国"
     assert payload["目标语言"] == "英语"
-    assert "海外本土化" in payload["模式路由强约束"]
+    assert "按明确目标国家（美国）和目标语言（英语）适配分镜" in payload["模式路由强约束"]
     summary_names = [item["本地化资产名称"] for item in payload["资产摘要"]]
     assert "Lin Hao" in summary_names

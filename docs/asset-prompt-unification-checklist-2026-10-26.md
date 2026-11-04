@@ -131,3 +131,40 @@
 - [x] 候选与审计：`artifacts/localization-review/project_c2463-current-cast-migration-candidate.json`；raw/纠错/源快照/完整SQLite备份/行级guard及应用/验证脚本在忽略目录。CDP本轮WebSocket连接超时，未操作用户页面，故本轮migration DOM未验证。
 - [x] 通过既有 `scripts/Restart-AssetDetailBackend.ps1` 的身份、同库、无活动数据库任务守卫，经Windows UAC管理员授权重启真实8007；health为200且指向项目 `data/workshop.sqlite3`。监听PID 35596于2026-10-28 12:17:29启动，晚于 `main.py`（11:46:10）、`asset_source_extraction.md`（10:51:03）和 `asset_target_localization.md`（11:45:11）的最后修改；启动日志 `backend-20261028-121726.stdout.log` / `.stderr.log` 已生成，stderr为空。
 - [x] 实际8007 API复核13项（12个完整画像、1个群像待审核）；六名单人角色的最终提示词均以用户11.1三段固定英文约束逐字结尾且只出现一次，目标画像不含东亚/中国族裔回流，发型分线字段全部非空；吴月红保留 `asset_image_184e287fa708`。复核报告：`artifacts/localization-review/project_c2463-live-8007-verification.json`。未调用生图或视频模型。
+
+## 当前工作流全面排查（2026-10-28）
+
+- [x] 权限/边界复核：当前 `danger-full-access`、approval `never`；未设置 `sandbox_permissions`。真实数据库和最新项目只读，不重试旧失败项目，不调用图片/视频模型。
+- [x] 道具源字段兼容已改并定向回归通过：识别历史 `道具编号/变量/原剧名称/原剧描述/原剧截图时间点候选`，保留稳定ID、源名、描述和source facts；target缓存键绑定资产类型、变量及sourceSnapshot；空源名/描述不调用本地化模型。类别冲突仅比较唯一明确的源名称与目标名称，不以描述中的陪衬词做硬失败。
+- [x] 旧衣件合并观察保留并在target draft可见，未知的领型/袖型仍为待审核；exact v1 source cache重归一化、当前key写入和来源task/key provenance已有隔离回归。
+- [x] 分镜引用修复已定向通过：按已知token精确关联，payload保存canonical `{{...}}`变量，展示`@...`单独保存；歧义展示变量记录needs-review。coarse appearance index不再删逐镜显式引用、不再给镜头添加整集全部资产；root级场景摘要与镜头级引用分开。0秒资产出现时间保留。含coarse index额外角色/场景的负例通过。
+- [x] API任务重复记录闭环已定向通过：外层task id传入资产/分镜/视频runner，成功、失败、缓存命中统一更新同一task；直接runner调用保留新建task兼容；agent run关联同一task。单次tasks/run回归确认一条任务、一回模拟provider、同task轮询原始结果和agent audit。
+- [x] 精确源身份资产重试保护已加入隔离测试：只在同project+episode按类型、稳定child/prop ID、源名和源事实唯一匹配；保留原asset ID/variable/status/payload、选中上传图、用户编辑与storyboard ref；源事实变化但变量冲突时拒绝发布；旧行不删除、标stale及关联分镜待更新。`insert_assets`继续为派生项目分配独立ID。
+- [x] source_review分镜快照现在保留目标画像草稿描述、标记target_draft且ready=false；海外未选择目标图时imagePath为空，不将原片帧隐式当目标身份图。用户选中上传图仍保留为显式参考；用户资产sheet完整prompt不作为镜头外观文本注入。
+- [x] 非mock视频Agent现以“尚未接入”失败结束，不创建placeholder txt、video_generation行或伪成功；mock路径保留并在UI明确标“模拟任务”。
+- [x] CG/真人style与目标国家/语言分开编译；目标规则明确源招牌/屏幕字/姓名条仅作语义与版式观察，成片按目标语言/名称替换并保留位置；源原文留在正文/观察，不做全篇机械删除。回归覆盖美国CG和真人模式。
+- [x] 分镜编辑器改为保存/展示稳定canonical变量；unique旧display alias可迁移，歧义别名不按first-match绑定；引用列表只读显式引用且按asset ID去重，不由coarse索引/编译prompt扩充。`npm run build`通过。
+- [ ] 浏览器精确@手势与PATCH失败前阻止生成仍未实测：9224/9222两端口各2秒CDP探测超时；未启动、未关闭或干扰用户浏览器。
+- [x] 目标族裔校验补韩/日/中英变体：只看canonical目标族裔字段，大小写/空格/连字符归一；无用户明确视觉锁时韩裔、日裔、华裔/混血目标会被拦截；带用户provenance锁可保留；墨西哥裔美国人通过。对应回归覆盖英文连字符/多空格与中文表述。
+- [x] `PYTHONUTF8=1 D:/YOUKU/python.exe -m pytest backend/tests -q -p no:cacheprovider --basetemp=backend/tests/.pytest-tmp`：68 passed，3条既有FastAPI `on_event`弃用警告；`py_compile backend/app/main.py`通过。
+- [ ] 等待root代码复核；v2旧提示词cache在真实数据库中的精确key/task匹配尚未核算，不能据此重试或发布。
+- [ ] 现库candidate待整理且未经审核/未写库：PROP_001–007逐ID目标修复（保留PROP_005组合项链与头饰；PROP_006仅泛化金色几何饰件）；夏一曼目标族裔及五官/发型重设计；旧分镜歧义 `@UnnamedProp` 映射逐行审核。
+- [ ] 尚待审查：稳定资产identity upsert及image/storyboard引用保留、source_review目标图防回流、族裔规则覆盖韩/日/中英混写、非mock视频未实现状态、onlyUnprocessed参数、前端canonical @插入与真实浏览器手势、最新项目时间段warning。不得覆盖最新项目现存资产/分镜或清除任务历史。
+
+## 2026-10-29 收尾候选与应用验证
+
+- [x] source_review手工完整prompt回归：已保存的吴月红1969字prompt中，GET→POST会从provider提示词剔除已解决鞋子路径的系统锁定块，同时原字段逐字留存并进入`resolvedStatusPromptArchive`。真人旧完整prompt被用户改红裙时仅把canonical结构字段的差异带入分镜appearance；未编辑的自动prompt不把`本地化视觉锚点`中的动态掀衣动作回注。相关4项focused pytest通过。
+- [x] 浏览器内引用逻辑底层行为已在前端改为canonical变量写回，并保留可读label/缩略图；headless Chrome本轮路由全部拦截到隔离fixture，但两次精确手势未完成（项目加载后DOM重渲染导致选择器超时）。未请求8007、未修改真实用户正文；浏览器手势记录为未验证。
+- [x] 现库只读dry-run candidate：项目`project_2c1b3059231b`与`project_c6126ab721c7`各7道具、总14项source snapshot重建并在正式GET编译器下重绑targetContext。14/14 target profile complete、GET显示已就绪、目标core与最终prompt非空（均>260字符）；所有8个被人工审核的PROP_002/003/005/006映射字段同步localizedChildName，source/localization schema版本分别使用正式常量。
+- [x] 分镜dry-run：按精确模型任务+video signature+标题/时间唯一映射重建40行derived prompt。单个`@UnnamedProp`只按其紧邻名词做本项目候选映射，审计span及证据保留；128个明确提及被映射，7个仍歧义的提及保留review。无空引用、无global summary泄漏；全部手工引用asset ID集合保持。候选映射不写入通用代码。
+- [x] 数据不变量：候选扫描34资产、只计划更新20个资产行和40个分镜行；资产ID/变量/状态、86张图片历史与selected标记、155任务、88 agent runs、项目/视频/生图job等历史记录hash保持。候选错误列表为空，生产库仍未变，原失败项目尚未恢复。
+- [x] guarded apply脚本具备candidate SHA必填、`BEGIN IMMEDIATE`内活动任务/job与逐行CAS复查、SQLite Backup API备份、提交前after-hash及protected table校验；在完整SQLite副本上实际执行成功（20 assets + 40 storyboards）。正式库apply/reload待root快速复核。
+- [x] 最终代码回归：`D:/YOUKU/python.exe -X utf8 -m pytest backend/tests -q -p no:cacheprovider --basetemp=backend/tests/.pytest-tmp`，90 passed，3条既有FastAPI `on_event`弃用警告；`frontend/`执行`npm run build`通过。
+- [x] 前端按GET投影后的当前`资产引用待核对`展示警告并禁用生成按钮；后端GET/PATCH及video preflight统一从当前正文和显式refs重算active review。历史review转入`历史资产引用待核对`保留审计；过期标记不再阻止生成，仍在当前正文的`@UnnamedProp`继续422。stale canonical / ambiguous→PATCH canonical 两条回归通过。
+- [x] root复核后按candidate SHA256 `c371bcc7da823654cc2f135a74cebf045ac4ba72e5122b2990779a4414434bf5`执行真实库CAS应用：只改20资产+40分镜；备份`artifacts/localization-review/backups/workshop-before-current-repair-20261029T022926Z-f4ee4e6b6044.sqlite3`，数据库after SHA256 `0ef931e0c4e7a82cacc04a8cadfed980ba094d5fbc0a9e6dbd53f709271fe60d`。86张图及selected状态、projects/tasks/agent_runs/video/jobs等受保护表hash未变。
+- [x] 既有`Restart-AssetDetailBackend.ps1`重载成功：health 200指向真实`data/workshop.sqlite3`，PID 46628于2026-10-29 10:50:12启动，stderr仅uvicorn正常启动行。真实API GET两项目各17 assets/20 storyboards；14/14道具ready、完整目标描述；40/40分镜有非空refs。active review收敛为2c1b 4板、c612 3板，均仅含`@UnnamedProp`；另有30板旧review留在历史审计字段，不再误阻断。实时验收报告：`artifacts/localization-review/actual-current-repair-acceptance-2026-10-29.json`。
+- [x] Windows默认编码（无`-X utf8`）定向中文路径媒体探测：`D:/YOUKU/python.exe -m pytest backend/tests/test_video_composition.py::test_media_probe_decodes_ffprobe_json_with_chinese_file_path -q -p no:cacheprovider --basetemp=backend/tests/.pytest-tmp`，1 passed。全量87测试命令使用`-X utf8`，不要标为默认编码全量通过。
+- [x] 隔离headless Chrome手势通过：`artifacts/localization-review/headless_mention_fixture_smoke.py`。空@菜单2个候选及缩略图`naturalWidth>0`，键盘/鼠标均在光标处插入canonical变量；blur保存后刷新恢复正文与refs；PATCH 500保留草稿且taskRuns=0；`pageErrors=[]`、`unknownApiRequests=[]`。所有API都由fixture路由接管，未访问真实8007；截图`artifacts/localization-review/headless_mention_fixture_smoke.png`。
+
+- [x] 有效目标画像GET投影：仅在profile status及targetContext/sourceHash有效时，把canonical目标名称/描述/结构镜像到响应的旧UI字段与同childId子资产；数据库与sourceSnapshot不写入。Lena Brooks当前目标脸不含韩裔字段且旧display变量别名保留；PROP_002显示鸡笼名称/描述，不再回流麻袋目标字段。保留用户编辑prompt、目标锁及原始源事实。
+- [x] 两项实际GET验收与隔离回归通过：目标显示候选包含Lena/PROP_002，sourceSnapshot原样不变；全量90 passed、前端build和headless mention smoke通过。

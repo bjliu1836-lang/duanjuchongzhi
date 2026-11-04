@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from backend.app import main
+from backend.app.composition import media_probe
 
 
 @pytest.fixture
@@ -47,6 +48,14 @@ def _project_and_episode(client: TestClient, data_dir: Path, title: str):
     with main.connect() as conn:
         conn.execute("INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)", (episode_id, project["id"], 1, source.name, str(source), "已上传", "2026-01-01T00:00:00Z"))
     return project, episode_id
+
+
+def test_media_probe_decodes_ffprobe_json_with_chinese_file_path(tmp_path: Path):
+    path = tmp_path / "中文短剧-原片.mp4"
+    _make_video(path, size="160x90", color="green", audio=False)
+    info = media_probe(path)
+    assert info["width"] == 160 and info["height"] == 90
+    assert info["durationMs"] >= 1900
 
 
 def test_upload_draft_cas_mock_filter_and_real_export(composition_client):
@@ -92,7 +101,7 @@ def test_upload_draft_cas_mock_filter_and_real_export(composition_client):
     detail = client.get(f"/api/projects/{project['id']}/video-export-jobs/{job['id']}").json()["job"]
     assert detail["status"] == "succeeded", detail
     output = Path(detail["output_path"])
-    probe = subprocess.run([shutil.which("ffprobe") or "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output)], capture_output=True, text=True, check=True)
+    probe = subprocess.run([shutil.which("ffprobe") or "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output)], capture_output=True, text=True, encoding="utf-8", check=True)
     media_info = json.loads(probe.stdout)
     video = next(stream for stream in media_info["streams"] if stream["codec_type"] == "video")
     audio = next(stream for stream in media_info["streams"] if stream["codec_type"] == "audio")
