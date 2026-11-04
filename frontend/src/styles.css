@@ -1277,3 +1277,93 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.asset-batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 10px;
+  background: var(--panel, #fff);
+}
+
+.asset-batch-bar > div,
+.asset-group-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.asset-card.selected {
+  outline: 2px solid #7f77dd;
+}
+
+.asset-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.asset-group-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 12px;
+  background: var(--panel, #fff);
+  cursor: pointer;
+}
+
+.asset-group-card.member {
+  cursor: default;
+}
+
+.asset-group-card i {
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1efe8;
+  color: #5f5e5a;
+  font-style: normal;
+  font-size: 11px;
+}
+
+.asset-group-detail-head {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.storyboard-group-filter {
+  width: 100%;
+}
+
+.asset-group-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.asset-group-modal {
+  width: min(420px, calc(100vw - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.asset-group-modal label {
+  display: grid;
+  gap: 6px;
+}
+
+.asset-group-modal input,
+.asset-group-modal select {
+  width: 100%;
+}

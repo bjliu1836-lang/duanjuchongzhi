@@ -3708,30 +3708,31 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
     assert "Lin Hao" in summary_names
 
 
-def test_asset_parent_links_are_reversible_reject_cycles_and_preserve_references(client: TestClient):
-    project = create_project(client, title="asset-parent-links")
+def test_asset_groups_batch_membership_replaces_parent_style_and_preserves_assets(client: TestClient):
+    project = create_project(client, title="asset-groups")
     with main.connect() as conn:
         conn.execute(
             "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
-            ("episode_parent", project["id"], 1, "parent.mp4", "C:/test/parent.mp4", "已上传", "2026-01-01T00:00:00Z"),
+            ("episode_groups", project["id"], 1, "groups.mp4", "C:/test/groups.mp4", "已上传", "2026-01-01T00:00:00Z"),
         )
         assets = [
-            ("asset_parent", "B主资产", "{{CHAR_001_SUB_01}}", "角色:B主资产"),
-            ("asset_child", "A资产", "{{CHAR_002_SUB_01}}", "角色:A资产"),
-            ("asset_grandchild", "C资产", "{{CHAR_003_SUB_01}}", "角色:C资产"),
+            ("asset_parent", "角色", "B主资产", "{{CHAR_001_SUB_01}}", "角色:B主资产"),
+            ("asset_child", "角色", "A资产", "{{CHAR_002_SUB_01}}", "角色:A资产"),
+            ("asset_grandchild", "角色", "C资产", "{{CHAR_003_SUB_01}}", "角色:C资产"),
+            ("asset_prop", "道具", "水瓶", "{{PROP_001}}", "道具:水瓶"),
         ]
-        for asset_id, name, variable, main_key in assets:
+        for asset_id, asset_type, name, variable, main_key in assets:
             payload = {"项目主资产Key": main_key, "项目子资产Key": f"{main_key}:默认", "出现集数": [1], "源事实快照": f"{name}源事实"}
             conn.execute(
                 "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (asset_id, project["id"], "episode_parent", "角色", name, f"{name}EN", variable, "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+                (asset_id, project["id"], "episode_groups", asset_type, name, f"{name}EN", variable, "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
             )
         conn.execute(
             "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (
-                "storyboard_parent",
+                "storyboard_group",
                 project["id"],
-                "episode_parent",
+                "episode_groups",
                 "分镜1",
                 "00:00:00-00:00:02",
                 "{{CHAR_002_SUB_01}} 出现在画面中。",
@@ -3743,36 +3744,88 @@ def test_asset_parent_links_are_reversible_reject_cycles_and_preserve_references
         conn.commit()
 
     created = client.post(
-        f"/api/projects/{project['id']}/asset-parent-links",
-        json={"parentAssetId": "asset_parent", "childAssetId": "asset_child"},
+        f"/api/projects/{project['id']}/asset-groups",
+        json={"name": "主角组合", "memberAssetIds": ["asset_parent", "asset_child"]},
     )
     assert created.status_code == 200, created.text
-    first_link = created.json()["link"]
+    first_group = created.json()["group"]
+    assert first_group["assetType"] == "角色"
+    assert [item["assetKey"] for item in first_group["members"]] == ["角色:B主资产", "角色:A资产"]
 
-    moved = client.post(
-        f"/api/projects/{project['id']}/asset-parent-links",
-        json={"parentAssetId": "asset_child", "childAssetId": "asset_grandchild"},
+    second = client.post(
+        f"/api/projects/{project['id']}/asset-groups",
+        json={"name": "临时组", "memberAssetIds": ["asset_grandchild"]},
+    )
+    assert second.status_code == 200, second.text
+    second_group = second.json()["group"]
+
+    duplicate_name = client.post(
+        f"/api/projects/{project['id']}/asset-groups",
+        json={"name": "主角组合", "memberAssetIds": ["asset_prop"]},
+    )
+    assert duplicate_name.status_code == 400
+
+    mixed = client.post(
+        f"/api/projects/{project['id']}/asset-groups",
+        json={"name": "混合组", "memberAssetIds": ["asset_child", "asset_prop"]},
+    )
+    assert mixed.status_code == 400
+    assert "同类资产" in mixed.json()["detail"]
+
+    moved = client.patch(
+        f"/api/projects/{project['id']}/asset-groups/{first_group['id']}",
+        json={"memberAssetIds": ["asset_parent", "asset_child", "asset_grandchild"]},
     )
     assert moved.status_code == 200, moved.text
-
-    cycle = client.post(
-        f"/api/projects/{project['id']}/asset-parent-links",
-        json={"parentAssetId": "asset_grandchild", "childAssetId": "asset_parent"},
-    )
-    assert cycle.status_code == 400
-    assert "循环" in cycle.json()["detail"]
-
-    listed = client.get(f"/api/projects/{project['id']}/asset-parent-links")
-    assert listed.status_code == 200
-    assert len(listed.json()["links"]) == 2
+    assert [item["assetKey"] for item in moved.json()["group"]["members"]] == ["角色:B主资产", "角色:A资产", "角色:C资产"]
+    second_after = client.get(f"/api/projects/{project['id']}/asset-groups").json()["groups"]
+    assert [item["id"] for item in second_after if item["id"] == second_group["id"]][0] == second_group["id"]
+    assert second_after[next(index for index, item in enumerate(second_after) if item["id"] == second_group["id"])]["members"] == []
 
     with main.connect() as conn:
         child = json.loads(conn.execute("SELECT payload_json FROM assets WHERE id='asset_child'").fetchone()[0])
-        storyboard = json.loads(conn.execute("SELECT payload_json FROM storyboards WHERE id='storyboard_parent'").fetchone()[0])
+        storyboard = json.loads(conn.execute("SELECT payload_json FROM storyboards WHERE id='storyboard_group'").fetchone()[0])
     assert child["源事实快照"] == "A资产源事实"
     assert storyboard["引用资产变量"] == ["{{CHAR_002_SUB_01}}"]
 
-    deleted = client.delete(f"/api/projects/{project['id']}/asset-parent-links/{first_link['id']}")
+    renamed = client.patch(
+        f"/api/projects/{project['id']}/asset-groups/{first_group['id']}",
+        json={"name": "篮球队员"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["group"]["name"] == "篮球队员"
+
+    deleted = client.delete(f"/api/projects/{project['id']}/asset-groups/{first_group['id']}")
     assert deleted.status_code == 200
-    remaining = client.get(f"/api/projects/{project['id']}/asset-parent-links").json()["links"]
-    assert [item["childAssetKey"] for item in remaining] == ["角色:C资产"]
+    listed = client.get(f"/api/projects/{project['id']}/asset-groups").json()["groups"]
+    assert all(item["id"] != first_group["id"] for item in listed)
+    assets_after = client.get(f"/api/projects/{project['id']}/assets").json()["assets"]
+    assert {"asset_parent", "asset_child", "asset_grandchild", "asset_prop"} <= {item["id"] for item in assets_after}
+
+
+def test_legacy_parent_links_migrate_into_custom_groups(client: TestClient):
+    project = create_project(client, title="legacy-parent-migration")
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("episode_legacy", project["id"], 1, "legacy.mp4", "C:/test/legacy.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        for asset_id, name, variable, main_key in [
+            ("asset_legacy_parent", "白教练", "{{CHAR_001_SUB_01}}", "角色:白教练"),
+            ("asset_legacy_child", "1号球员", "{{CHAR_002_SUB_01}}", "角色:1号球员"),
+        ]:
+            payload = {"项目主资产Key": main_key, "项目子资产Key": f"{main_key}:默认", "出现集数": [1]}
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (asset_id, project["id"], "episode_legacy", "角色", name, f"{name}EN", variable, "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+            )
+        conn.execute(
+            "INSERT INTO asset_parent_links (id,project_id,parent_asset_id,child_asset_id,parent_asset_key,child_asset_key,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("legacy_link", project["id"], "asset_legacy_parent", "asset_legacy_child", "角色:白教练", "角色:1号球员", "2026-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+    groups = client.get(f"/api/projects/{project['id']}/asset-groups").json()["groups"]
+    assert len(groups) == 1
+    assert groups[0]["name"] == "白教练"
+    assert {item["assetKey"] for item in groups[0]["members"]} == {"角色:白教练", "角色:1号球员"}

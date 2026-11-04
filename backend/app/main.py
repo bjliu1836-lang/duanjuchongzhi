@@ -389,6 +389,28 @@ def init_db() -> None:
               UNIQUE(project_id, child_asset_key)
             );
 
+            CREATE TABLE IF NOT EXISTS asset_groups (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              asset_type TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(project_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS asset_group_members (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              group_id TEXT NOT NULL,
+              asset_id TEXT NOT NULL,
+              asset_key TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              UNIQUE(project_id, asset_key),
+              UNIQUE(group_id, asset_key)
+            );
+
             CREATE TABLE IF NOT EXISTS asset_images (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -487,6 +509,64 @@ def init_db() -> None:
         ensure_column(conn, "projects", "replace_characters", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "projects", "replace_scenes", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "projects", "parent_project_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "asset_group_members", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        migrate_asset_parent_links_to_groups(conn)
+
+
+def migrate_asset_parent_links_to_groups(conn: sqlite3.Connection) -> None:
+    """一次性把旧的父子挂载转换为自定义资产组，不删除旧表以便审计。"""
+    legacy_rows = conn.execute("SELECT * FROM asset_parent_links ORDER BY created_at").fetchall()
+    if not legacy_rows:
+        return
+    for project_id in sorted({str(row["project_id"]) for row in legacy_rows}):
+        if conn.execute("SELECT 1 FROM asset_groups WHERE project_id=? LIMIT 1", (project_id,)).fetchone():
+            continue
+        project_links = [row for row in legacy_rows if str(row["project_id"]) == project_id]
+        parent_names: dict[str, str] = {}
+        for link in project_links:
+            parent_key = str(link["parent_asset_key"])
+            if parent_key in parent_names:
+                continue
+            parent_row = conn.execute(
+                "SELECT name FROM assets WHERE project_id=? AND id=?",
+                (project_id, link["parent_asset_id"]),
+            ).fetchone()
+            parent_names[parent_key] = str(parent_row["name"] if parent_row else parent_key)
+        for parent_key in sorted(parent_names):
+            members = {
+                parent_key,
+                *{str(link["child_asset_key"]) for link in project_links if str(link["parent_asset_key"]) == parent_key},
+            }
+            base_name = parent_names[parent_key].strip() or parent_key
+            name = base_name
+            suffix = 2
+            while conn.execute("SELECT 1 FROM asset_groups WHERE project_id=? AND name=?", (project_id, name)).fetchone():
+                name = f"{base_name} {suffix}"
+                suffix += 1
+            now = now_iso()
+            group_id = new_id("asset_group")
+            asset_type_row = conn.execute(
+                "SELECT asset_type FROM assets WHERE project_id=? AND id=?",
+                (project_id, next(link["parent_asset_id"] for link in project_links if str(link["parent_asset_key"]) == parent_key)),
+            ).fetchone()
+            asset_type = str(asset_type_row["asset_type"] if asset_type_row else "")
+            conn.execute(
+                "INSERT INTO asset_groups (id,project_id,name,asset_type,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                (group_id, project_id, name, asset_type, now, now),
+            )
+            for member_key in sorted(members):
+                member_row = conn.execute(
+                    "SELECT id FROM assets WHERE project_id=? AND id=? LIMIT 1",
+                    (project_id, next((link["parent_asset_id"] if str(link["parent_asset_key"]) == member_key else link["child_asset_id"]) for link in project_links if member_key in {str(link["parent_asset_key"]), str(link["child_asset_key"])})),
+                ).fetchone()
+                if not member_row:
+                    continue
+                conn.execute(
+                    """INSERT OR IGNORE INTO asset_group_members
+                       (id,project_id,group_id,asset_id,asset_key,created_at) VALUES (?,?,?,?,?,?)""",
+                    (new_id("asset_group_member"), project_id, group_id, member_row["id"], member_key, now),
+                )
+    conn.commit()
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -2397,9 +2477,14 @@ class AssetUpdate(BaseModel):
     payload: dict[str, Any] | None = None
 
 
-class AssetParentLinkRequest(BaseModel):
-    parentAssetId: str
-    childAssetId: str
+class AssetGroupCreate(BaseModel):
+    name: str
+    memberAssetIds: list[str]
+
+
+class AssetGroupUpdate(BaseModel):
+    name: str | None = None
+    memberAssetIds: list[str] | None = None
 
 
 class AssetUploadRequest(BaseModel):
@@ -2793,23 +2878,12 @@ def sync_episode_ark_file(project_id: str, episode_id: str) -> dict[str, Any]:
         return {"episode": enrich_episode(updated), "ark": result}
 
 
-def asset_parent_group_key(asset: dict[str, Any]) -> str:
+def asset_group_identity_key(asset: dict[str, Any]) -> str:
     payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else json.loads(asset.get("payload_json") or "{}")
     return str(payload.get("项目主资产Key") or asset_project_main_key({**asset, "payload": payload}))
 
 
-def asset_parent_link_response(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "parentAssetId": row["parent_asset_id"],
-        "childAssetId": row["child_asset_id"],
-        "parentAssetKey": row["parent_asset_key"],
-        "childAssetKey": row["child_asset_key"],
-        "createdAt": row["created_at"],
-    }
-
-
-def load_asset_parent_candidate(conn: sqlite3.Connection, project_id: str, asset_id: str) -> dict[str, Any]:
+def load_asset_group_candidate(conn: sqlite3.Connection, project_id: str, asset_id: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM assets WHERE id=? AND project_id=?", (asset_id, project_id)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -2818,67 +2892,160 @@ def load_asset_parent_candidate(conn: sqlite3.Connection, project_id: str, asset
     return asset
 
 
-@app.get("/api/projects/{project_id}/asset-parent-links")
-def list_asset_parent_links(project_id: str) -> dict[str, Any]:
+def asset_group_response(conn: sqlite3.Connection, row: dict[str, Any]) -> dict[str, Any]:
+    member_rows = conn.execute(
+        "SELECT asset_id, asset_key, sort_order, created_at FROM asset_group_members WHERE group_id=? ORDER BY sort_order, created_at",
+        (row["id"],),
+    ).fetchall()
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "assetType": row["asset_type"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "members": [
+            {"assetId": member["asset_id"], "assetKey": member["asset_key"], "createdAt": member["created_at"]}
+            for member in member_rows
+        ],
+    }
+
+
+def normalize_asset_group_members(
+    conn: sqlite3.Connection,
+    project_id: str,
+    member_asset_ids: list[str],
+    *,
+    group_id: str | None = None,
+) -> list[tuple[str, str, str]]:
+    requested_ids = [str(asset_id).strip() for asset_id in member_asset_ids if str(asset_id).strip()]
+    if not requested_ids:
+        raise HTTPException(status_code=400, detail="至少选择一个资产")
+    candidates: list[tuple[str, str, str]] = []
+    seen_keys: set[str] = set()
+    expected_type = ""
+    for asset_id in requested_ids:
+        asset = load_asset_group_candidate(conn, project_id, asset_id)
+        asset_key = asset_group_identity_key(asset)
+        if asset_key in seen_keys:
+            continue
+        seen_keys.add(asset_key)
+        asset_type = str(asset.get("asset_type") or "")
+        if not expected_type:
+            expected_type = asset_type
+        elif asset_type != expected_type:
+            raise HTTPException(status_code=400, detail="同一个资产组只能包含同类资产")
+        candidates.append((asset_id, asset_key, asset_type))
+    if not candidates:
+        raise HTTPException(status_code=400, detail="没有可加入的资产")
+    if group_id:
+        current_types = conn.execute(
+            "SELECT asset_type FROM asset_groups WHERE id=? AND project_id=?",
+            (group_id, project_id),
+        ).fetchall()
+        if current_types and str(current_types[0]["asset_type"]) != expected_type:
+            raise HTTPException(status_code=400, detail="组内资产类型不一致")
+    return candidates
+
+
+def replace_asset_group_members(
+    conn: sqlite3.Connection,
+    project_id: str,
+    group_id: str,
+    members: list[tuple[str, str, str]],
+) -> None:
+    conn.execute("DELETE FROM asset_group_members WHERE project_id=? AND group_id=?", (project_id, group_id))
+    now = now_iso()
+    for sort_order, (asset_id, asset_key, _asset_type) in enumerate(members):
+        conn.execute(
+            "DELETE FROM asset_group_members WHERE project_id=? AND asset_key=?",
+            (project_id, asset_key),
+        )
+        conn.execute(
+            """INSERT INTO asset_group_members
+               (id,project_id,group_id,asset_id,asset_key,sort_order,created_at) VALUES (?,?,?,?,?,?,?)""",
+            (new_id("asset_group_member"), project_id, group_id, asset_id, asset_key, sort_order, now),
+        )
+    conn.execute("UPDATE asset_groups SET updated_at=? WHERE id=? AND project_id=?", (now, group_id, project_id))
+
+
+@app.get("/api/projects/{project_id}/asset-groups")
+def list_asset_groups(project_id: str) -> dict[str, Any]:
     with connect() as conn:
         get_project_or_404(conn, project_id)
+        migrate_asset_parent_links_to_groups(conn)
         rows = conn.execute(
-            "SELECT * FROM asset_parent_links WHERE project_id=? ORDER BY created_at",
+            "SELECT * FROM asset_groups WHERE project_id=? ORDER BY created_at",
             (project_id,),
         ).fetchall()
-        return {"links": [asset_parent_link_response(row_to_dict(row)) for row in rows]}
+        return {"groups": [asset_group_response(conn, row_to_dict(row)) for row in rows]}
 
 
-@app.post("/api/projects/{project_id}/asset-parent-links")
-def create_asset_parent_link(project_id: str, payload: AssetParentLinkRequest) -> dict[str, Any]:
-    if payload.parentAssetId == payload.childAssetId:
-        raise HTTPException(status_code=400, detail="资产不能添加到自己旗下")
+@app.post("/api/projects/{project_id}/asset-groups")
+def create_asset_group(project_id: str, payload: AssetGroupCreate) -> dict[str, Any]:
+    name = payload.name.strip()
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="组名不能为空且不能超过 80 个字符")
     with connect() as conn:
         get_project_or_404(conn, project_id)
-        parent = load_asset_parent_candidate(conn, project_id, payload.parentAssetId)
-        child = load_asset_parent_candidate(conn, project_id, payload.childAssetId)
-        parent_key = asset_parent_group_key(parent)
-        child_key = asset_parent_group_key(child)
-        if parent_key == child_key:
-            raise HTTPException(status_code=400, detail="同一主资产不能互相挂载")
-        ancestor_key = parent_key
-        seen = {child_key}
-        while ancestor_key:
-            if ancestor_key in seen:
-                raise HTTPException(status_code=400, detail="不能形成循环的资产归属关系")
-            seen.add(ancestor_key)
-            ancestor = conn.execute(
-                "SELECT parent_asset_key FROM asset_parent_links WHERE project_id=? AND child_asset_key=?",
-                (project_id, ancestor_key),
-            ).fetchone()
-            ancestor_key = str(ancestor["parent_asset_key"]) if ancestor else ""
-        conn.execute("DELETE FROM asset_parent_links WHERE project_id=? AND child_asset_key=?", (project_id, child_key))
-        link_id = new_id("asset_link")
-        created_at = now_iso()
+        if conn.execute("SELECT 1 FROM asset_groups WHERE project_id=? AND name=?", (project_id, name)).fetchone():
+            raise HTTPException(status_code=400, detail="同名资产组已存在")
+        members = normalize_asset_group_members(conn, project_id, payload.memberAssetIds)
+        now = now_iso()
+        group_id = new_id("asset_group")
         conn.execute(
-            """INSERT INTO asset_parent_links
-               (id,project_id,parent_asset_id,child_asset_id,parent_asset_key,child_asset_key,created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (link_id, project_id, payload.parentAssetId, payload.childAssetId, parent_key, child_key, created_at),
+            "INSERT INTO asset_groups (id,project_id,name,asset_type,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            (group_id, project_id, name, members[0][2], now, now),
         )
+        replace_asset_group_members(conn, project_id, group_id, members)
         conn.commit()
-        row = row_to_dict(conn.execute("SELECT * FROM asset_parent_links WHERE id=?", (link_id,)).fetchone())
-        return {"link": asset_parent_link_response(row)}
+        row = row_to_dict(conn.execute("SELECT * FROM asset_groups WHERE id=?", (group_id,)).fetchone())
+        return {"group": asset_group_response(conn, row)}
 
 
-@app.delete("/api/projects/{project_id}/asset-parent-links/{link_id}")
-def delete_asset_parent_link(project_id: str, link_id: str) -> dict[str, Any]:
+@app.patch("/api/projects/{project_id}/asset-groups/{group_id}")
+def update_asset_group(project_id: str, group_id: str, payload: AssetGroupUpdate) -> dict[str, Any]:
     with connect() as conn:
         get_project_or_404(conn, project_id)
-        row = conn.execute(
-            "SELECT * FROM asset_parent_links WHERE id=? AND project_id=?",
-            (link_id, project_id),
-        ).fetchone()
+        row = conn.execute("SELECT * FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="Asset parent link not found")
-        conn.execute("DELETE FROM asset_parent_links WHERE id=? AND project_id=?", (link_id, project_id))
+            raise HTTPException(status_code=404, detail="Asset group not found")
+        if payload.name is not None:
+            name = payload.name.strip()
+            if not name or len(name) > 80:
+                raise HTTPException(status_code=400, detail="组名不能为空且不能超过 80 个字符")
+            duplicate = conn.execute(
+                "SELECT 1 FROM asset_groups WHERE project_id=? AND name=? AND id<>?",
+                (project_id, name, group_id),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(status_code=400, detail="同名资产组已存在")
+            conn.execute(
+                "UPDATE asset_groups SET name=?, updated_at=? WHERE id=? AND project_id=?",
+                (name, now_iso(), group_id, project_id),
+            )
+        if payload.memberAssetIds is not None:
+            members = normalize_asset_group_members(conn, project_id, payload.memberAssetIds, group_id=group_id)
+            replace_asset_group_members(conn, project_id, group_id, members)
+            conn.execute(
+                "UPDATE asset_groups SET asset_type=?, updated_at=? WHERE id=? AND project_id=?",
+                (members[0][2], now_iso(), group_id, project_id),
+            )
         conn.commit()
-        return {"deleted": True, "link": asset_parent_link_response(row_to_dict(row))}
+        updated = row_to_dict(conn.execute("SELECT * FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id)).fetchone())
+        return {"group": asset_group_response(conn, updated)}
+
+
+@app.delete("/api/projects/{project_id}/asset-groups/{group_id}")
+def delete_asset_group(project_id: str, group_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        row = conn.execute("SELECT * FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Asset group not found")
+        conn.execute("DELETE FROM asset_group_members WHERE project_id=? AND group_id=?", (project_id, group_id))
+        conn.execute("DELETE FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id))
+        conn.commit()
+        return {"deleted": True, "group": asset_group_response(conn, row_to_dict(row))}
 
 
 @app.get("/api/projects/{project_id}/assets")

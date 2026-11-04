@@ -20,6 +20,7 @@ type StepScreen = "home" | "assets" | "segments" | "compare";
 type AssetTab = "角色" | "场景" | "道具" | "资产进度";
 type UploadMode = "folder" | "single";
 type ModalName = "upload-confirm-modal" | "image-view-modal" | null;
+type AssetView = "overview" | "detail" | "groups" | "group-detail";
 type SegmentPanel = "shot-prompt" | "shot-assets" | "shot-history";
 type WorkbenchPane = "assets" | "preview";
 
@@ -64,13 +65,19 @@ type Asset = {
   images?: Array<{ id: string; file_path: string; file_url?: string; is_selected: number; prompt?: string; created_at?: string; payload?: Record<string, any> }>;
 };
 
-type AssetParentLink = {
-  id: string;
-  parentAssetId: string;
-  childAssetId: string;
-  parentAssetKey: string;
-  childAssetKey: string;
+type CustomAssetGroupMember = {
+  assetId: string;
+  assetKey: string;
   createdAt: string;
+};
+
+type CustomAssetGroup = {
+  id: string;
+  name: string;
+  assetType: string;
+  members: CustomAssetGroupMember[];
+  createdAt: string;
+  updatedAt: string;
 };
 
 type Storyboard = {
@@ -863,8 +870,14 @@ export function App() {
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [assetParentLinks, setAssetParentLinks] = useState<AssetParentLink[]>([]);
-  const [assetParentTargetId, setAssetParentTargetId] = useState("");
+  const [customAssetGroups, setCustomAssetGroups] = useState<CustomAssetGroup[]>([]);
+  const [assetSelectionMode, setAssetSelectionMode] = useState(false);
+  const [selectedAssetGroupKeys, setSelectedAssetGroupKeys] = useState<Set<string>>(() => new Set());
+  const [assetGroupModal, setAssetGroupModal] = useState<"create" | "move" | null>(null);
+  const [assetGroupNameDraft, setAssetGroupNameDraft] = useState("");
+  const [assetGroupTargetId, setAssetGroupTargetId] = useState("");
+  const [selectedCustomGroupId, setSelectedCustomGroupId] = useState<string | null>(null);
+  const [storyboardAssetGroupId, setStoryboardAssetGroupId] = useState("all");
   const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
   const [generations, setGenerations] = useState<VideoGeneration[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -893,7 +906,7 @@ export function App() {
   const [resolution, setResolution] = useState("720p");
   const [styleType, setStyleType] = useState("写实通用");
   const [assetTab, setAssetTab] = useState<AssetTab>("角色");
-  const [assetView, setAssetView] = useState<"overview" | "detail">("overview");
+  const [assetView, setAssetView] = useState<AssetView>("overview");
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
@@ -977,43 +990,36 @@ export function App() {
   const roleCount = assets.filter((asset) => asset.asset_type === "角色").length;
   const sceneCount = assets.filter((asset) => asset.asset_type === "场景").length;
   const propCount = assets.filter((asset) => asset.asset_type === "道具").length;
+  const customGroupByAssetKey = useMemo(() => {
+    const map = new Map<string, CustomAssetGroup>();
+    customAssetGroups.forEach((group) => group.members.forEach((member) => map.set(member.assetKey, group)));
+    return map;
+  }, [customAssetGroups]);
+  const customGroupById = useMemo(() => new Map(customAssetGroups.map((group) => [group.id, group])), [customAssetGroups]);
   const storyboardFilteredAssets = useMemo(
-    () => assets.filter((asset) => asset.asset_type === storyboardAssetTab
-      && `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(storyboardAssetSearch.toLowerCase())),
-    [assets, storyboardAssetSearch, storyboardAssetTab]
+    () => assets.filter((asset) => {
+      if (asset.asset_type !== storyboardAssetTab) return false;
+      if (!`${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(storyboardAssetSearch.toLowerCase())) return false;
+      const group = customGroupByAssetKey.get(mainAssetKey(asset));
+      if (storyboardAssetGroupId === "ungrouped") return !group;
+      if (storyboardAssetGroupId !== "all") return group?.id === storyboardAssetGroupId;
+      return true;
+    }),
+    [assets, customGroupByAssetKey, storyboardAssetSearch, storyboardAssetTab, storyboardAssetGroupId]
+  );
+  const storyboardCustomGroups = useMemo(
+    () => customAssetGroups.filter((group) => group.assetType === storyboardAssetTab),
+    [customAssetGroups, storyboardAssetTab]
   );
   const selectedGroup = selectedAsset ? assetGroups.find((group) => group.key === mainAssetKey(selectedAsset)) : null;
-  const assetGroupByKey = useMemo(() => new Map(assetGroups.map((group) => [group.key, group])), [assetGroups]);
-  const selectedParentLink = selectedAsset
-    ? assetParentLinks.find((link) => link.childAssetKey === mainAssetKey(selectedAsset)) ?? null
-    : null;
-  const selectedParentGroup = selectedParentLink ? assetGroupByKey.get(selectedParentLink.parentAssetKey) ?? null : null;
-  const selectedChildLinks = selectedGroup
-    ? assetParentLinks.filter((link) => link.parentAssetKey === selectedGroup.key)
-    : [];
-  const selectedChildGroups = selectedChildLinks
-    .map((link) => assetGroupByKey.get(link.childAssetKey))
-    .filter((group): group is AssetGroup => Boolean(group));
-  const selectedSubassetItems = Array.from(new Map([
-    ...(selectedGroup?.items ?? (selectedAsset ? [selectedAsset] : [])),
-    ...selectedChildGroups.flatMap((group) => group.items),
-  ].map((item) => [item.id, item])).values());
-  const selectedParentCandidates = useMemo(() => {
-    if (!selectedAsset) return [] as AssetGroup[];
-    const childKey = mainAssetKey(selectedAsset);
-    const parentByChild = new Map(assetParentLinks.map((link) => [link.childAssetKey, link.parentAssetKey]));
-    return assetGroups.filter((group) => {
-      if (group.key === childKey || group.type !== selectedAsset.asset_type) return false;
-      const seen = new Set<string>([childKey]);
-      let cursor: string | undefined = group.key;
-      while (cursor) {
-        if (seen.has(cursor)) return false;
-        seen.add(cursor);
-        cursor = parentByChild.get(cursor);
-      }
-      return true;
-    });
-  }, [assetGroups, assetParentLinks, selectedAsset]);
+  const selectedSubassetItems = selectedGroup?.items ?? (selectedAsset ? [selectedAsset] : []);
+  const selectedAssetCustomGroup = selectedAsset ? customGroupByAssetKey.get(mainAssetKey(selectedAsset)) ?? null : null;
+  const selectedCustomGroup = selectedCustomGroupId ? customGroupById.get(selectedCustomGroupId) ?? null : null;
+  const selectedCustomGroupAssets = useMemo(() => {
+    if (!selectedCustomGroup) return [] as Asset[];
+    const memberKeys = new Set(selectedCustomGroup.members.map((member) => member.assetKey));
+    return assets.filter((asset) => memberKeys.has(mainAssetKey(asset)));
+  }, [assets, selectedCustomGroup]);
   const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
     const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
@@ -1143,7 +1149,7 @@ export function App() {
       loadAssets(projectId),
       loadStoryboards(projectId, defaultEpisodeId),
       loadGenerations(projectId),
-      loadAssetParentLinks(projectId),
+      loadCustomAssetGroups(projectId),
       loadTasks(projectId),
     ]);
     const recoveryTaskId = sessionStorage.getItem("activeAnalysisTaskId");
@@ -1183,8 +1189,12 @@ export function App() {
   function clearCurrentWorkspace() {
     setEpisodes([]);
     setAssets([]);
-    setAssetParentLinks([]);
-    setAssetParentTargetId("");
+    setCustomAssetGroups([]);
+    setAssetSelectionMode(false);
+    setSelectedAssetGroupKeys(new Set());
+    setAssetGroupModal(null);
+    setSelectedCustomGroupId(null);
+    setStoryboardAssetGroupId("all");
     setStoryboards([]);
     setGenerations([]);
     setTasks([]);
@@ -1215,34 +1225,11 @@ export function App() {
     setAssets(data.assets);
   }
 
-  async function loadAssetParentLinks(projectId = currentProject?.id) {
-    if (!projectId) return [] as AssetParentLink[];
-    const data = await request<{ links: AssetParentLink[] }>(`/api/projects/${projectId}/asset-parent-links`);
-    setAssetParentLinks(data.links);
-    return data.links;
-  }
-
-  function collectAssetFamilyKeys(anchorKey: string, links: AssetParentLink[] = assetParentLinks) {
-    const parentByChild = new Map(links.map((link) => [link.childAssetKey, link.parentAssetKey]));
-    const childrenByParent = new Map<string, string[]>();
-    links.forEach((link) => {
-      childrenByParent.set(link.parentAssetKey, [...(childrenByParent.get(link.parentAssetKey) ?? []), link.childAssetKey]);
-    });
-    let rootKey = anchorKey;
-    const upwardSeen = new Set<string>();
-    while (parentByChild.has(rootKey) && !upwardSeen.has(rootKey)) {
-      upwardSeen.add(rootKey);
-      rootKey = parentByChild.get(rootKey)!;
-    }
-    const keys = new Set<string>();
-    const queue = [rootKey];
-    while (queue.length) {
-      const key = queue.shift()!;
-      if (keys.has(key)) continue;
-      keys.add(key);
-      queue.push(...(childrenByParent.get(key) ?? []));
-    }
-    return keys;
+  async function loadCustomAssetGroups(projectId = currentProject?.id) {
+    if (!projectId) return [] as CustomAssetGroup[];
+    const data = await request<{ groups: CustomAssetGroup[] }>(`/api/projects/${projectId}/asset-groups`);
+    setCustomAssetGroups(data.groups);
+    return data.groups;
   }
 
   function assetAppearsInSelectedEpisode(asset: Asset) {
@@ -1251,34 +1238,173 @@ export function App() {
     return appearances.includes(selectedEpisode.episode_index);
   }
 
-  async function moveAssetUnderParent(parentGroup: AssetGroup) {
-    if (!currentProject || !selectedAsset || !parentGroup.items[0]) return;
+  function toggleAssetGroupSelection(group: AssetGroup) {
+    if (!assetSelectionMode) return;
+    setSelectedAssetGroupKeys((current) => {
+      const next = new Set(current);
+      const firstKey = [...next][0];
+      const firstGroup = assetGroups.find((item) => item.key === firstKey);
+      if (!next.has(group.key) && firstGroup && firstGroup.type !== group.type) {
+        setMessage("批量分组只能选择同类资产");
+        return current;
+      }
+      if (next.has(group.key)) next.delete(group.key);
+      else next.add(group.key);
+      return next;
+    });
+  }
+
+  function selectedAssetIdsForGrouping() {
+    return assetGroups
+      .filter((group) => selectedAssetGroupKeys.has(group.key))
+      .map((group) => group.items[0]?.id)
+      .filter((id): id is string => Boolean(id));
+  }
+
+  function startAssetSelectionMode() {
+    setAssetSelectionMode(true);
+    setSelectedAssetGroupKeys(new Set());
+  }
+
+  function cancelAssetSelectionMode() {
+    setAssetSelectionMode(false);
+    setSelectedAssetGroupKeys(new Set());
+    setAssetGroupModal(null);
+  }
+
+  function openCreateAssetGroupModal() {
+    if (!selectedAssetGroupKeys.size) {
+      setMessage("请先选择要组成资产组的同类资产");
+      return;
+    }
+    setAssetGroupNameDraft("");
+    setAssetGroupModal("create");
+  }
+
+  function openMoveAssetGroupModal() {
+    if (!selectedAssetGroupKeys.size) {
+      setMessage("请先选择要移动的同类资产");
+      return;
+    }
+    const selectedGroups = assetGroups.filter((group) => selectedAssetGroupKeys.has(group.key));
+    const candidates = customAssetGroups.filter((group) => group.assetType === selectedGroups[0]?.type);
+    if (!candidates.length) {
+      setMessage("当前类型还没有可加入的资产组");
+      return;
+    }
+    setAssetGroupTargetId(candidates[0].id);
+    setAssetGroupModal("move");
+  }
+
+  async function createAssetGroupFromSelection() {
+    if (!currentProject) return;
+    const memberAssetIds = selectedAssetIdsForGrouping();
+    if (!memberAssetIds.length) return;
     setBusy(true);
     try {
-      await request(`/api/projects/${currentProject.id}/asset-parent-links`, {
+      await request(`/api/projects/${currentProject.id}/asset-groups`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parentAssetId: parentGroup.items[0].id, childAssetId: selectedAsset.id }),
+        body: JSON.stringify({ name: assetGroupNameDraft, memberAssetIds }),
       });
-      await loadAssetParentLinks(currentProject.id);
-      setAssetParentTargetId("");
-      setMessage(`已将 ${assetDisplayName(selectedAsset)} 添加到 ${parentGroup.name} 旗下`);
+      await loadCustomAssetGroups(currentProject.id);
+      setAssetGroupModal(null);
+      setAssetGroupNameDraft("");
+      setSelectedAssetGroupKeys(new Set());
+      setAssetSelectionMode(false);
+      setMessage(`已创建资产组，包含 ${memberAssetIds.length} 个资产`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "添加到主资产失败");
+      setMessage(error instanceof Error ? error.message : "创建资产组失败");
     } finally {
       setBusy(false);
     }
   }
 
-  async function removeAssetParentLink(link: AssetParentLink) {
+  async function moveSelectionToCustomGroup() {
+    if (!currentProject || !assetGroupTargetId) return;
+    const target = customAssetGroups.find((group) => group.id === assetGroupTargetId);
+    if (!target) return;
+    const selectedIds = selectedAssetIdsForGrouping();
+    const memberAssetIds = [...target.members.map((member) => member.assetId), ...selectedIds];
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/asset-groups/${target.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memberAssetIds }),
+      });
+      await loadCustomAssetGroups(currentProject.id);
+      setAssetGroupModal(null);
+      setSelectedAssetGroupKeys(new Set());
+      setAssetSelectionMode(false);
+      setMessage(`已将 ${selectedIds.length} 个资产移动到「${target.name}」`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "移动到资产组失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCustomGroupMembers(group: CustomAssetGroup, memberAssetIds: string[]) {
     if (!currentProject) return;
     setBusy(true);
     try {
-      await request(`/api/projects/${currentProject.id}/asset-parent-links/${link.id}`, { method: "DELETE" });
-      await loadAssetParentLinks(currentProject.id);
-      setMessage("已移出主资产旗下，原资产与分镜引用均保留");
+      await request(`/api/projects/${currentProject.id}/asset-groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memberAssetIds }),
+      });
+      await loadCustomAssetGroups(currentProject.id);
+      setMessage("资产组成员已更新");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "移出主资产失败");
+      setMessage(error instanceof Error ? error.message : "更新资产组失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameCustomGroup(group: CustomAssetGroup) {
+    if (!currentProject || !assetGroupNameDraft.trim()) return;
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/asset-groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: assetGroupNameDraft.trim() }),
+      });
+      await loadCustomAssetGroups(currentProject.id);
+      setMessage("资产组名称已更新");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "重命名资产组失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeAssetFromCustomGroup(group: CustomAssetGroup, asset: Asset) {
+    const memberAssetIds = group.members
+      .filter((member) => member.assetKey !== mainAssetKey(asset))
+      .map((member) => member.assetId);
+    if (!memberAssetIds.length) {
+      setMessage("组内至少保留一个资产；如需清空请删除资产组");
+      return;
+    }
+    await saveCustomGroupMembers(group, memberAssetIds);
+  }
+
+  async function deleteCustomGroup(group: CustomAssetGroup) {
+    if (!currentProject) return;
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/asset-groups/${group.id}`, { method: "DELETE" });
+      await loadCustomAssetGroups(currentProject.id);
+      if (selectedCustomGroupId === group.id) {
+        setSelectedCustomGroupId(null);
+        setAssetView("groups");
+      }
+      setMessage("资产组已删除，组内资产保持不变");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "删除资产组失败");
     } finally {
       setBusy(false);
     }
@@ -2021,20 +2147,23 @@ export function App() {
     updateWorkbenchPaneWidth(pane, current + sign * step * (pane === "assets" ? 1 : -1));
   }
 
-  async function bindStoryboardAssetFamily(anchorAsset: Asset) {
+  async function bindStoryboardCustomGroup(group: CustomAssetGroup) {
     if (!selectedStoryboard) return;
-    const familyKeys = collectAssetFamilyKeys(mainAssetKey(anchorAsset));
-    const familyAssets = assets.filter((asset) => familyKeys.has(mainAssetKey(asset)) && assetAppearsInSelectedEpisode(asset));
-    if (!familyAssets.length) return;
+    const memberKeys = new Set(group.members.map((member) => member.assetKey));
+    const groupAssets = assets.filter((asset) => memberKeys.has(mainAssetKey(asset)) && assetAppearsInSelectedEpisode(asset));
+    if (!groupAssets.length) {
+      setMessage("当前剧集没有该资产组成员");
+      return;
+    }
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
     const referencedIds = new Set(currentReferences.map((item) => resolveUniqueAssetReference(item, assets)?.id).filter(Boolean));
-    const additions = familyAssets.filter((asset) => !referencedIds.has(asset.id)).map((asset) => asset.variable || assetDisplayVariable(asset));
+    const additions = groupAssets.filter((asset) => !referencedIds.has(asset.id)).map((asset) => asset.variable || assetDisplayVariable(asset));
     if (!additions.length) {
-      setMessage("主资产与旗下资产已在当前分镜中绑定");
+      setMessage("该资产组已在当前分镜中调用");
       return;
     }
     if (!await saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, ...additions])) return;
-    setMessage(`已绑定调用 ${familyAssets.map((asset) => assetDisplayName(asset)).join("、")}`);
+    setMessage(`已整组调用「${group.name}」中的 ${groupAssets.length} 个资产`);
   }
 
   async function toggleStoryboardAsset(asset: Asset) {
@@ -2567,12 +2696,22 @@ export function App() {
               <span>⚠ {analysisWarning || "当前资产和分镜使用回退测试数据，不具备真实模型分析结果。"}</span>
             </div>
           )}
-          {assetView !== "detail" && (
+          {assetView === "overview" && (
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
                 <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
-                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
+                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button><button className="ghost" onClick={() => setAssetView("groups")}>资产组</button><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
               </div>
+              {assetSelectionMode && (
+                <div className="asset-batch-bar">
+                  <span>已选择 {selectedAssetGroupKeys.size} 个同类资产</span>
+                  <div>
+                    <button className="primary small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openCreateAssetGroupModal}>新建分组</button>
+                    <button className="ghost small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openMoveAssetGroupModal}>加入已有分组</button>
+                    <button className="ghost small" onClick={cancelAssetSelectionMode}>取消</button>
+                  </div>
+                </div>
+              )}
               {assetTab === "资产进度" ? (
                 <div className="sub-panel simple-panel active">
                   <div className="metric"><b>待确认</b><span>{assets.filter((asset) => asset.status !== "已确认").length} 个资产</span></div>
@@ -2586,8 +2725,8 @@ export function App() {
                     const originalUrl = groupOriginalImageUrl(group);
                     const confirmedUrl = groupConfirmedImageUrl(group);
                     return (
-                      <article className="asset-card" key={group.key} onClick={() => selectAssetCard(group.items[0])}>
-                        <i>{group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+                      <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0])}>
+                        <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
                         <div className="asset-card-visuals">
                           <figure>
                             {originalUrl ? (
@@ -2624,6 +2763,60 @@ export function App() {
             </div>
           )}
 
+          {assetView === "groups" && (
+            <div className="asset-detail sub-panel active">
+              <div className="detail-topbar">
+                <button className="ghost" onClick={() => setAssetView("overview")}>返回资产概览</button>
+                <h2>资产组</h2>
+                <button className="primary" disabled={busy} onClick={() => { setAssetView("overview"); startAssetSelectionMode(); }}>批量新建分组</button>
+              </div>
+              <div className="asset-group-grid">
+                {customAssetGroups.filter((group) => assetTab === "资产进度" || group.assetType === assetTab).map((group) => (
+                  <article className="asset-group-card" key={group.id} onClick={() => {
+                    setSelectedCustomGroupId(group.id);
+                    setAssetGroupNameDraft(group.name);
+                    setAssetView("group-detail");
+                  }}>
+                    <i>{group.assetType}</i>
+                    <b>{group.name}</b>
+                    <span>{group.members.length} 个资产</span>
+                  </article>
+                ))}
+              </div>
+              {!customAssetGroups.filter((group) => assetTab === "资产进度" || group.assetType === assetTab).length && (
+                <p className="empty-shot-assets">还没有资产组。返回概览后，通过“批量分组”选择同类资产。</p>
+              )}
+            </div>
+          )}
+
+          {assetView === "group-detail" && selectedCustomGroup && (
+            <div className="asset-detail sub-panel active">
+              <div className="detail-topbar">
+                <button className="ghost" onClick={() => setAssetView("groups")}>返回资产组</button>
+                <h2>{selectedCustomGroup.name}</h2>
+                <button className="ghost" disabled={busy} onClick={() => deleteCustomGroup(selectedCustomGroup)}>删除资产组</button>
+              </div>
+              <div className="asset-group-detail-head">
+                <div className="asset-parent-picker">
+                  <input aria-label="资产组名称" value={assetGroupNameDraft} onChange={(event) => setAssetGroupNameDraft(event.target.value)} />
+                  <button className="primary small" disabled={busy || !assetGroupNameDraft.trim()} onClick={() => renameCustomGroup(selectedCustomGroup)}>保存组名</button>
+                </div>
+                <p>组名只用于管理与整组调用，不会修改资产名称、变量或提示词。</p>
+              </div>
+              <div className="panel-title">组内资产（{selectedCustomGroupAssets.length}）</div>
+              <div className="asset-group-grid">
+                {selectedCustomGroupAssets.map((asset) => (
+                  <article className="asset-group-card member" key={asset.id} onClick={() => selectAssetCard(asset)}>
+                    <i>{asset.asset_type}</i>
+                    <b>{assetDisplayName(asset)}</b>
+                    <span>{assetDisplayVariable(asset)}</span>
+                    <button className="ghost small" disabled={busy} onClick={(event) => { event.stopPropagation(); void removeAssetFromCustomGroup(selectedCustomGroup, asset); }}>移出组</button>
+                  </article>
+                ))}
+              </div>
+            </div>
+          )}
+
           {assetView === "detail" && selectedAsset && (
             <div className="asset-detail sub-panel active">
               <div className="detail-topbar">
@@ -2647,43 +2840,15 @@ export function App() {
                           ? <img className="subasset-thumb" src={selectedAssetImageUrl(item) || originalAssetImageUrl(item) || ""} alt={`${variantName(item)}资产图`} />
                           : <span className="asset-empty-thumb">暂无图片</span>}</div>
                         <b>{variantName(item)}</b>
-                        <span>{selectedGroup?.items.some((groupItem) => groupItem.id === item.id) ? (variantMeta(item) || assetDisplayVariable(item)) : "旗下资产"}</span>
+                        <span>{variantMeta(item) || assetDisplayVariable(item)}</span>
                       </article>
                     ))}
                   </div>
-                  <div className="panel-title">资产归属</div>
+                  <div className="panel-title">所属资产组</div>
                   <div className="asset-parent-link-editor">
-                    {selectedParentGroup ? (
-                      <div className="asset-parent-current">
-                        <span>所属主资产：<b>{selectedParentGroup.name} → {selectedParentGroup.localizedName}</b></span>
-                        <button className="ghost small" disabled={busy || !selectedParentLink} onClick={() => selectedParentLink && removeAssetParentLink(selectedParentLink)}>移出旗下</button>
-                      </div>
-                    ) : (
-                      <div className="asset-parent-current"><span>当前资产保持独立主身份。</span></div>
-                    )}
-                    <div className="asset-parent-picker">
-                      <select aria-label="选择主资产" value={assetParentTargetId} onChange={(event) => setAssetParentTargetId(event.target.value)}>
-                        <option value="">选择要加入的主资产</option>
-                        {selectedParentCandidates.map((group) => (
-                          <option value={group.items[0]?.id ?? ""} key={group.key}>{group.name} → {group.localizedName}</option>
-                        ))}
-                      </select>
-                      <button className="primary small" disabled={busy || !assetParentTargetId} onClick={() => {
-                        const target = selectedParentCandidates.find((group) => group.items[0]?.id === assetParentTargetId);
-                        if (target) void moveAssetUnderParent(target);
-                      }}>添加到旗下</button>
+                    <div className="asset-parent-current">
+                      <span>{selectedAssetCustomGroup ? <>当前资产属于「<b>{selectedAssetCustomGroup.name}</b>」。</> : "当前资产尚未加入资产组。"}</span>
                     </div>
-                    {selectedChildGroups.length > 0 && (
-                      <div className="asset-owned-children">
-                        {selectedChildGroups.map((group) => {
-                          const link = selectedChildLinks.find((item) => item.childAssetKey === group.key);
-                          return <div className="asset-owned-child" key={group.key}>
-                            <span><b>{group.name} → {group.localizedName}</b><small>{group.items.length} 个子资产</small></span>
-                            <button className="ghost small" disabled={busy || !link} onClick={() => link && removeAssetParentLink(link)}>移出</button>
-                          </div>;
-                        })}
-                      </div>
-                    )}
                   </div>
                   <div className="asset-compare">
                     <article>
@@ -2796,6 +2961,33 @@ export function App() {
             </div>
           )}
 
+          {assetGroupModal && (
+            <div className="asset-group-modal-backdrop" role="presentation">
+              <div className="asset-group-modal" role="dialog" aria-modal="true" aria-label={assetGroupModal === "create" ? "新建资产组" : "加入已有分组"}>
+                <h3>{assetGroupModal === "create" ? "新建资产组" : "加入已有分组"}</h3>
+                {assetGroupModal === "create" ? (
+                  <>
+                    <label>组名<input value={assetGroupNameDraft} onChange={(event) => setAssetGroupNameDraft(event.target.value)} placeholder="例如：篮球队员、主角团" /></label>
+                    <p>将创建一个自定义组，包含当前选择的 {selectedAssetGroupKeys.size} 个同类资产。</p>
+                    <div className="asset-group-modal-actions">
+                      <button className="ghost" onClick={() => setAssetGroupModal(null)}>取消</button>
+                      <button className="primary" disabled={busy || !assetGroupNameDraft.trim()} onClick={() => void createAssetGroupFromSelection()}>创建分组</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <label>目标分组<select value={assetGroupTargetId} onChange={(event) => setAssetGroupTargetId(event.target.value)}>{customAssetGroups.filter((group) => group.assetType === assetGroups.find((item) => selectedAssetGroupKeys.has(item.key))?.type).map((group) => <option value={group.id} key={group.id}>{group.name}（{group.members.length}）</option>)}</select></label>
+                    <p>选中的资产会移动到目标组；如果之前属于其他组，会自动移出旧组。</p>
+                    <div className="asset-group-modal-actions">
+                      <button className="ghost" onClick={() => setAssetGroupModal(null)}>取消</button>
+                      <button className="primary" disabled={busy || !assetGroupTargetId} onClick={() => void moveSelectionToCustomGroup()}>移动到分组</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="footer-actions">
             <button className="ghost" onClick={() => setScreen("source")}>返回</button>
             <button className="primary" disabled={busy || !assets.length} onClick={() => void enterStoryboards()}>进入分镜</button>
@@ -2823,24 +3015,26 @@ export function App() {
                 ))}
               </div>
               <input className="storyboard-asset-search" placeholder={`搜索${storyboardAssetTab}`} value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
+              <select className="storyboard-group-filter" aria-label="按资产组筛选" value={storyboardAssetGroupId} onChange={(event) => setStoryboardAssetGroupId(event.target.value)}>
+                <option value="all">全部资产</option>
+                <option value="ungrouped">未分组</option>
+                {storyboardCustomGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
+              </select>
+              {storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
+                <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
+                  const group = customGroupById.get(storyboardAssetGroupId);
+                  if (group) void bindStoryboardCustomGroup(group);
+                }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
+              )}
               <div className="storyboard-asset-view-controls"><span>资产库</span><div><button className={storyboardAssetLayout === "list" ? "active" : ""} aria-pressed={storyboardAssetLayout === "list"} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} aria-pressed={storyboardAssetLayout === "grid"} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div></div>
             </div>
             <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
               {storyboardFilteredAssets.map((asset) => {
                 const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
                 const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
-                const familyKeys = collectAssetFamilyKeys(mainAssetKey(asset));
-                const familyAssets = assets.filter((item) => familyKeys.has(mainAssetKey(item)) && assetAppearsInSelectedEpisode(item));
-                return <div className="storyboard-asset-entry" key={asset.id}>
-                  <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
-                    {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
-                  </button>
-                  {familyAssets.length > 1 && (
-                    <button className="ghost small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => bindStoryboardAssetFamily(asset)}>
-                      绑定调用主资产与旗下资产（{familyAssets.length}）
-                    </button>
-                  )}
-                </div>;
+                return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
+                  {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
+                </button>;
               })}
               {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
             </div>
