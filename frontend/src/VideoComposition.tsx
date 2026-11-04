@@ -12,7 +12,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 function fmt(ms: number) { const s = Math.max(0, ms) / 1000; return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; }
 
-export function VideoComposition({ projectId, episodeId, episodeIndex, onMessage }: { projectId?: string; episodeId?: string; episodeIndex?: number; onMessage: (message: string) => void }) {
+export function VideoComposition({ projectId, episodeId, episodeIndex, active, onMessage }: { projectId?: string; episodeId?: string; episodeIndex?: number; active: boolean; onMessage: (message: string) => void }) {
   const [assets, setAssets] = useState<Media[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [jobs, setJobs] = useState<ExportJob[]>([]);
@@ -30,6 +30,9 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, onMessage
   const videoRef = useRef<HTMLVideoElement>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const dragIndex = useRef<number | null>(null);
+  const loadedEpisodeKey = useRef("");
+  const activeEpisodeKey = useRef("");
+  const refreshSequence = useRef(0);
   const clips = draft?.edit.clips ?? [];
   const totalMs = clips.reduce((sum, clip) => sum + Math.max(0, clip.outMs - clip.inMs), 0);
   const clipSignature = clips.map((clip) => `${clip.id}:${clip.sourceId}:${clip.inMs}:${clip.outMs}:${clip.order}`).join("|");
@@ -37,27 +40,36 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, onMessage
   const selectedMedia = assets.find((item) => item.id === selectedClip?.sourceId) ?? null;
   const filteredAssets = useMemo(() => assets.filter((asset) => `${asset.name} ${asset.source}`.toLowerCase().includes(query.toLowerCase())), [assets, query]);
 
-  async function refresh() {
-    if (!projectId || !episodeId) return;
+  async function refresh(): Promise<boolean> {
+    if (!projectId || !episodeId) return false;
+    const key = projectId + ":" + episodeId;
+    const sequence = ++refreshSequence.current;
     const [mediaData, draftData, jobData] = await Promise.all([
       api<{ assets: Media[] }>(`/api/projects/${projectId}/episodes/${episodeId}/video-assets`),
       api<{ draft: Draft }>(`/api/projects/${projectId}/video-edits/${episodeId}`),
       api<{ jobs: ExportJob[] }>(`/api/projects/${projectId}/video-export-jobs?episode_id=${episodeId}`),
     ]);
+    if (sequence !== refreshSequence.current || key !== activeEpisodeKey.current) return false;
     setAssets(mediaData.assets); setDraft(draftData.draft); setJobs(jobData.jobs);
     if (!selected && draftData.draft.edit.clips.length) setSelected(draftData.draft.edit.clips[0].id);
+    return true;
   }
-  useEffect(() => { setDraft(null); setAssets([]); setSelected(null); setPlayhead(0); if (projectId && episodeId) refresh().catch((error) => onMessage(error.message)); }, [projectId, episodeId]);
+  useEffect(() => { activeEpisodeKey.current = projectId && episodeId ? projectId + ":" + episodeId : ""; refreshSequence.current += 1; loadedEpisodeKey.current = ""; setDraft(null); setAssets([]); setSelected(null); setPlayhead(0); }, [projectId, episodeId]);
+  useEffect(() => {
+    const key = projectId && episodeId ? projectId + ":" + episodeId : "";
+    if (!active || !key || loadedEpisodeKey.current === key) return;
+    void refresh().then((loaded) => { if (loaded && activeEpisodeKey.current === key) loadedEpisodeKey.current = key; }).catch((error) => onMessage(error.message));
+  }, [projectId, episodeId, active]);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 1100px)");
     const sync = () => { if (media.matches) { setLibraryCollapsed(true); setInspectorCollapsed(true); } };
     sync(); media.addEventListener("change", sync); return () => media.removeEventListener("change", sync);
   }, []);
   useEffect(() => {
-    if (!projectId || !episodeId || !jobs.some((job) => ["queued", "running"].includes(job.status))) return;
+    if (!active || !projectId || !episodeId || !jobs.some((job) => ["queued", "running"].includes(job.status))) return;
     const timer = window.setInterval(() => api<{ jobs: ExportJob[] }>(`/api/projects/${projectId}/video-export-jobs?episode_id=${episodeId}`).then((data) => setJobs(data.jobs)).catch(() => {}), 1200);
     return () => window.clearInterval(timer);
-  }, [projectId, episodeId, jobs]);
+  }, [projectId, episodeId, jobs, active]);
   useEffect(() => {
     if (!activeMediaId || seekOnLoad === null || !videoRef.current) return;
     const video = videoRef.current;

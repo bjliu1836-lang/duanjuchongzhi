@@ -1,4 +1,4 @@
-import { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { VideoComposition } from "./VideoComposition";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
@@ -113,6 +113,14 @@ type ImageView = {
   title: string;
 } | null;
 
+let storyboardFrameQueue: Promise<void> = Promise.resolve();
+
+function enqueueStoryboardFrame(task: () => Promise<void>) {
+  const queued = storyboardFrameQueue.catch(() => undefined).then(task);
+  storyboardFrameQueue = queued.catch(() => undefined);
+  return queued;
+}
+
 type SelectedSource = {
   kind: "local";
   uploadMode?: UploadMode;
@@ -166,16 +174,22 @@ function variantMeta(asset: Asset) {
 
 function assetPrompt(asset: Asset) {
   const child = currentChild(asset);
+  const isPlaceholder = (value: string) =>
+    [
+      "目标画像待本地化；当前旧资产共享描述不能作为目标提示词。",
+      "目标画像需本地化；旧共享描述不能作为目标提示词。",
+      "当前资产沿用原片外观与原片资产图；不使用历史目标候选。",
+    ].includes(value.trim());
   const finalPrompt = pickText(asset.payload, ["最终资产图生成提示词"]);
-  const targetStatus = pickText(asset.payload, ["目标画像状态"]);
-  const pending = targetStatus === "待本地化" || targetStatus === "待源事实核对";
   const manualPrompt = pickText(asset.payload, ["用户编辑资产图生成提示词"]);
-  if (targetStatus === "待源事实核对") return manualPrompt || pickText(asset.payload, ["自动编译资产图生成提示词"]);
-  if (pending) return manualPrompt;
   const prompt =
-    finalPrompt || manualPrompt ||
+    (finalPrompt && !isPlaceholder(finalPrompt) ? finalPrompt : "") || manualPrompt ||
     pickText(child, ["角色资产图生成提示词", "场景资产图生成提示词", "道具资产图生成提示词"]) ||
-    pickText(asset.payload, ["角色资产图生成提示词", "场景资产图生成提示词", "道具资产图生成提示词"]);
+    pickText(asset.payload, ["角色资产图生成提示词", "场景资产图生成提示词", "道具资产图生成提示词"]) ||
+    (() => {
+      const automatic = pickText(asset.payload, ["自动编译资产图生成提示词"]);
+      return isPlaceholder(automatic) ? "" : automatic;
+    })();
   if (prompt) return prompt;
   if (asset.asset_type !== "角色") return prompt;
   if (prompt.includes("【基础设定】") && prompt.includes("【固定约束】")) return prompt;
@@ -337,6 +351,17 @@ function assetDisplayVariable(asset: Asset) {
   return `@${slugAssetToken(source, asset.variable || asset.id)}`;
 }
 
+function assetReferenceAliases(asset: Asset) {
+  const historic = Array.isArray(asset.payload?.["历史展示变量别名"])
+    ? asset.payload["历史展示变量别名"].filter((value: unknown): value is string => typeof value === "string")
+    : [];
+  return Array.from(new Set([
+    assetDisplayVariable(asset),
+    pickText(asset.payload, ["旧展示资产变量", "源变量别名"]),
+    ...historic,
+  ].filter(Boolean)));
+}
+
 function assetDisplayMeta(asset: Asset) {
   const episodeIndexes = asset.payload?.出现集数;
   const episodeMeta = Array.isArray(episodeIndexes) && episodeIndexes.length
@@ -347,8 +372,28 @@ function assetDisplayMeta(asset: Asset) {
     .join(" · ");
 }
 
-function convertPromptVariables(prompt: string, assets: Asset[]) {
-  return assets.reduce((text, asset) => text.replaceAll(asset.variable, assetDisplayVariable(asset)), prompt);
+function resolveUniqueAssetReference(token: string, assets: Asset[]): Asset | undefined {
+  const stableMatches = assets.filter((asset) => asset.variable === token);
+  if (stableMatches.length === 1) return stableMatches[0];
+  if (stableMatches.length > 1) return undefined;
+  const aliasMatches = assets.filter((asset) => [...assetReferenceAliases(asset), assetDisplayName(asset)].includes(token));
+  return aliasMatches.length === 1 ? aliasMatches[0] : undefined;
+}
+
+function canonicalizeAssetReferences(tokens: string[], assets: Asset[]): string[] {
+  const result: string[] = [];
+  const seenAssetIds = new Set<string>();
+  for (const token of tokens) {
+    const asset = resolveUniqueAssetReference(token, assets);
+    if (!asset) {
+      if (!result.includes(token)) result.push(token);
+      continue;
+    }
+    if (seenAssetIds.has(asset.id)) continue;
+    seenAssetIds.add(asset.id);
+    result.push(asset.variable);
+  }
+  return result;
 }
 
 function parseTimecode(value: string) {
@@ -400,13 +445,127 @@ function originalAssetDescription(asset: Asset) {
 }
 
 function localizedAssetDescription(asset: Asset) {
-  if (typeof asset.payload?.["目标生成描述"] === "string" && asset.payload["目标生成描述"]) return asset.payload["目标生成描述"];
+  const targetDescription = typeof asset.payload?.["目标生成描述"] === "string" ? asset.payload["目标生成描述"] : "";
+  const targetLock = String(asset.payload?.targetVisualLockProvenance ?? asset.payload?.["目标生成描述来源"] ?? "").toLowerCase();
+  if (targetDescription && ["user", "user_override", "explicit_user_lock", "用户明确设定", "用户手动设定"].includes(targetLock)) return targetDescription;
+  if (typeof asset.payload?.["当前目标画像描述"] === "string" && asset.payload["当前目标画像描述"]) return asset.payload["当前目标画像描述"];
+  if (targetDescription) return targetDescription;
   const child = currentChild(asset);
   return [
     pickText(asset.payload, ["本地化核心形象描述", "本地化场景描述", "本地化道具描述"]),
     pickText(child, ["本地化视觉形象描述", "本地化视觉描述", "本地化子资产描述"]),
     pickText(child, ["差异标签", "差异类型"]),
   ].filter(Boolean).join("\n") || "目标国家资产描述：保留原资产剧情功能，并完成目标国家本地化转化。";
+}
+
+function StoryboardFrameThumb({ storyboard, sourceUrl, selected, onClick }: {
+  storyboard: Storyboard;
+  sourceUrl?: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const rootRef = useRef<HTMLButtonElement | null>(null);
+  const [frameUrl, setFrameUrl] = useState("");
+  const [frameState, setFrameState] = useState<"waiting" | "loading" | "ready" | "failed">("waiting");
+  const [frameFailure, setFrameFailure] = useState("");
+  const range = parseRange(storyboard.time_range || "");
+  const frameTime = range.end > range.start ? (range.start + range.end) / 2 : range.start;
+  useEffect(() => {
+    if (!sourceUrl || !Number.isFinite(frameTime)) {
+      setFrameUrl("");
+      setFrameFailure("");
+      setFrameState("failed");
+      return;
+    }
+    setFrameUrl("");
+    setFrameFailure("");
+    setFrameState("waiting");
+    const root = rootRef.current;
+    if (!root) return;
+    let cancelled = false;
+    let video: HTMLVideoElement | null = null;
+    let finishFrameTask: (() => void) | null = null;
+    let frameTimeoutId: number | null = null;
+    const cleanupVideo = () => {
+      if (frameTimeoutId !== null) {
+        window.clearTimeout(frameTimeoutId);
+        frameTimeoutId = null;
+      }
+      if (video) {
+        video.onloadedmetadata = null;
+        video.onloadeddata = null;
+        video.onseeked = null;
+        video.onerror = null;
+        video.removeAttribute("src");
+        video.load();
+        video = null;
+      }
+      finishFrameTask?.();
+      finishFrameTask = null;
+    };
+    const observer = new IntersectionObserver((entries) => {
+      if (cancelled) return;
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      setFrameState("loading");
+      void enqueueStoryboardFrame(() => new Promise<void>((resolve) => {
+        if (cancelled) { resolve(); return; }
+        const currentVideo = document.createElement("video");
+        video = currentVideo;
+        finishFrameTask = resolve;
+        currentVideo.muted = true;
+        currentVideo.preload = "metadata";
+        currentVideo.crossOrigin = "anonymous";
+        const fail = () => {
+          if (!cancelled) {
+            setFrameFailure(currentVideo.error?.message || "原片无法解码或读取");
+            setFrameState("failed");
+          }
+          cleanupVideo();
+        };
+        const captureFrame = () => {
+          if (cancelled || video !== currentVideo) return;
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = currentVideo.videoWidth;
+            canvas.height = currentVideo.videoHeight;
+            if (!canvas.width || !canvas.height) throw new Error("视频没有可用画面");
+            const context = canvas.getContext("2d");
+            if (!context) throw new Error("浏览器无法读取视频帧");
+            context.drawImage(currentVideo, 0, 0, canvas.width, canvas.height);
+            setFrameUrl(canvas.toDataURL("image/jpeg", 0.76));
+            setFrameState("ready");
+          } catch (error) {
+            setFrameFailure(error instanceof Error ? error.message : "浏览器无法读取视频帧");
+            setFrameState("failed");
+          }
+          cleanupVideo();
+        };
+        currentVideo.onerror = fail;
+        currentVideo.onloadedmetadata = () => {
+          const target = Math.min(Math.max(0, frameTime), Math.max(0, currentVideo.duration - 0.08));
+          if (!Number.isFinite(currentVideo.duration) || currentVideo.duration <= 0) { fail(); return; }
+          if (target <= 0.01) currentVideo.onloadeddata = captureFrame;
+          else currentVideo.currentTime = target;
+        };
+        currentVideo.onseeked = captureFrame;
+        currentVideo.src = sourceUrl;
+        frameTimeoutId = window.setTimeout(() => {
+          if (!cancelled) {
+            setFrameFailure("取帧超时，请检查原片连接");
+            setFrameState("failed");
+          }
+          cleanupVideo();
+        }, 12000);
+      }));
+    }, { root: root.closest(".thumb-row"), rootMargin: "120px" });
+    observer.observe(root);
+    return () => { cancelled = true; observer.disconnect(); cleanupVideo(); };
+  }, [sourceUrl, storyboard.id, frameTime]);
+  return <button ref={rootRef} type="button" className={`shot-thumb${selected ? " active" : ""}`} aria-pressed={selected} onClick={onClick}>
+    <span className="shot-frame-visual" data-frame-state={frameState} title={frameFailure}>{frameUrl ? <img src={frameUrl} alt="" /> : <small>{frameState === "loading" ? "正在取帧…" : frameState === "failed" ? "原片帧不可用" : "等待取帧"}</small>}</span>
+    <span className="shot-frame-copy"><b>{storyboard.title}</b><small>{storyboard.time_range}</small><small>{storyboard.status}</small></span>
+  </button>;
 }
 
 function formatBytes(bytes = 0) {
@@ -447,10 +606,11 @@ function originalAssetImageUrl(asset?: Asset) {
 }
 
 function splitPromptAssetVariables(prompt: string, assets: Asset[]): PromptVariablePart[] {
-  const aliasMap = new Map<string, Asset>();
+  const aliasMap = new Map<string, Asset | null>();
   assets.forEach((asset) => {
-    [assetDisplayVariable(asset), asset.variable].filter((token) => token.startsWith("@")).forEach((token) => {
+    [...assetReferenceAliases(asset), asset.variable].filter((token) => token.startsWith("@") || token.startsWith("{{")).forEach((token) => {
       if (!aliasMap.has(token)) aliasMap.set(token, asset);
+      else if (aliasMap.get(token)?.id !== asset.id) aliasMap.set(token, null);
     });
   });
   const aliases = Array.from(aliasMap.entries()).sort((left, right) => right[0].length - left[0].length);
@@ -461,9 +621,11 @@ function splitPromptAssetVariables(prompt: string, assets: Asset[]): PromptVaria
   while (index < prompt.length) {
     const previous = prompt[index - 1] ?? "";
     const atBoundary = index === 0 || !/[A-Za-z0-9_@]/.test(previous);
-    const known = atBoundary
-      ? aliases.find(([token]) => prompt.startsWith(token, index) && !isAsciiVariableChar(prompt[index + token.length] ?? ""))
-      : undefined;
+    const known = aliases.find(([token]) => {
+      if (!prompt.startsWith(token, index)) return false;
+      if (token.startsWith("{{")) return true;
+      return atBoundary && !isAsciiVariableChar(prompt[index + token.length] ?? "");
+    });
     const unknownMatch = !known && atBoundary && prompt[index] === "@"
       ? prompt.slice(index).match(/^@[\p{L}\p{N}]+(?:[_-][\p{L}\p{N}]+)*/u)?.[0]
       : undefined;
@@ -473,12 +635,151 @@ function splitPromptAssetVariables(prompt: string, assets: Asset[]): PromptVaria
       continue;
     }
     if (index > textStart) parts.push({ kind: "text", value: prompt.slice(textStart, index) });
-    parts.push({ kind: "variable", token, asset: known?.[1] });
+    parts.push({ kind: "variable", token, asset: known?.[1] ?? undefined });
     index += token.length;
     textStart = index;
   }
   if (textStart < prompt.length) parts.push({ kind: "text", value: prompt.slice(textStart) });
   return parts;
+}
+
+function serializePromptEditorNode(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return "";
+  const element = node as HTMLElement;
+  const token = node.nodeType === Node.ELEMENT_NODE ? element.dataset.promptToken : undefined;
+  if (token !== undefined) return token;
+  if (element.tagName === "BR") return "\n";
+  let output = "";
+  Array.from(element.childNodes).forEach((child, index) => {
+    const isBlock = child.nodeType === Node.ELEMENT_NODE && ["DIV", "P"].includes((child as HTMLElement).tagName);
+    if (index > 0 && isBlock && output && !output.endsWith("\n")) output += "\n";
+    output += serializePromptEditorNode(child);
+  });
+  return output;
+}
+
+function readPromptEditor(editor: HTMLElement | null): string {
+  if (!editor) return "";
+  return serializePromptEditorNode(editor);
+}
+
+function renderPromptEditor(editor: HTMLElement, prompt: string, assets: Asset[], openImage: (url: string, title: string) => void) {
+  editor.replaceChildren();
+  const parts = splitPromptAssetVariables(prompt, assets);
+  for (const part of parts) {
+    if (part.kind === "text") {
+      editor.append(document.createTextNode(part.value));
+      continue;
+    }
+    if (!part.asset) {
+      editor.append(document.createTextNode(part.token));
+      continue;
+    }
+    const asset = part.asset;
+    const token = document.createElement("span");
+    token.className = "prompt-variable-chip";
+    token.contentEditable = "false";
+    token.dataset.promptToken = part.token;
+    token.setAttribute("role", "button");
+    token.setAttribute("tabindex", "0");
+    token.setAttribute("aria-label", `${part.token}，点击查看资产图片`);
+    const text = document.createElement("span");
+    text.className = "prompt-variable-chip-token";
+    text.textContent = part.token;
+    token.append(text);
+    const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
+    if (thumbUrl) {
+      const image = document.createElement("img");
+      image.src = thumbUrl;
+      image.alt = "";
+      image.onerror = () => {
+        image.hidden = true;
+        const missing = document.createElement("small");
+        missing.className = "prompt-variable-chip-missing";
+        missing.textContent = "图片不可用";
+        token.append(missing);
+      };
+      token.append(image);
+    } else {
+      const missing = document.createElement("small");
+      missing.className = "prompt-variable-chip-missing";
+      missing.textContent = "无图";
+      token.append(missing);
+    }
+    const showImage = () => { if (thumbUrl) openImage(thumbUrl, `${assetDisplayName(asset)} · ${part.token}`); };
+    token.addEventListener("click", showImage);
+    token.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showImage(); } });
+    editor.append(token);
+  }
+}
+
+function promptSelectionOffset(editor: HTMLElement): number | null {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || !editor.contains(selection.anchorNode)) return null;
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.setEnd(selection.anchorNode!, selection.anchorOffset);
+  return serializePromptEditorNode(range.cloneContents()).length;
+}
+
+function promptSelectedText(editor: HTMLElement): string {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed || !editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)) return "";
+  return serializePromptEditorNode(selection.getRangeAt(0).cloneContents());
+}
+
+function promptDomPoint(editor: HTMLElement, target: number): { node: Node; offset: number } {
+  let position = 0;
+  let result: { node: Node; offset: number } | null = null;
+  const visit = (parent: Node) => {
+    const children = Array.from(parent.childNodes);
+    for (let index = 0; index < children.length && !result; index += 1) {
+      const child = children[index];
+      const isBlock = child.nodeType === Node.ELEMENT_NODE && ["DIV", "P"].includes((child as HTMLElement).tagName);
+      if (index > 0 && isBlock && position > 0) {
+        if (target <= position) { result = { node: parent, offset: index }; return; }
+        position += 1;
+      }
+      if (child.nodeType === Node.TEXT_NODE) {
+        const length = child.textContent?.length ?? 0;
+        if (target <= position + length) { result = { node: child, offset: Math.max(0, target - position) }; return; }
+        position += length;
+      } else if (child.nodeType === Node.ELEMENT_NODE && (child as HTMLElement).dataset.promptToken !== undefined) {
+        const length = ((child as HTMLElement).dataset.promptToken ?? "").length;
+        const indexInParent = Array.prototype.indexOf.call(parent.childNodes, child);
+        if (target <= position) { result = { node: parent, offset: indexInParent }; return; }
+        if (target <= position + length) { result = { node: parent, offset: indexInParent + (target > position ? 1 : 0) }; return; }
+        position += length;
+      } else if (child.nodeType === Node.ELEMENT_NODE && (child as HTMLElement).tagName === "BR") {
+        const indexInParent = Array.prototype.indexOf.call(parent.childNodes, child);
+        if (target <= position) { result = { node: parent, offset: indexInParent }; return; }
+        position += 1;
+      } else visit(child);
+    }
+  };
+  visit(editor);
+  return result ?? { node: editor, offset: editor.childNodes.length };
+}
+
+function insertPromptToken(editor: HTMLElement, start: number, end: number, value: string, assets: Asset[], openImage: (url: string, title: string) => void) {
+  const from = promptDomPoint(editor, start);
+  const to = promptDomPoint(editor, end);
+  const range = document.createRange();
+  range.setStart(from.node, from.offset);
+  range.setEnd(to.node, to.offset);
+  range.deleteContents();
+  const holder = document.createElement("div");
+  renderPromptEditor(holder, value, assets, openImage);
+  const inserted = holder.firstChild;
+  if (!inserted) return;
+  range.insertNode(inserted);
+  const selection = window.getSelection();
+  const caret = document.createRange();
+  caret.setStartAfter(inserted);
+  caret.collapse(true);
+  selection?.removeAllRanges();
+  selection?.addRange(caret);
 }
 
 function groupOriginalImageUrl(group: AssetGroup) {
@@ -522,8 +823,8 @@ function getInitialWorkbenchPaneWidths() {
   const gap = Math.min(14, Math.max(8, workbenchWidth * 0.01));
   const availableTracks = workbenchWidth - gap * 2 - gap * 4 - 16 - 360;
   const minimumTotal = 230 + 260;
-  const preferredAssets = Math.min(680, Math.round(workbenchWidth * 0.26));
-  const preferredPreview = Math.min(720, Math.round(workbenchWidth * 0.3));
+  const preferredAssets = Math.min(300, Math.max(260, Math.round(workbenchWidth * 0.21)));
+  const preferredPreview = Math.min(380, Math.max(320, Math.round(workbenchWidth * 0.26)));
   const preferredExtra = Math.max(0, preferredAssets - 230) + Math.max(0, preferredPreview - 260);
   const extraBudget = Math.max(0, Math.min(preferredExtra, availableTracks - minimumTotal));
   const scale = preferredExtra > 0 ? extraBudget / preferredExtra : 1;
@@ -535,6 +836,12 @@ function getInitialWorkbenchPaneWidths() {
 
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectPage, setProjectPage] = useState(0);
+  const [sourcePage, setSourcePage] = useState(0);
+  const [assetStatusFilter, setAssetStatusFilter] = useState<"all" | "pending" | "confirmed">("all");
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -583,13 +890,19 @@ export function App() {
   const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具">("角色");
   const [busy, setBusy] = useState(false);
   const [storyboardLoading, setStoryboardLoading] = useState(false);
-  const [generatingAssetId, setGeneratingAssetId] = useState<string | null>(null);
+  const [storyboardMenuOpen, setStoryboardMenuOpen] = useState(false);
+  const [generatingAssetIds, setGeneratingAssetIds] = useState<Set<string>>(() => new Set());
+  const generatingAssetIdsRef = useRef<Set<string>>(new Set());
   const [message, setMessage] = useState("准备就绪");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
-  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptInputRef = useRef<HTMLDivElement | null>(null);
+  const promptEditorSync = useRef<{ storyboardId: string; value: string; assets: Asset[] } | null>(null);
+  const promptCompositionActive = useRef(false);
   const storyboardPatchQueue = useRef<Promise<void>>(Promise.resolve());
   const storyboardSaveRevisions = useRef(new Map<string, number>());
+  const storyboardSavedBodies = useRef(new Map<string, string>());
+  const storyboardPromptSaveRequests = useRef(new Map<string, { prompt: string; promise: Promise<boolean> }>());
   const assetImageInputRef = useRef<HTMLInputElement | null>(null);
   const pollingTaskIds = useRef(new Set<string>());
   const workbenchRef = useRef<HTMLElement | null>(null);
@@ -609,6 +922,10 @@ export function App() {
     () => storyboards.find((storyboard) => storyboard.id === selectedStoryboardId) ?? storyboards[0] ?? null,
     [storyboards, selectedStoryboardId]
   );
+  const storyboardReferenceReview = Array.isArray(selectedStoryboard?.payload?.["资产引用待核对"])
+    ? selectedStoryboard.payload["资产引用待核对"] as Array<Record<string, unknown>>
+    : [];
+  const storyboardHasUnresolvedReferences = storyboardReferenceReview.length > 0;
   const storyboardSaveState = selectedStoryboard ? storyboardSaveStates[selectedStoryboard.id] ?? "saved" : "saved";
   const assetGroups = useMemo(() => {
     const map = new Map<string, AssetGroup>();
@@ -630,9 +947,13 @@ export function App() {
     return Array.from(map.values());
   }, [assets]);
   const filteredGroups = useMemo(
-    () => assetGroups.filter((group) => assetTab === "资产进度" || group.type === assetTab),
-    [assetGroups, assetTab]
+    () => assetGroups.filter((group) => (assetTab === "资产进度" || group.type === assetTab)
+      && (assetStatusFilter === "all" || group.items.some((item) => assetStatusFilter === "confirmed" ? item.status === "已确认" : item.status !== "已确认"))),
+    [assetGroups, assetTab, assetStatusFilter]
   );
+  const searchedProjects = useMemo(() => projects.filter((project) => (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase().includes(projectSearch.trim().toLowerCase())), [projects, projectSearch]);
+  const projectPageSize = 8;
+  const pagedProjects = searchedProjects.slice(projectPage * projectPageSize, (projectPage + 1) * projectPageSize);
   const roleCount = assets.filter((asset) => asset.asset_type === "角色").length;
   const sceneCount = assets.filter((asset) => asset.asset_type === "场景").length;
   const propCount = assets.filter((asset) => asset.asset_type === "道具").length;
@@ -642,55 +963,27 @@ export function App() {
     [assets, storyboardAssetSearch, storyboardAssetTab]
   );
   const selectedGroup = selectedAsset ? assetGroups.find((group) => group.key === mainAssetKey(selectedAsset)) : null;
-  const latestAssetIndex = useMemo(() => {
-    const task = tasks.find((item) => item.task_type === "asset_extraction" && item.status === "成功" && item.result?.资产出现片段索引);
-    return Array.isArray(task?.result?.资产出现片段索引) ? task.result.资产出现片段索引 : [];
-  }, [tasks]);
   const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
-    const variableSet = new Set<string>();
     const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
-    if (selectedStoryboard.payload?.["引用资产变量手动覆盖"] === true) {
-      payloadRefs.forEach((value) => variableSet.add(value));
-      return Array.from(variableSet);
-    }
-    const storyboardRange = parseRange(selectedStoryboard.time_range || "");
-    latestAssetIndex.forEach((segment: any) => {
-      const segmentRange = parseRange(`${segment.开始时间 || "00:00:00"}-${segment.结束时间 || segment.开始时间 || "00:00:00"}`);
-      if (!rangesOverlap(storyboardRange, segmentRange)) return;
-      const segmentAssets = Array.isArray(segment.出现资产) ? segment.出现资产 : splitAssetVariableValues(segment.出现资产);
-      segmentAssets.forEach((item: any) => {
-        if (typeof item === "string") splitAssetVariableValues(item).forEach((value: string) => variableSet.add(value));
-        splitAssetVariableValues(item?.资产变量).forEach((value: string) => variableSet.add(value));
-        splitAssetVariableValues(item?.展示资产变量).forEach((value: string) => variableSet.add(value));
-      });
-      splitAssetVariableValues(segment.出现资产变量).forEach((value: string) => variableSet.add(value));
-      splitAssetVariableValues(segment.引用资产变量).forEach((value: string) => variableSet.add(value));
-    });
-    payloadRefs.forEach((value) => variableSet.add(value));
-    const prompt = selectedStoryboard.prompt || "";
-    assets.forEach((asset) => {
-      if (prompt.includes(asset.variable) || prompt.includes(assetDisplayVariable(asset))) {
-        variableSet.add(asset.variable);
-        variableSet.add(assetDisplayVariable(asset));
-      }
-    });
-    return Array.from(variableSet);
-  }, [assets, latestAssetIndex, selectedStoryboard]);
+    return canonicalizeAssetReferences(payloadRefs, assets);
+  }, [assets, selectedStoryboard]);
   const selectedStoryboardAssets = useMemo(() => {
-    const referenceSet = new Set(selectedStoryboardReferenceTokens);
-    return assets.filter((asset) => referenceSet.has(asset.variable) || referenceSet.has(assetDisplayVariable(asset)) || referenceSet.has(assetDisplayName(asset)));
+    const matches = selectedStoryboardReferenceTokens
+      .map((token) => resolveUniqueAssetReference(token, assets))
+      .filter((asset): asset is Asset => Boolean(asset));
+    return Array.from(new Map(matches.map((asset) => [asset.id, asset])).values());
   }, [assets, selectedStoryboardReferenceTokens]);
   function getLatestStoryboardReferenceTokens(storyboard: Storyboard) {
     const draft = storyboardReferenceDrafts.current.get(storyboard.id);
-    if (draft && draft.projectId === currentProject?.id) return [...draft.references];
+    if (draft && draft.projectId === currentProject?.id) return canonicalizeAssetReferences(draft.references, assets);
     if (selectedStoryboard?.id === storyboard.id) return [...selectedStoryboardReferenceTokens];
-    return splitAssetVariableValues(storyboard.payload?.["引用资产变量"]);
+    return canonicalizeAssetReferences(splitAssetVariableValues(storyboard.payload?.["引用资产变量"]), assets);
   }
   const selectedStoryboardReferenceItems = useMemo(() => {
     const seen = new Set<string>();
     return selectedStoryboardReferenceTokens.flatMap((token) => {
-      const asset = assets.find((item) => [item.variable, assetDisplayVariable(item), assetDisplayName(item)].includes(token));
+      const asset = resolveUniqueAssetReference(token, assets);
       const key = asset ? `asset:${asset.id}` : `reference:${token}`;
       if (seen.has(key)) return [];
       seen.add(key);
@@ -702,12 +995,19 @@ export function App() {
     "--preview-pane-width": `${previewPaneWidth}px`,
   } as CSSProperties;
   const selectedStoryboardPrompt = useMemo(
-    () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : convertPromptVariables(
-      String(selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""),
-      assets
+    () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : String(
+      selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""
     ),
-    [assets, selectedStoryboard]
+    [selectedStoryboard]
   );
+  useLayoutEffect(() => {
+    if (!selectedStoryboard || !promptInputRef.current) return;
+    const previous = promptEditorSync.current;
+    if (previous?.storyboardId === selectedStoryboard.id && promptCompositionActive.current) return;
+    if (previous?.storyboardId === selectedStoryboard.id && previous.value === selectedStoryboardPrompt && previous.assets === assets) return;
+    renderPromptEditor(promptInputRef.current, selectedStoryboardPrompt, assets, openImage);
+    promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: selectedStoryboardPrompt, assets };
+  }, [selectedStoryboard?.id, selectedStoryboardPrompt, assets]);
   const mentionOptions = useMemo(() => {
     const query = (mentionQuery ?? "").toLowerCase();
     return assets.filter((asset) => {
@@ -720,7 +1020,7 @@ export function App() {
     if (!selectedStoryboard) return;
     const savedBody = selectedStoryboard.payload?.["使用回退占位"] === true
       ? ""
-      : convertPromptVariables(String(selectedStoryboard.payload?.["分镜生成正文"] ?? selectedStoryboard.payload?.["源分镜文本"] ?? selectedStoryboard.prompt ?? ""), assets);
+      : String(selectedStoryboard.payload?.["分镜生成正文"] ?? selectedStoryboard.payload?.["源分镜文本"] ?? selectedStoryboard.prompt ?? "");
     if (selectedStoryboardPrompt === savedBody) return;
     const storyboard = selectedStoryboard;
     const timer = window.setTimeout(() => { void savePrompt(storyboard, selectedStoryboardPrompt); }, 700);
@@ -737,6 +1037,12 @@ export function App() {
   const effectiveUploadState = hasUploadedEpisodes ? "uploaded" : uploadState;
   const failedEpisodeCount = effectiveUploadState === "failed" ? Math.max(1, (selectedFiles?.length ?? 0) - uploadedEpisodeCount) : 0;
   const uploadingEpisodeCount = effectiveUploadState === "uploading" ? Math.max(sourceEpisodeCount - uploadedEpisodeCount, 0) : 0;
+  const sourceEpisodeRows = useMemo(() => episodes.length ? episodes : Array.from({ length: Math.min(sourceEpisodeCount, 7) }).map((_, index) => ({
+    id: "pending-" + index, episode_index: index + 1, filename: selectedFiles?.[index]?.name ?? String(index + 1).padStart(3, "0") + ".mp4",
+    size_bytes: selectedFiles?.[index]?.size ?? 0, status: effectiveUploadState, source_url: "", ark_file_id: "", ark_file_status: "", ark_file_error: "", created_at: "",
+  })), [episodes, sourceEpisodeCount, selectedFiles, effectiveUploadState]);
+  const sourcePageSize = 10;
+  const pagedEpisodes = sourceEpisodeRows.slice(sourcePage * sourcePageSize, (sourcePage + 1) * sourcePageSize);
 
   function pickDefaultEpisodeId(items: Episode[], currentId: string | null) {
     if (currentId && items.some((episode) => episode.id === currentId)) return currentId;
@@ -749,13 +1055,25 @@ export function App() {
   }
 
   async function loadProjects() {
-    const data = await request<{ projects: Project[] }>("/api/projects");
-    setProjects(data.projects);
+    setProjectsLoading(true);
+    setProjectsError("");
+    try {
+      const data = await request<{ projects: Project[] }>("/api/projects");
+      setProjects(data.projects);
+      setProjectPage(0);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "项目列表加载失败";
+      setProjectsError(detail);
+      throw error;
+    } finally {
+      setProjectsLoading(false);
+    }
   }
 
   async function selectProject(projectId: string) {
     const data = await request<{ project: Project; episodes: Episode[] }>(`/api/projects/${projectId}`);
     const defaultEpisodeId = pickDefaultEpisodeId(data.episodes, selectedEpisodeId);
+    setSourcePage(0);
     setCurrentProject(data.project);
     setTargetCountry(data.project.target_country);
     const savedLanguage = data.project.target_language || "英语";
@@ -844,6 +1162,12 @@ export function App() {
     const params = epId ? `?episode_id=${epId}` : "";
     const data = await request<{ storyboards: Storyboard[] }>(`/api/projects/${projectId}/storyboards${params}`);
     setStoryboards(data.storyboards);
+    data.storyboards.forEach((storyboard) => {
+      const body = storyboard.payload?.["使用回退占位"] === true ? "" : String(
+        storyboard.payload?.["分镜生成正文"] ?? storyboard.payload?.["源分镜文本"] ?? storyboard.prompt ?? ""
+      );
+      storyboardSavedBodies.current.set(storyboard.id, body);
+    });
   }
 
   async function loadGenerations(projectId = currentProject?.id) {
@@ -1184,7 +1508,7 @@ export function App() {
     setBusy(true);
     try {
       if (selectedStoryboard && promptInputRef.current) {
-        const saved = await savePrompt(selectedStoryboard, promptInputRef.current.value);
+        const saved = await savePrompt(selectedStoryboard, readPromptEditor(promptInputRef.current));
         if (!saved) {
           setMessage("分镜正文尚未保存；草稿仍保留，可重试保存后再生成");
           return;
@@ -1239,12 +1563,15 @@ export function App() {
 
   async function generateAssetImage(asset: Asset, finalPrompt: string) {
     if (!currentProject) return;
-    setBusy(true);
-    setGeneratingAssetId(asset.id);
+    if (generatingAssetIdsRef.current.has(asset.id) || !finalPrompt.trim()) return;
+    const started = new Set(generatingAssetIdsRef.current);
+    started.add(asset.id);
+    generatingAssetIdsRef.current = started;
+    setGeneratingAssetIds(started);
     try {
       const canonicalPrompt = await saveAssetPrompt(asset, finalPrompt);
-      if (canonicalPrompt.startsWith("目标画像待本地化；") || canonicalPrompt.startsWith("目标画像需本地化；")) {
-        throw new Error("目标画像待本地化，当前不能把状态提示作为生图提示词发送。");
+      if (!canonicalPrompt.trim()) {
+        throw new Error("资产提示词不能为空。");
       }
       await request(`/api/projects/${currentProject.id}/assets/${asset.id}/generate-image`, {
         method: "POST",
@@ -1254,8 +1581,10 @@ export function App() {
       setMessage("资产图已生成");
       await loadAssets(currentProject.id);
     } finally {
-      setGeneratingAssetId(null);
-      setBusy(false);
+      const finished = new Set(generatingAssetIdsRef.current);
+      finished.delete(asset.id);
+      generatingAssetIdsRef.current = finished;
+      setGeneratingAssetIds(finished);
     }
   }
 
@@ -1323,6 +1652,8 @@ export function App() {
 
   async function savePrompt(storyboard: Storyboard, prompt: string): Promise<boolean> {
     if (!currentProject) return false;
+    const inFlight = storyboardPromptSaveRequests.current.get(storyboard.id);
+    if (inFlight?.prompt === prompt) return inFlight.promise;
     const projectId = currentProject.id;
     const revision = storyboardSaveRevisions.current.get(storyboard.id) ?? 0;
     setStoryboardSaveStates((states) => ({ ...states, [storyboard.id]: "saving" }));
@@ -1332,6 +1663,7 @@ export function App() {
         { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generatedBody: prompt }) }
       );
       if (storyboardSaveRevisions.current.get(storyboard.id) === revision) {
+        storyboardSavedBodies.current.set(storyboard.id, prompt);
         setStoryboards((items) => items.map((item) => {
           if (item.id !== storyboard.id) return item;
           const localPayload = item.payload ?? {};
@@ -1349,22 +1681,108 @@ export function App() {
       }
     });
     storyboardPatchQueue.current = queueTask;
-    try {
+    const saveRequest = (async () => {
+      try {
       await queueTask;
       return true;
-    } catch (error) {
+      } catch (error) {
       setMessage(`提示词保存失败，当前编辑保留：${error instanceof Error ? error.message : "请重试"}`);
       if (storyboardSaveRevisions.current.get(storyboard.id) === revision) {
         setStoryboardSaveStates((states) => ({ ...states, [storyboard.id]: "failed" }));
       }
       return false;
+      }
+    })();
+    storyboardPromptSaveRequests.current.set(storyboard.id, { prompt, promise: saveRequest });
+    const saved = await saveRequest;
+    if (storyboardPromptSaveRequests.current.get(storyboard.id)?.promise === saveRequest) {
+      storyboardPromptSaveRequests.current.delete(storyboard.id);
     }
+    return saved;
+  }
+
+  async function selectStoryboardWithSave(nextStoryboard: Storyboard) {
+    if (nextStoryboard.id === selectedStoryboard?.id) return;
+    if (selectedStoryboard) {
+      const draft = promptInputRef.current ? readPromptEditor(promptInputRef.current) : selectedStoryboardPrompt;
+      const savedBody = storyboardSavedBodies.current.get(selectedStoryboard.id);
+      const saveState = storyboardSaveStates[selectedStoryboard.id] ?? "saved";
+      if (draft !== savedBody || saveState === "failed" || storyboardPromptSaveRequests.current.has(selectedStoryboard.id)) {
+        const saved = await savePrompt(selectedStoryboard, draft);
+        if (!saved) {
+          setMessage("当前分镜正文保存失败；草稿仍保留，已取消切换。请重试保存后再切换。");
+          return;
+        }
+      }
+      if (storyboardReferenceDrafts.current.has(selectedStoryboard.id)) {
+        const referencesSaved = await saveStoryboardReferenceOverrides(selectedStoryboard, getLatestStoryboardReferenceTokens(selectedStoryboard));
+        if (!referencesSaved) {
+          setMessage("当前分镜资产引用保存失败；草稿仍保留，已取消切换。请重试后再切换。");
+          return;
+        }
+      }
+    }
+    setSelectedStoryboardId(nextStoryboard.id);
+    setStoryboardMenuOpen(false);
+    setSegmentPanel("shot-prompt");
+  }
+
+  async function copyStoryboardPrompt() {
+    if (!selectedStoryboard || !promptInputRef.current) return;
+    try {
+      await navigator.clipboard.writeText(readPromptEditor(promptInputRef.current));
+      setMessage("已复制当前分镜正文");
+    } catch {
+      promptInputRef.current.focus();
+      const range = document.createRange();
+      range.selectNodeContents(promptInputRef.current);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(range);
+      setMessage("浏览器不允许自动复制，正文已选中，请按 Ctrl+C 复制");
+    }
+  }
+
+  function handlePromptCopy(event: ReactClipboardEvent<HTMLDivElement>) {
+    const text = promptSelectedText(event.currentTarget);
+    if (!text) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", text);
+    event.clipboardData.setData("text/html", text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>"));
+  }
+
+  function handlePromptPaste(event: ReactClipboardEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    if (!text) return;
+    const editor = event.currentTarget;
+    editor.focus();
+    if (!document.execCommand("insertText", false, text)) {
+      const selection = window.getSelection();
+      if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
+        const range = selection.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(document.createTextNode(text));
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    const value = readPromptEditor(editor);
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    updateStoryboardPromptText(value);
+    if (!promptCompositionActive.current) updatePromptMention(value, promptSelectionOffset(editor) ?? value.length);
+  }
+
+  async function selectAdjacentStoryboard(direction: -1 | 1) {
+    const index = storyboards.findIndex((item) => item.id === selectedStoryboard?.id);
+    const next = storyboards[index + direction];
+    if (next) await selectStoryboardWithSave(next);
   }
 
   async function saveStoryboardReferenceOverrides(storyboard: Storyboard, references: string[]) {
     if (!currentProject) return false;
     const projectId = currentProject.id;
-    const normalizedReferences = Array.from(new Set(references.filter(Boolean)));
+    const normalizedReferences = canonicalizeAssetReferences(references.filter(Boolean), assets);
     storyboardReferenceDrafts.current.set(storyboard.id, { projectId, references: normalizedReferences });
     const revision = (storyboardReferenceRevision.current.get(storyboard.id) ?? 0) + 1;
     storyboardReferenceRevision.current.set(storyboard.id, revision);
@@ -1386,6 +1804,7 @@ export function App() {
             ? { ...data.storyboard, payload: { ...data.storyboard.payload, "分镜生成正文": localBody } }
             : data.storyboard;
         }));
+        storyboardReferenceDrafts.current.delete(storyboard.id);
       }
     });
     storyboardPatchQueue.current = queueTask;
@@ -1464,10 +1883,9 @@ export function App() {
 
   async function toggleStoryboardAsset(asset: Asset) {
     if (!selectedStoryboard) return;
-    const aliases = new Set([asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)]);
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    const wasReferenced = currentReferences.some((item) => aliases.has(item));
-    const nextRefs = currentReferences.filter((item) => !aliases.has(item));
+    const wasReferenced = currentReferences.some((item) => resolveUniqueAssetReference(item, assets)?.id === asset.id);
+    const nextRefs = currentReferences.filter((item) => resolveUniqueAssetReference(item, assets)?.id !== asset.id);
     if (!wasReferenced) nextRefs.push(asset.variable || assetDisplayVariable(asset));
     if (!await saveStoryboardReferenceOverrides(selectedStoryboard, nextRefs)) return;
     if (wasReferenced) setMessage(`已移除引用 ${assetDisplayName(asset)}`);
@@ -1476,9 +1894,11 @@ export function App() {
 
   async function removeStoryboardReference(token: string, asset?: Asset) {
     if (!selectedStoryboard) return;
-    const aliases = asset ? new Set([asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)]) : new Set([token]);
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, currentReferences.filter((item) => !aliases.has(item)))) return;
+    const nextReferences = asset
+      ? currentReferences.filter((item) => resolveUniqueAssetReference(item, assets)?.id !== asset.id)
+      : currentReferences.filter((item) => item !== token);
+    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, nextReferences)) return;
     setMessage(`已移除引用 ${asset ? assetDisplayName(asset) : token}`);
   }
 
@@ -1551,14 +1971,11 @@ export function App() {
       : item));
   }
 
-  function handlePromptInput(event: ChangeEvent<HTMLTextAreaElement>) {
-    const value = event.target.value;
-    const caret = event.target.selectionStart ?? value.length;
-    updateStoryboardPromptText(value);
-    const at = value.lastIndexOf("@", caret - 1);
+  function updatePromptMention(value: string, caret: number) {
+    const at = value.lastIndexOf("@", Math.max(0, caret - 1));
     const query = at >= 0 ? value.slice(at + 1, caret) : "";
     const prefix = at > 0 ? value[at - 1] : "";
-    if (at >= 0 && !/[A-Za-z0-9_\u4e00-\u9fa5@]/.test(prefix) && /^[A-Za-z0-9_\u4e00-\u9fa5-]*$/.test(query)) {
+    if (at >= 0 && !/[\p{L}\p{N}_@]/u.test(prefix) && /^[\p{L}\p{N}_-]*$/u.test(query)) {
       setMentionQuery(query);
       setMentionRange({ start: at, end: caret });
     } else {
@@ -1567,45 +1984,100 @@ export function App() {
     }
   }
 
+  function handlePromptInput(event: FormEvent<HTMLDivElement>) {
+    const editor = event.currentTarget;
+    const value = readPromptEditor(editor);
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    updateStoryboardPromptText(value);
+    if (promptCompositionActive.current || (event.nativeEvent as InputEvent).isComposing) return;
+    const caret = promptSelectionOffset(editor) ?? value.length;
+    updatePromptMention(value, caret);
+  }
+
+  function handlePromptCompositionEnd() {
+    promptCompositionActive.current = false;
+    const editor = promptInputRef.current;
+    if (!editor) return;
+    const value = readPromptEditor(editor);
+    const caret = promptSelectionOffset(editor) ?? value.length;
+    renderPromptEditor(editor, value, assets, openImage);
+    const point = promptDomPoint(editor, caret);
+    const range = document.createRange();
+    range.setStart(point.node, point.offset);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    updateStoryboardPromptText(value);
+    updatePromptMention(value, caret);
+  }
+
   function insertMention(asset: Asset) {
     if (!selectedStoryboard || mentionQuery === null || !mentionRange) return;
-    const value = promptInputRef.current?.value ?? selectedStoryboardPrompt;
-    const nextValue = `${value.slice(0, mentionRange.start)}${assetDisplayVariable(asset)} ${value.slice(mentionRange.end)}`;
+    const value = promptInputRef.current ? readPromptEditor(promptInputRef.current) : selectedStoryboardPrompt;
+    const stableToken = asset.variable || asset.id;
+    if (promptInputRef.current) insertPromptToken(promptInputRef.current, mentionRange.start, mentionRange.end, stableToken, assets, openImage);
+    if (promptInputRef.current) {
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+      if (range) {
+        const space = document.createTextNode(" ");
+        range.insertNode(space);
+        range.setStartAfter(space);
+        range.collapse(true);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    }
+    const nextValue = promptInputRef.current ? readPromptEditor(promptInputRef.current) : `${value.slice(0, mentionRange.start)}${stableToken} ${value.slice(mentionRange.end)}`;
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: nextValue, assets };
     updateStoryboardPromptText(nextValue);
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    const aliases = [asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)];
-    if (!currentReferences.some((item) => aliases.includes(item))) {
-      void saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, asset.variable || assetDisplayVariable(asset)]);
+    if (!currentReferences.some((item) => resolveUniqueAssetReference(item, assets)?.id === asset.id)) {
+      void saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, stableToken]);
     }
     setMentionQuery(null);
     setMentionRange(null);
-    window.setTimeout(() => {
-      promptInputRef.current?.focus();
-      const nextCaret = mentionRange.start + assetDisplayVariable(asset).length + 1;
-      promptInputRef.current?.setSelectionRange(nextCaret, nextCaret);
-    }, 0);
+    promptInputRef.current?.focus();
   }
 
-  function handlePromptMentionKeys(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
-    if (mentionQuery === null) return;
-    if (event.key === "Escape") {
+  function handlePromptMentionKeys(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (promptCompositionActive.current || event.nativeEvent.isComposing) return;
+    if (mentionQuery !== null && event.key === "Escape") {
       event.preventDefault();
       setMentionQuery(null);
       setMentionRange(null);
-    } else if (event.key === "ArrowDown" && mentionOptions.length) {
+      return;
+    } else if (mentionQuery !== null && event.key === "ArrowDown" && mentionOptions.length) {
       event.preventDefault();
       setActiveMentionIndex((index) => (index + 1) % mentionOptions.length);
-    } else if (event.key === "ArrowUp" && mentionOptions.length) {
+      return;
+    } else if (mentionQuery !== null && event.key === "ArrowUp" && mentionOptions.length) {
       event.preventDefault();
       setActiveMentionIndex((index) => (index - 1 + mentionOptions.length) % mentionOptions.length);
-    } else if (event.key === "Enter" && mentionOptions.length) {
+      return;
+    } else if (mentionQuery !== null && event.key === "Enter" && mentionOptions.length) {
       event.preventDefault();
       insertMention(mentionOptions[activeMentionIndex] ?? mentionOptions[0]);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const editor = promptInputRef.current;
+      const selection = window.getSelection();
+      if (!editor || !selection?.rangeCount || !editor.contains(selection.anchorNode)) return;
+      document.execCommand("insertText", false, "\n");
+      const value = readPromptEditor(editor);
+      if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+      updateStoryboardPromptText(value);
+      setMentionQuery(null);
+      setMentionRange(null);
     }
   }
 
   useEffect(() => {
-    loadProjects().catch((error) => setMessage(error.message));
+    void loadProjects().catch(() => undefined);
   }, []);
   useEffect(() => {
     if (modal !== "image-view-modal") return;
@@ -1638,6 +2110,22 @@ export function App() {
       setSelectedAssetId(assets[0].id);
     }
   }, [assets, selectedAssetId]);
+
+  const hasAssetGenerationInProgress = assets.some((asset) => asset.payload?.generationInProgress === true);
+  useEffect(() => {
+    if (!currentProject || !hasAssetGenerationInProgress) return;
+    let active = true;
+    const refresh = () => {
+      void request<{ assets: Asset[] }>(`/api/projects/${currentProject.id}/assets`)
+        .then((data) => { if (active) setAssets(data.assets); })
+        .catch((error) => { if (active) setMessage(error.message); });
+    };
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [currentProject?.id, hasAssetGenerationInProgress]);
 
   useEffect(() => {
     setAssetPromptDraft(selectedAsset ? assetPrompt(selectedAsset) : "");
@@ -1687,7 +2175,13 @@ export function App() {
     ? selectedAssetOriginalImage
     : selectedAssetGeneratedImage;
   const selectedImageVersion = selectedAssetImage(selectedAsset);
-  const isGeneratingSelectedAsset = Boolean(selectedAsset && generatingAssetId === selectedAsset.id);
+  const isGeneratingSelectedAsset = Boolean(selectedAsset && (generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true));
+  const messageIsError = /(失败|错误|冲突|无法|不可|请重试|未保存)/.test(message);
+  useEffect(() => {
+    if (!message || messageIsError) return;
+    const timer = window.setTimeout(() => setMessage(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [message, messageIsError]);
 
   return (
     <>
@@ -1714,6 +2208,7 @@ export function App() {
         </nav>
       </header>
 
+      {message && message !== "准备就绪" && !modal && <div className={messageIsError ? "global-message error" : "global-message"} role={messageIsError ? "alert" : "status"} aria-live="polite"><span>{message}</span><button type="button" aria-label="关闭提示" onClick={() => setMessage("")}>×</button></div>}
       <main>
         <section className={screen === "home" ? "screen active home-screen" : "screen home-screen"} id="home">
           <div className="upload-card">
@@ -1785,8 +2280,10 @@ export function App() {
               <div><h2>项目管理</h2><span>过往重绘项目</span></div>
               <div className="library-actions"><button className="ghost" onClick={createProject}>新建项目</button><button className="ghost" onClick={() => currentProject && selectProject(currentProject.id)}>刷新当前项目</button></div>
             </div>
+            <div className="project-library-tools"><input type="search" value={projectSearch} placeholder="搜索项目名称或地区" onChange={(event) => { setProjectSearch(event.target.value); setProjectPage(0); }} aria-label="搜索项目" /><span>{projectsLoading ? "正在加载项目…" : projectsError ? "项目列表加载失败" : "共 " + searchedProjects.length + " 个项目"}</span></div>
+            {projectsError && <div className="project-load-error" role="alert"><span>项目列表暂时不可用：{projectsError}</span><button className="ghost" onClick={() => void loadProjects().catch(() => undefined)}>重试</button></div>}
             <div className="project-grid">
-              {projects.slice(0, 4).map((project, index) => (
+              {pagedProjects.map((project, index) => (
                 <article className="project-card" key={project.id} onClick={() => {
                   void selectProject(project.id);
                   setScreen("source");
@@ -1796,11 +2293,13 @@ export function App() {
                   <span>{project.status}</span>
                   <span className="project-mode-tag">{project.remake_mode === "cg_3d" ? "3DCG 风格" : project.remake_mode === "asset_replacement" ? "替换角色/场景" : "海外本土化"}</span>
                     <b>{project.title}</b>
-                  <small>{project.remake_mode === "overseas_localization" ? `${project.target_country} · ${project.target_language}` : `源语言：${project.source_language || "待确认"}`} · {project.id}</small>
+                  <small>{project.remake_mode === "overseas_localization" ? `${project.target_country} · ${project.target_language}` : `源语言：${project.source_language || "待确认"}`}</small>
                   </div>
                 </article>
               ))}
             </div>
+            {!projectsLoading && !projectsError && !pagedProjects.length && <p className="project-empty">{projects.length ? "没有匹配的项目，请调整搜索词。" : "还没有项目，创建项目或上传视频开始制作。"}</p>}
+            {!projectsError && searchedProjects.length > projectPageSize && <div className="list-pagination"><button className="ghost" disabled={projectPage === 0} onClick={() => setProjectPage((page) => Math.max(0, page - 1))}>上一页</button><span>{projectPage + 1} / {Math.ceil(searchedProjects.length / projectPageSize)}</span><button className="ghost" disabled={(projectPage + 1) * projectPageSize >= searchedProjects.length} onClick={() => setProjectPage((page) => page + 1)}>下一页</button></div>}
           </section>
         </section>
 
@@ -1816,29 +2315,19 @@ export function App() {
             <table>
               <thead><tr><th>剧集信息</th><th>时长</th><th>大小</th><th>状态</th><th>操作</th></tr></thead>
               <tbody>
-                {(episodes.length ? episodes : Array.from({ length: Math.min(sourceEpisodeCount, 7) }).map((_, index) => ({
-                  id: `pending-${index}`,
-                  episode_index: index + 1,
-                  filename: selectedFiles?.[index]?.name ?? `${String(index + 1).padStart(3, "0")}.mp4`,
-                  size_bytes: selectedFiles?.[index]?.size ?? 0,
-                  status: effectiveUploadState,
-                  source_url: "",
-                  ark_file_id: "",
-                  ark_file_status: "",
-                  ark_file_error: "",
-                  created_at: "",
-                }))).slice(0, 20).map((episode) => (
-                  <tr key={episode.id}>
-                    <td><b>第 {episode.episode_index} 集</b><span>{episode.filename}</span></td>
+                {pagedEpisodes.map((episode) => (
+                  <tr key={episode.id} className={episode.id === selectedEpisodeId ? "selected" : ""} onClick={() => { if (!episode.id.startsWith("pending-")) setSelectedEpisodeId(episode.id); }}>
+                    <td><button type="button" className="episode-select" aria-pressed={episode.id === selectedEpisodeId} disabled={episode.id.startsWith("pending-")}><b>第 {episode.episode_index} 集</b><span>{episode.filename}</span></button></td>
                     <td>--:--</td>
                     <td>{formatBytes(episode.size_bytes)}</td>
-                    <td><i className={`dot ${episode.ark_file_id || episode.status.includes("已上传") ? "green" : effectiveUploadState === "failed" ? "red" : "blue"}`}></i><span>{episode.ark_file_id || episode.status.includes("已上传") ? "上传成功" : effectiveUploadState === "uploading" ? "上传中" : effectiveUploadState === "failed" ? "上传失败" : "等待上传"}</span></td>
+                    <td><span className="episode-status"><i className={`dot ${episode.ark_file_id || episode.status.includes("已上传") ? "green" : effectiveUploadState === "failed" ? "red" : "blue"}`}></i>{episode.ark_file_id || episode.status.includes("已上传") ? "上传成功" : effectiveUploadState === "uploading" ? "上传中" : effectiveUploadState === "failed" ? "上传失败" : "等待上传"}</span></td>
                     <td>{episode.id.startsWith("pending") ? <span>待上传</span> : <a onClick={() => syncArkFile(episode.id)}>同步 Ark</a>}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {sourceEpisodeRows.length > sourcePageSize && <div className="list-pagination"><button className="ghost" disabled={sourcePage === 0} onClick={() => setSourcePage((page) => Math.max(0, page - 1))}>上一页</button><span>第 {sourcePage * sourcePageSize + 1}–{Math.min(sourceEpisodeRows.length, (sourcePage + 1) * sourcePageSize)} 集 / 共 {sourceEpisodeRows.length} 集</span><button className="ghost" disabled={(sourcePage + 1) * sourcePageSize >= sourceEpisodeRows.length} onClick={() => setSourcePage((page) => page + 1)}>下一页</button></div>}
           {effectiveUploadState === "uploaded" && (
             <section className="analysis-choice source-analysis-choice">
               <div>
@@ -1846,8 +2335,8 @@ export function App() {
                 <span>本地视频将通过抽帧与视觉理解进行普通分析。</span>
               </div>
               <div className="analysis-actions">
-                <button className="primary" disabled={!selectedEpisodeId} onClick={() => selectedEpisodeId ? startAnalysis("normal") : setMessage("后台项目当前是演示链路；真实分析需要先上传一个本地视频生成剧集记录")}>分析当前集</button>
-                <button className="primary" disabled={!episodes.length} onClick={() => startSeriesAnalysis("normal")}>分析全部剧集</button>
+                <button className="primary" disabled={!selectedEpisodeId} onClick={() => selectedEpisodeId ? startAnalysis("normal") : setMessage("请先选择要分析的剧集")}>{selectedEpisode ? "分析第 " + selectedEpisode.episode_index + " 集" : "分析当前集"}</button>
+                <button className="ghost" disabled={!episodes.length} onClick={() => startSeriesAnalysis("normal")}>分析全部剧集</button>
               </div>
             </section>
           )}
@@ -1867,6 +2356,13 @@ export function App() {
                   <button className="ghost" onClick={() => setScreen("source")}>返回上传页</button>
                   <button className="primary" onClick={() => startAnalysis("normal")}>重试分析</button>
                 </div>
+              </>
+            ) : analysisDone ? (
+              <>
+                <div className="analysis-complete-icon">✓</div>
+                <h1>分析完成</h1>
+                <p>{activeAnalysisTask?.message || "分析结果已保存，可以继续审核资产并进入分镜。"}{analysisIsDegraded && <small className="analysis-elapsed">部分内容使用回退结果</small>}</p>
+                <div className="analysis-failed-actions"><button className="ghost" onClick={() => setScreen("source")}>返回原片</button><button className="primary" onClick={() => setScreen("assets")}>查看资产</button></div>
               </>
             ) : (
               <>
@@ -1919,13 +2415,14 @@ export function App() {
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
                 <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
-                <div><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
+                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
               </div>
               {assetTab === "资产进度" ? (
                 <div className="sub-panel simple-panel active">
                   <div className="metric"><b>待确认</b><span>{assets.filter((asset) => asset.status !== "已确认").length} 个资产</span></div>
                   <div className="metric"><b>已确认</b><span>{assets.filter((asset) => asset.status === "已确认").length} 个子资产</span></div>
-                  <div className="review-rule">确认资产后，可在分镜中检查并引用；未完成的目标资产会保留待确认状态。</div>
+                  <div className="review-rule">选择一项待确认资产可直接进入审核；确认资产后，可在分镜中检查并引用。</div>
+                  <div className="progress-action-list">{assetGroups.filter((group) => group.items.some((item) => item.status !== "已确认")).slice(0, 16).map((group) => { const pending = group.items.find((item) => item.status !== "已确认") ?? group.items[0]; return <button type="button" key={group.key} onClick={() => { setSelectedAssetId(pending.id); setAssetView("detail"); }}><span>{group.type} · {group.localizedName || group.name}</span><b>{group.items.filter((item) => item.status !== "已确认").length} 项待确认 →</b></button>; })}{!assetGroups.some((group) => group.items.some((item) => item.status !== "已确认")) && <p>当前资产已全部确认。</p>}</div>
                 </div>
               ) : (
                 <div className="asset-grid overview-grid">
@@ -2017,11 +2514,15 @@ export function App() {
                       ) : (
                         <div className={`asset-placeholder ${assetThumbClass(selectedAsset)}`}>目标资产图</div>
                       )}
-                      <b>{selectedAsset?.payload?.effectiveAssetSource === "source" ? "当前沿用原片资产" : "当前目标资产"}</b>
-                      <span>{selectedAsset?.payload?.effectiveAssetSource === "source"
+                      <b>{selectedAsset?.payload?.effectiveAssetSource === "source" ? "当前沿用原片资产" : selectedAsset?.payload?.effectiveAssetSource === "target_draft" ? "目标画像草稿 · 待审核" : "当前目标资产"}</b>
+                      <span>{selectedAsset?.payload?.effectiveAssetSource === "target_draft"
+                        ? selectedImageVersion?.payload?.source === "user_upload" ? "用户上传图已选 · 画像草稿仍待审核" : selectedAssetGeneratedImage ? "已选目标图 · 画像草稿仍待审核" : "原片图仅作源观察 · 尚无目标图"
+                        : selectedAsset?.payload?.effectiveAssetSource === "source"
                         ? (selectedAssetCurrentImage ? "原片资产图 · 当前生效" : "缺少原片资产图")
                         : selectedImageVersion?.payload?.source === "user_upload" ? "用户上传 · 当前采用图" : selectedAssetGeneratedImage ? "当前采用图决定目标外观" : "缺少已确认目标图 · 替换未就绪"}</span>
-                      <p>{selectedAsset?.payload?.effectiveAssetSource === "source"
+                      <p>{selectedAsset?.payload?.effectiveAssetSource === "target_draft"
+                        ? `目标画像尚有源事实待核对；草稿可供编辑，不把原片身份图当作目标图：${selectedAsset?.payload?.当前有效外观描述 || "目标描述待补充"}`
+                        : selectedAsset?.payload?.effectiveAssetSource === "source"
                         ? (selectedAsset?.payload?.当前有效资产就绪 === false
                           ? `原片资产未就绪：缺少原片图或原片描述。${selectedAsset.payload?.当前有效外观描述 || ""}`
                           : `已关联原分镜，当前沿用原片外观：${selectedAsset.payload?.当前有效外观描述 || "原片描述未留存"}`)
@@ -2071,23 +2572,23 @@ export function App() {
                       </div>
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
                         <div className="asset-profile-pending" role="status">
-                          目标脸部本地化已完成；自动提示词暂被以下源事实锁定：{(() => {
+                          源视觉字段仍有待核对：{(() => {
                             const profile = selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined;
                             const paths = (profile?.sourceReviewPaths as string[] | undefined) || (profile?.needsReview as string[] | undefined) || [];
                             return paths.join("、") || "源视觉字段";
-                          })()}。可先核对源事实，或填写完整、自包含的人工提示词。
+                          })()}。这不会阻止生成，可直接按当前提示词生成或先编辑提示词。
                         </div>
                       )}
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && assetPromptDraft.includes("源事实待核对") && (
                         <div className="asset-profile-pending" role="alert">
-                          提示词里仍带着【源事实待核对：自动生图已锁定】标记段。请把该标记段整段删除，并在提示词中直接写清上述字段的具体内容（例如鞋子的款式与颜色），再点击生成。
+                          提示词保留了源事实状态说明；这不会阻止生成，可直接按当前提示词生成。
                         </div>
                       )}
                       {selectedAsset.payload?.["目标画像状态"] === "待本地化" && (
                         <div className="asset-profile-pending" role="status">
                           {((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.needsReview)
-                            ? `群像待人工确认：${String((selectedAsset.payload?.localizedProfile as Record<string, unknown> | undefined)?.reviewReason || "保留原片群像信息，不生成单人脸部设定。")}`
-                            : "目标画像需本地化；旧共享描述不能作为目标提示词。"}
+                            ? "群像不套用单人脸部画像；当前提示词已按源观察编译，可直接生成。"
+                            : "目标画像仍待本地化；可编辑当前资产提示词，输入内容后即可生成。"}
                         </div>
                       )}
                       <textarea value={assetPromptDraft} onChange={(event) => {
@@ -2096,7 +2597,7 @@ export function App() {
                       }} onBlur={() => saveAssetPrompt(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} placeholder="当前资产未返回提示词" disabled={busy} />
                       <div className="agent-prompt-footer">
                         <div className="agent-model-note">按当前后端模型配置生成</div>
-                      <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={busy || selectedAsset.payload?.effectiveAssetSource === "source" || ((selectedAsset.payload?.["目标画像状态"] === "待源事实核对" || selectedAsset.payload?.["目标画像状态"] === "待本地化") && !assetPromptDraft.trim()) || (selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && assetPromptDraft === String(selectedAsset.payload?.["自动编译资产图生成提示词"] || ""))}>生成</button>
+                      <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true || !assetPromptDraft.trim()}>生成</button>
                       </div>
                     </div>
                   </div>
@@ -2112,6 +2613,8 @@ export function App() {
         </section>
 
         <section ref={workbenchRef} style={workbenchStyle} className={`screen workbench${screen === "segments" ? " active" : ""}${assetSidebarCollapsed ? " assets-collapsed" : ""}${previewPanelCollapsed ? " preview-collapsed" : ""}`} id="segments">
+          {assetSidebarCollapsed && <button type="button" className="pane-edge-toggle asset-edge-toggle" onClick={() => setAssetSidebarCollapsed(false)}>展开资产库</button>}
+          {previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(false)}>展开原片</button>}
           <section className={`asset-sidebar${assetSidebarCollapsed ? " folded" : ""}`}>
             <div className="storyboard-asset-controls">
               <details className="episode-select">
@@ -2135,9 +2638,7 @@ export function App() {
             <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
               {storyboardFilteredAssets.map((asset) => {
                 const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
-                const refs = splitAssetVariableValues(selectedStoryboard?.payload?.["引用资产变量"]);
-                const aliases = [asset.variable, assetDisplayVariable(asset), assetDisplayName(asset)];
-                const isReferenced = aliases.some((alias) => refs.includes(alias)) || selectedStoryboardAssets.some((item) => item.id === asset.id);
+                const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
                 return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
                   {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
                 </button>;
@@ -2147,7 +2648,12 @@ export function App() {
           </section>
           <button type="button" className="workbench-splitter asset-pane-splitter" role="separator" aria-label="调整资产栏宽度" aria-orientation="vertical" aria-valuemin={230} aria-valuemax={getWorkbenchPaneMaxWidth("assets")} aria-valuenow={assetPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("assets", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("assets", event)} />
           <section className="shot-main">
-            <div className="shot-head"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2><div className="shot-actions"><button className="ghost small" onClick={() => setAssetSidebarCollapsed((value) => !value)}>{assetSidebarCollapsed ? "显示资产库" : "收起资产库"}</button><button className="ghost small" onClick={() => setPreviewPanelCollapsed((value) => !value)}>{previewPanelCollapsed ? "显示预览" : "收起预览"}</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && renameStoryboard(selectedStoryboard)}>编辑</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && createStoryboard(selectedStoryboard)}>复制</button><button className="primary small" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true} onClick={runVideoGeneration}>生成模拟任务</button></div></div>
+            {!assetSidebarCollapsed && <button type="button" className="pane-edge-toggle asset-edge-toggle" onClick={() => setAssetSidebarCollapsed(true)}>‹ 收起资产库</button>}
+            {!previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(true)}>收起原片 ›</button>}
+            <div className="shot-head">
+              <div className="storyboard-heading"><div className="storyboard-stepper"><button className="ghost small" disabled={!selectedStoryboard || storyboards.findIndex((item) => item.id === selectedStoryboard.id) <= 0} onClick={() => void selectAdjacentStoryboard(-1)}>上一镜</button><span>{selectedStoryboard ? `${storyboards.findIndex((item) => item.id === selectedStoryboard.id) + 1} / ${storyboards.length}` : `0 / ${storyboards.length}`}</span><button className="ghost small" disabled={!selectedStoryboard || storyboards.findIndex((item) => item.id === selectedStoryboard.id) >= storyboards.length - 1} onClick={() => void selectAdjacentStoryboard(1)}>下一镜</button></div><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2></div>
+              <div className="shot-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => void copyStoryboardPrompt()}>复制提示词</button><div className="storyboard-more-wrap"><button className="ghost small" aria-haspopup="menu" aria-expanded={storyboardMenuOpen} onClick={() => setStoryboardMenuOpen((open) => !open)}>更多 ▾</button>{storyboardMenuOpen && <div className="storyboard-more-menu" role="menu"><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void renameStoryboard(selectedStoryboard); }}>编辑名称与时间</button><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void createStoryboard(selectedStoryboard); }}>复制分镜</button><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void deleteStoryboard(selectedStoryboard); }}>删除分镜</button></div>}</div><button className="primary small" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true || storyboardHasUnresolvedReferences} title={storyboardHasUnresolvedReferences ? "请先完成资产引用核对" : undefined} onClick={runVideoGeneration}>生成模拟任务</button></div>
+            </div>
             {segmentPanel === "shot-prompt" && !selectedStoryboard && (
               storyboardLoading ? (
                 <div className="shot-empty sub-panel active">
@@ -2169,8 +2675,16 @@ export function App() {
                     <div><strong>{selectedStoryboard.analysis_state ?? "待分析"}</strong><span>{selectedStoryboard.analysis_message ?? "当前分镜没有真实逐镜分析结果；占位内容不会作为提示词或视频生成输入。"}</span></div>
                     <button className="ghost small" disabled={busy} onClick={() => void enterStoryboards(true)}>重新分析当前视频</button>
                   </div>}
-                  <div className="tool-row"><button onClick={() => setSegmentPanel("shot-assets")}>引用</button><span className={`storyboard-save-state ${storyboardSaveState}`}>{storyboardSaveState === "saved" ? "分镜正文已保存" : storyboardSaveState === "saving" ? "正在保存分镜正文…" : "保存失败，草稿已保留"}</span>{storyboardSaveState === "failed" && <button className="ghost small" onClick={() => selectedStoryboard && promptInputRef.current && void savePrompt(selectedStoryboard, promptInputRef.current.value)}>重试保存</button>}<span>仅编辑正文；项目语言与画面约束仍由系统编译。</span></div>
-                  <div className="storyboard-ref-chips">{selectedStoryboardReferenceItems.map((reference) => {
+                  {storyboardHasUnresolvedReferences && <div className="asset-profile-pending" role="alert">
+                    <strong>资产引用待核对，已阻止生成。</strong>
+                    <span>请在分镜正文中把歧义占位改成唯一资产变量后保存。</span>
+                    <ul>{storyboardReferenceReview.map((item, index) => <li key={`${String(item.token || "reference")}-${index}`}>
+                      <code>{String(item.token || "未知引用")}</code>：{String(item.reason || "无法唯一关联资产")}
+                      {Array.isArray(item.candidateVariables) && item.candidateVariables.length > 0 ? `（候选：${item.candidateVariables.map(String).join("、")}）` : ""}
+                    </li>)}</ul>
+                  </div>}
+                  <div className="tool-row"><button onClick={() => setSegmentPanel("shot-assets")}>引用</button><span className={`storyboard-save-state ${storyboardSaveState}`}>{storyboardSaveState === "saved" ? "分镜正文已保存" : storyboardSaveState === "saving" ? "正在保存分镜正文…" : "保存失败，草稿已保留"}</span>{storyboardSaveState === "failed" && <button className="ghost small" onClick={() => selectedStoryboard && promptInputRef.current && void savePrompt(selectedStoryboard, readPromptEditor(promptInputRef.current))}>重试保存</button>}<span>仅编辑正文；项目语言与画面约束仍由系统编译。</span></div>
+                  <div className={selectedStoryboardReferenceItems.length ? "storyboard-ref-chips" : "storyboard-ref-chips is-empty"}>{selectedStoryboardReferenceItems.map((reference) => {
                     const thumbUrl = reference.asset ? selectedAssetImageUrl(reference.asset) || originalAssetImageUrl(reference.asset) : "";
                     return <button className="storyboard-ref-thumb" key={reference.key} type="button" title={`${reference.label} · 点击移除引用`} aria-label={`移除资产引用：${reference.label}`} onClick={() => void removeStoryboardReference(reference.token, reference.asset)}>
                       <span className="storyboard-ref-thumb-visual">{thumbUrl ? <img key={thumbUrl} src={thumbUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} /> : <span aria-hidden="true">　</span>}</span>
@@ -2178,8 +2692,16 @@ export function App() {
                     </button>;
                   })}{!selectedStoryboardReferenceItems.length && <span>当前分镜尚未关联资产；可从左侧资产库添加。</span>}</div>
                   <div className="prompt-editor-wrap">
-                    <textarea ref={promptInputRef} aria-label="编辑当前分镜正文" disabled={busy} value={selectedStoryboardPrompt} placeholder={selectedStoryboard.payload?.["使用回退占位"] === true ? "请填写可核实的具体镜头事实；保存后即可作为手工分镜使用。" : "输入分镜正文；输入 @ 可插入资产变量"} onChange={handlePromptInput} onKeyDown={handlePromptMentionKeys} onBlur={(event) => {
-                      if (selectedStoryboard) void savePrompt(selectedStoryboard, event.currentTarget.value);
+                    <div ref={promptInputRef} className="prompt-rich-editor" role="textbox" aria-label="编辑当前分镜正文" aria-multiline="true" contentEditable={!busy} suppressContentEditableWarning data-placeholder={selectedStoryboard.payload?.["使用回退占位"] === true ? "请填写可核实的具体镜头事实；保存后即可作为手工分镜使用。" : "输入分镜正文；输入 @ 可插入资产变量"} onInput={handlePromptInput} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCompositionStart={() => { promptCompositionActive.current = true; }} onCompositionEnd={handlePromptCompositionEnd} onKeyDown={handlePromptMentionKeys} onBlur={(event) => {
+                      const value = readPromptEditor(event.currentTarget);
+                      if (selectedStoryboard) {
+                        renderPromptEditor(event.currentTarget, value, assets, openImage);
+                        promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+                      }
+                      if (selectedStoryboard && (
+                        value !== storyboardSavedBodies.current.get(selectedStoryboard.id)
+                        || storyboardSaveStates[selectedStoryboard.id] === "failed"
+                      )) void savePrompt(selectedStoryboard, value);
                       setMentionQuery(null);
                       setMentionRange(null);
                     }} />
@@ -2218,8 +2740,8 @@ export function App() {
           <section className="shot-strip">
             <div className="strip-head"><h3>{storyboards.length ? storyboards.every((item) => item.payload?.["使用回退占位"] === true) ? `${storyboards.length} 个待分析片段` : `${storyboards.length} 个分镜${storyboards.some((item) => item.payload?.["使用回退占位"] === true) ? "（含待分析片段）" : " · 自动切分"}` : "尚无已分析分镜"}</h3><div className="strip-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "up")}>上移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "down")}>下移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && deleteStoryboard(selectedStoryboard)}>删除</button></div></div>
             <div className="thumb-row">
-              {storyboards.map((storyboard) => (
-                <div className="shot-thumb-wrap" key={storyboard.id}><div className={storyboard.id === selectedStoryboard?.id ? "shot-thumb active" : "shot-thumb"} onClick={() => setSelectedStoryboardId(storyboard.id)}><span>{storyboard.title} · {storyboard.time_range}</span><small>{storyboard.status}</small></div><button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button></div>
+              {storyboards.map((storyboard, index) => (
+                <div className="shot-thumb-wrap" key={storyboard.id}><StoryboardFrameThumb storyboard={storyboard} sourceUrl={selectedEpisode?.file_url ? apiAssetUrl(selectedEpisode.file_url) : undefined} selected={storyboard.id === selectedStoryboard?.id} onClick={() => void selectStoryboardWithSave(storyboard)} /><span className="shot-card-index">{index + 1}</span><button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button></div>
               ))}
               <button className="add-shot-card" onClick={() => createStoryboard()}>+ 新增分镜</button>
             </div>
@@ -2227,7 +2749,7 @@ export function App() {
         </section>
 
         <section className={screen === "compare" ? "screen active video-page" : "screen video-page"} id="compare">
-          <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} onMessage={setMessage} />
+          <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} active={screen === "compare"} onMessage={setMessage} />
         </section>
       </main>
 
