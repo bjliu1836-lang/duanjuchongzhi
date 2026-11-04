@@ -1300,6 +1300,32 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
   outline: 2px solid #7f77dd;
 }
 
+.asset-group-overview {
+  margin-bottom: 14px;
+}
+
+.asset-groups-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 12px;
+  color: var(--muted, #777);
+  font-size: 12px;
+}
+
+.asset-groups-divider::before,
+.asset-groups-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border, #dedbd4);
+}
+
+.asset-card-remove {
+  margin-top: 4px;
+  justify-self: start;
+}
+
 .asset-group-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

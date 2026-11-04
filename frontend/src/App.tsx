@@ -20,7 +20,7 @@ type StepScreen = "home" | "assets" | "segments" | "compare";
 type AssetTab = "角色" | "场景" | "道具" | "资产进度";
 type UploadMode = "folder" | "single";
 type ModalName = "upload-confirm-modal" | "image-view-modal" | null;
-type AssetView = "overview" | "detail" | "groups" | "group-detail";
+type AssetView = "overview" | "detail" | "group-detail";
 type SegmentPanel = "shot-prompt" | "shot-assets" | "shot-history";
 type WorkbenchPane = "assets" | "preview";
 
@@ -981,8 +981,9 @@ export function App() {
   }, [assets]);
   const filteredGroups = useMemo(
     () => assetGroups.filter((group) => (assetTab === "资产进度" || group.type === assetTab)
+      && !customAssetGroups.some((customGroup) => customGroup.members.some((member) => member.assetKey === group.key))
       && (assetStatusFilter === "all" || group.items.some((item) => assetStatusFilter === "confirmed" ? item.status === "已确认" : item.status !== "已确认"))),
-    [assetGroups, assetTab, assetStatusFilter]
+    [assetGroups, assetTab, assetStatusFilter, customAssetGroups]
   );
   const searchedProjects = useMemo(() => projects.filter((project) => (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase().includes(projectSearch.trim().toLowerCase())), [projects, projectSearch]);
   const projectPageSize = 8;
@@ -1015,11 +1016,11 @@ export function App() {
   const selectedSubassetItems = selectedGroup?.items ?? (selectedAsset ? [selectedAsset] : []);
   const selectedAssetCustomGroup = selectedAsset ? customGroupByAssetKey.get(mainAssetKey(selectedAsset)) ?? null : null;
   const selectedCustomGroup = selectedCustomGroupId ? customGroupById.get(selectedCustomGroupId) ?? null : null;
-  const selectedCustomGroupAssets = useMemo(() => {
-    if (!selectedCustomGroup) return [] as Asset[];
+  const selectedCustomGroupGroups = useMemo(() => {
+    if (!selectedCustomGroup) return [] as AssetGroup[];
     const memberKeys = new Set(selectedCustomGroup.members.map((member) => member.assetKey));
-    return assets.filter((asset) => memberKeys.has(mainAssetKey(asset)));
-  }, [assets, selectedCustomGroup]);
+    return assetGroups.filter((group) => memberKeys.has(group.key));
+  }, [assetGroups, selectedCustomGroup]);
   const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
     const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
@@ -1400,7 +1401,7 @@ export function App() {
       await loadCustomAssetGroups(currentProject.id);
       if (selectedCustomGroupId === group.id) {
         setSelectedCustomGroupId(null);
-        setAssetView("groups");
+        setAssetView("overview");
       }
       setMessage("资产组已删除，组内资产保持不变");
     } catch (error) {
@@ -1451,6 +1452,45 @@ export function App() {
   function showAssetOverview(tab: AssetTab) {
     setAssetTab(tab);
     setAssetView("overview");
+  }
+
+  function renderAssetCard(group: AssetGroup, onClick?: () => void, onRemove?: () => void) {
+    const originalUrl = groupOriginalImageUrl(group);
+    const confirmedUrl = groupConfirmedImageUrl(group);
+    return (
+      <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
+        <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+        <div className="asset-card-visuals">
+          <figure>
+            {originalUrl ? (
+              <img className="asset-card-image" src={originalUrl} alt="原资产图" onClick={(event) => {
+                event.stopPropagation();
+                openImage(originalUrl, `${group.name} 原资产图`);
+              }} />
+            ) : (
+              <div className={`thumb ${assetThumbClass(group.items[0])}`}></div>
+            )}
+            <em>原</em>
+            <figcaption>{group.name}</figcaption>
+          </figure>
+          <figure>
+            {confirmedUrl ? (
+              <img className="asset-card-image" src={confirmedUrl} alt="已确认目标资产图" onClick={(event) => {
+                event.stopPropagation();
+                openImage(confirmedUrl, `${group.localizedName} 已确认资产图`);
+              }} />
+            ) : (
+              <div className="asset-placeholder compact">待确认</div>
+            )}
+            <em>新</em>
+            <figcaption>{group.localizedName}</figcaption>
+          </figure>
+        </div>
+        <b>{group.name} → {group.localizedName}</b>
+        <span>{group.items.length} 个子资产 · {assetDisplayMeta(group.items[0])}</span>
+        {onRemove && <button className="ghost small asset-card-remove" disabled={busy} onClick={(event) => { event.stopPropagation(); onRemove(); }}>移出组</button>}
+      </article>
+    );
   }
 
   function selectAssetCard(asset: Asset) {
@@ -2700,7 +2740,7 @@ export function App() {
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
                 <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
-                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button><button className="ghost" onClick={() => setAssetView("groups")}>资产组</button><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
+                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
               </div>
               {assetSelectionMode && (
                 <div className="asset-batch-bar">
@@ -2720,71 +2760,50 @@ export function App() {
                   <div className="progress-action-list">{assetGroups.filter((group) => group.items.some((item) => item.status !== "已确认")).slice(0, 16).map((group) => { const pending = group.items.find((item) => item.status !== "已确认") ?? group.items[0]; return <button type="button" key={group.key} onClick={() => { setSelectedAssetId(pending.id); setAssetView("detail"); }}><span>{group.type} · {group.localizedName || group.name}</span><b>{group.items.filter((item) => item.status !== "已确认").length} 项待确认 →</b></button>; })}{!assetGroups.some((group) => group.items.some((item) => item.status !== "已确认")) && <p>当前资产已全部确认。</p>}</div>
                 </div>
               ) : (
-                <div className="asset-grid overview-grid">
-                  {filteredGroups.map((group) => {
-                    const originalUrl = groupOriginalImageUrl(group);
-                    const confirmedUrl = groupConfirmedImageUrl(group);
-                    return (
-                      <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0])}>
-                        <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
-                        <div className="asset-card-visuals">
-                          <figure>
-                            {originalUrl ? (
-                              <img className="asset-card-image" src={originalUrl} alt="原资产图" onClick={(event) => {
-                                event.stopPropagation();
-                                openImage(originalUrl, `${group.name} 原资产图`);
-                              }} />
-                            ) : (
-                              <div className={`thumb ${assetThumbClass(group.items[0])}`}></div>
-                            )}
-                            <em>原</em>
-                            <figcaption>{group.name}</figcaption>
-                          </figure>
-                          <figure>
-                            {confirmedUrl ? (
-                              <img className="asset-card-image" src={confirmedUrl} alt="已确认目标资产图" onClick={(event) => {
-                                event.stopPropagation();
-                                openImage(confirmedUrl, `${group.localizedName} 已确认资产图`);
-                              }} />
-                            ) : (
-                              <div className="asset-placeholder compact">待确认</div>
-                            )}
-                            <em>新</em>
-                            <figcaption>{group.localizedName}</figcaption>
-                          </figure>
-                        </div>
-                        <b>{group.name} → {group.localizedName}</b>
-                        <span>{group.items.length} 个子资产 · {assetDisplayMeta(group.items[0])}</span>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {assetView === "groups" && (
-            <div className="asset-detail sub-panel active">
-              <div className="detail-topbar">
-                <button className="ghost" onClick={() => setAssetView("overview")}>返回资产概览</button>
-                <h2>资产组</h2>
-                <button className="primary" disabled={busy} onClick={() => { setAssetView("overview"); startAssetSelectionMode(); }}>批量新建分组</button>
-              </div>
-              <div className="asset-group-grid">
-                {customAssetGroups.filter((group) => assetTab === "资产进度" || group.assetType === assetTab).map((group) => (
-                  <article className="asset-group-card" key={group.id} onClick={() => {
-                    setSelectedCustomGroupId(group.id);
-                    setAssetGroupNameDraft(group.name);
-                    setAssetView("group-detail");
-                  }}>
-                    <i>{group.assetType}</i>
-                    <b>{group.name}</b>
-                    <span>{group.members.length} 个资产</span>
-                  </article>
-                ))}
-              </div>
-              {!customAssetGroups.filter((group) => assetTab === "资产进度" || group.assetType === assetTab).length && (
-                <p className="empty-shot-assets">还没有资产组。返回概览后，通过“批量分组”选择同类资产。</p>
+                <>
+                  {customAssetGroups.filter((customGroup) => customGroup.assetType === assetTab).length > 0 && (
+                    <section className="asset-group-overview">
+                      <div className="panel-title">资产组</div>
+                      <div className="asset-grid overview-grid">
+                        {customAssetGroups.filter((customGroup) => customGroup.assetType === assetTab).map((customGroup) => {
+                          const memberGroups = assetGroups.filter((group) => customGroup.members.some((member) => member.assetKey === group.key));
+                          const firstMember = memberGroups[0];
+                          const secondMember = memberGroups[1] ?? memberGroups[0];
+                          const firstUrl = firstMember ? groupOriginalImageUrl(firstMember) : "";
+                          const secondUrl = secondMember ? groupConfirmedImageUrl(secondMember) : "";
+                          return (
+                            <article className="asset-card asset-group-overview-card" key={customGroup.id} onClick={() => {
+                              setSelectedCustomGroupId(customGroup.id);
+                              setAssetGroupNameDraft(customGroup.name);
+                              setAssetView("group-detail");
+                            }}>
+                              <i>资产组</i>
+                              <div className="asset-card-visuals">
+                                <figure>
+                                  {firstUrl ? <img className="asset-card-image" src={firstUrl} alt="组内资产图" onClick={(event) => event.stopPropagation()} /> : <div className="thumb"></div>}
+                                  <em>组</em>
+                                  <figcaption>{firstMember?.name ?? "组内成员"}</figcaption>
+                                </figure>
+                                <figure>
+                                  {secondUrl ? <img className="asset-card-image" src={secondUrl} alt="组内目标资产图" onClick={(event) => event.stopPropagation()} /> : <div className="asset-placeholder compact">成员</div>}
+                                  <em>组</em>
+                                  <figcaption>{secondMember?.localizedName ?? "组内成员"}</figcaption>
+                                </figure>
+                              </div>
+                              <b>{customGroup.name}</b>
+                              <span>{customGroup.members.length} 个资产 · {customGroup.assetType}</span>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  )}
+                  <div className="asset-groups-divider"><span>未分组资产</span></div>
+                  <div className="asset-grid overview-grid">
+                    {filteredGroups.map((group) => renderAssetCard(group))}
+                    {!filteredGroups.length && <p className="empty-shot-assets">当前类型没有未分组资产。</p>}
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -2792,7 +2811,7 @@ export function App() {
           {assetView === "group-detail" && selectedCustomGroup && (
             <div className="asset-detail sub-panel active">
               <div className="detail-topbar">
-                <button className="ghost" onClick={() => setAssetView("groups")}>返回资产组</button>
+                <button className="ghost" onClick={() => setAssetView("overview")}>返回资产概览</button>
                 <h2>{selectedCustomGroup.name}</h2>
                 <button className="ghost" disabled={busy} onClick={() => deleteCustomGroup(selectedCustomGroup)}>删除资产组</button>
               </div>
@@ -2803,15 +2822,12 @@ export function App() {
                 </div>
                 <p>组名只用于管理与整组调用，不会修改资产名称、变量或提示词。</p>
               </div>
-              <div className="panel-title">组内资产（{selectedCustomGroupAssets.length}）</div>
-              <div className="asset-group-grid">
-                {selectedCustomGroupAssets.map((asset) => (
-                  <article className="asset-group-card member" key={asset.id} onClick={() => selectAssetCard(asset)}>
-                    <i>{asset.asset_type}</i>
-                    <b>{assetDisplayName(asset)}</b>
-                    <span>{assetDisplayVariable(asset)}</span>
-                    <button className="ghost small" disabled={busy} onClick={(event) => { event.stopPropagation(); void removeAssetFromCustomGroup(selectedCustomGroup, asset); }}>移出组</button>
-                  </article>
+              <div className="panel-title">组内资产（{selectedCustomGroupGroups.length}）</div>
+              <div className="asset-grid overview-grid">
+                {selectedCustomGroupGroups.map((group) => renderAssetCard(
+                  group,
+                  () => selectAssetCard(group.items[0]),
+                  () => removeAssetFromCustomGroup(selectedCustomGroup, group.items[0])
                 ))}
               </div>
             </div>
