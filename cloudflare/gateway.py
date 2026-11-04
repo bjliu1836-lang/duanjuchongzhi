@@ -18,7 +18,13 @@ HOP_BY_HOP = {
     b"connection", b"keep-alive", b"proxy-authenticate", b"proxy-authorization",
     b"te", b"trailers", b"transfer-encoding", b"upgrade", b"host",
 }
-client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=None, write=None, pool=None), follow_redirects=False)
+# The upstream is a loopback service. Never route it through HTTP(S)_PROXY:
+# desktop proxy settings otherwise break uploads and can expose local API traffic.
+client = httpx.AsyncClient(
+    timeout=httpx.Timeout(connect=15, read=None, write=None, pool=None),
+    follow_redirects=False,
+    trust_env=False,
+)
 
 
 async def _incoming_body(receive: Any) -> AsyncIterator[bytes]:

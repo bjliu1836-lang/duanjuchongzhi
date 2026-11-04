@@ -129,7 +129,15 @@ type SelectedSource = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, init);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, init);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("无法连接分析服务，请检查后端服务或网络连接后重试");
+    }
+    throw error;
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || response.statusText);
@@ -1340,6 +1348,18 @@ export function App() {
     }
   }
 
+  function failAnalysisStart(error: unknown, fallback: string) {
+    const detail = error instanceof Error && error.message ? error.message : fallback;
+    sessionStorage.removeItem("activeAnalysisTaskId");
+    setActiveAnalysisTask((current) => current ? {
+      ...current,
+      status: "失败",
+      message: detail,
+      updated_at: new Date().toISOString(),
+    } : current);
+    setMessage(detail);
+  }
+
   async function startAnalysis(mode: "normal" | "aigc") {
     if (!currentProject || !selectedEpisodeId) {
       setMessage("请先选择要分析的剧集");
@@ -1362,7 +1382,7 @@ export function App() {
     try {
       const task = await runBackendTask("asset_extraction");
       if (!task) {
-        setMessage("任务创建失败，请重试");
+        failAnalysisStart(new Error("任务创建失败，请重试"), "任务创建失败，请重试");
         setBusy(false);
         return;
       }
@@ -1393,7 +1413,7 @@ export function App() {
       });
     } catch (error) {
       setBusy(false);
-      setMessage(error instanceof Error ? error.message : "任务启动失败");
+      failAnalysisStart(error, "任务启动失败");
     }
   }
 
@@ -1419,7 +1439,7 @@ export function App() {
     try {
       const task = await runBackendTask("series_analysis");
       if (!task) {
-        setMessage("整剧分析任务创建失败，请重试");
+        failAnalysisStart(new Error("整剧分析任务创建失败，请重试"), "整剧分析任务创建失败，请重试");
         setBusy(false);
         return;
       }
@@ -1467,7 +1487,7 @@ export function App() {
       );
     } catch (error) {
       setBusy(false);
-      setMessage(error instanceof Error ? error.message : "整剧分析任务启动失败");
+      failAnalysisStart(error, "整剧分析任务启动失败");
     }
   }
 
@@ -2354,7 +2374,7 @@ export function App() {
                 <p className="analysis-error-message">{activeAnalysisTask?.message || "分析过程中发生错误"}</p>
                 <div className="analysis-failed-actions">
                   <button className="ghost" onClick={() => setScreen("source")}>返回上传页</button>
-                  <button className="primary" onClick={() => startAnalysis("normal")}>重试分析</button>
+                  <button className="primary" onClick={() => activeAnalysisTask?.task_type === "series_analysis" ? startSeriesAnalysis("normal") : startAnalysis("normal")}>重试分析</button>
                 </div>
               </>
             ) : analysisDone ? (
