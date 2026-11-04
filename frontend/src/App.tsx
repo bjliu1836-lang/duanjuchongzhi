@@ -2866,42 +2866,16 @@ export function App() {
                       <span>{selectedAssetCustomGroup ? <>当前资产属于「<b>{selectedAssetCustomGroup.name}</b>」。</> : "当前资产尚未加入资产组。"}</span>
                     </div>
                   </div>
-                  <div className="asset-compare">
-                    <article>
-                      {selectedAssetOriginalImage ? (
-                        <img className="original-asset-image clickable-image" src={selectedAssetOriginalImage} alt="原资产图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原资产图`)} />
-                      ) : (
-                        <div className="asset-empty-thumb asset-empty-large">暂无原资产图</div>
-                      )}
-                      <b>原资产图</b>
-                      <span>源资产事实只读</span>
-                      <p>{originalAssetDescription(selectedAsset)}</p>
-                    </article>
-                    <article>
-                      {isGeneratingSelectedAsset ? (
-                        <div className="generated-image-loading"><i></i><span>生成中</span></div>
-                      ) : selectedAssetCurrentImage ? (
-                        <img className="generated-asset-image clickable-image" src={selectedAssetCurrentImage} alt={selectedAsset?.payload?.effectiveAssetSource === "source" ? "当前沿用的原片资产图" : "目标资产图"} onClick={() => openImage(selectedAssetCurrentImage, `${selectedAsset.localized_name} 当前生效资产图`)} />
-                      ) : (
-                        <div className={`asset-placeholder ${assetThumbClass(selectedAsset)}`}>目标资产图</div>
-                      )}
-                      <b>{selectedAsset?.payload?.effectiveAssetSource === "source" ? "当前沿用原片资产" : selectedAsset?.payload?.effectiveAssetSource === "target_draft" ? "目标画像草稿 · 待审核" : "当前目标资产"}</b>
-                      <span>{selectedAsset?.payload?.effectiveAssetSource === "target_draft"
-                        ? selectedImageVersion?.payload?.source === "user_upload" ? "用户上传图已选 · 画像草稿仍待审核" : selectedAssetGeneratedImage ? "已选目标图 · 画像草稿仍待审核" : "原片图仅作源观察 · 尚无目标图"
-                        : selectedAsset?.payload?.effectiveAssetSource === "source"
-                        ? (selectedAssetCurrentImage ? "原片资产图 · 当前生效" : "缺少原片资产图")
-                        : selectedImageVersion?.payload?.source === "user_upload" ? "用户上传 · 当前采用图" : selectedAssetGeneratedImage ? "当前采用图决定目标外观" : "缺少已确认目标图 · 替换未就绪"}</span>
-                      <p>{selectedAsset?.payload?.effectiveAssetSource === "target_draft"
-                        ? `目标画像尚有源事实待核对；草稿可供编辑，不把原片身份图当作目标图：${selectedAsset?.payload?.当前有效外观描述 || "目标描述待补充"}`
-                        : selectedAsset?.payload?.effectiveAssetSource === "source"
-                        ? (selectedAsset?.payload?.当前有效资产就绪 === false
-                          ? `原片资产未就绪：缺少原片图或原片描述。${selectedAsset.payload?.当前有效外观描述 || ""}`
-                          : `已关联原分镜，当前沿用原片外观：${selectedAsset.payload?.当前有效外观描述 || "原片描述未留存"}`)
-                        : selectedAsset?.payload?.当前有效资产就绪 === false
-                          ? "替换目标未就绪，请上传或生成并采用目标图。"
-                          : "已关联原分镜，外观以当前目标图为准。"}</p>
-                    </article>
-                  </div>
+                  <section className="asset-reference-card">
+                    <div className="panel-title">原片参考</div>
+                    {selectedAssetOriginalImage ? (
+                      <img className="original-asset-image clickable-image" src={selectedAssetOriginalImage} alt="原资产图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原资产图`)} />
+                    ) : (
+                      <div className="asset-empty-thumb asset-empty-large">暂无原资产图</div>
+                    )}
+                    <span>源资产事实只读</span>
+                    <p>{originalAssetDescription(selectedAsset)}</p>
+                  </section>
                 </section>
                 <aside className="generation-panel asset-generation-studio">
                   <div className="studio-toolbar">
@@ -2918,8 +2892,7 @@ export function App() {
                       )}
                     </div>
                     <div className="studio-current">
-                      <span>当前</span>
-                      <div className="studio-current-thumb" onClick={() => selectedAssetCurrentImage && openImage(selectedAssetCurrentImage, "当前生效资产图")}>{isGeneratingSelectedAsset ? <i className="current-loading"></i> : selectedAssetCurrentImage ? <img src={selectedAssetCurrentImage} alt="当前生效资产图" /> : <><i></i><i></i></>}</div>
+                      <span>历史版本</span>
                       <div className="asset-version-list">
                         {(selectedAsset.images ?? []).map((image, index) => {
                           const imageUrl = apiAssetUrl(image.file_url || image.payload?.source_url);
@@ -2937,10 +2910,6 @@ export function App() {
                   <div className="agent-generate-card">
                     <div className="agent-card-head"><h3>Agent 生成{assetTab === "角色" ? "形象" : assetTab}</h3></div>
                     <div className="agent-prompt-box">
-                      <div className="asset-target-controls">
-                        <div><button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>{currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}</div>
-                        <input ref={assetImageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.currentTarget.files?.[0]; void uploadTargetAssetImage(file).catch((error) => setMessage(error.message)); event.currentTarget.value = ""; }} />
-                      </div>
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
                         <div className="asset-profile-pending" role="status">
                           源视觉字段仍有待核对：{(() => {
@@ -2968,7 +2937,12 @@ export function App() {
                       }} onBlur={() => saveAssetPrompt(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} placeholder="当前资产未返回提示词" disabled={busy} />
                       <div className="agent-prompt-footer">
                         <div className="agent-model-note">按当前后端模型配置生成</div>
-                      <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true || !assetPromptDraft.trim()}>生成</button>
+                        <div className="agent-prompt-actions">
+                          <button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>
+                          {currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}
+                          <input ref={assetImageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.currentTarget.files?.[0]; void uploadTargetAssetImage(file).catch((error) => setMessage(error.message)); event.currentTarget.value = ""; }} />
+                          <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true || !assetPromptDraft.trim()}>生成资产图</button>
+                        </div>
                       </div>
                     </div>
                   </div>
