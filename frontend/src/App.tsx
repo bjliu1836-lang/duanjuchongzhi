@@ -53,6 +53,7 @@ type Episode = {
 
 type Asset = {
   id: string;
+  episode_id?: string;
   asset_type: string;
   name: string;
   localized_name: string;
@@ -61,6 +62,15 @@ type Asset = {
   status: string;
   payload?: Record<string, any>;
   images?: Array<{ id: string; file_path: string; file_url?: string; is_selected: number; prompt?: string; created_at?: string; payload?: Record<string, any> }>;
+};
+
+type AssetParentLink = {
+  id: string;
+  parentAssetId: string;
+  childAssetId: string;
+  parentAssetKey: string;
+  childAssetKey: string;
+  createdAt: string;
 };
 
 type Storyboard = {
@@ -853,6 +863,8 @@ export function App() {
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetParentLinks, setAssetParentLinks] = useState<AssetParentLink[]>([]);
+  const [assetParentTargetId, setAssetParentTargetId] = useState("");
   const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
   const [generations, setGenerations] = useState<VideoGeneration[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -971,6 +983,37 @@ export function App() {
     [assets, storyboardAssetSearch, storyboardAssetTab]
   );
   const selectedGroup = selectedAsset ? assetGroups.find((group) => group.key === mainAssetKey(selectedAsset)) : null;
+  const assetGroupByKey = useMemo(() => new Map(assetGroups.map((group) => [group.key, group])), [assetGroups]);
+  const selectedParentLink = selectedAsset
+    ? assetParentLinks.find((link) => link.childAssetKey === mainAssetKey(selectedAsset)) ?? null
+    : null;
+  const selectedParentGroup = selectedParentLink ? assetGroupByKey.get(selectedParentLink.parentAssetKey) ?? null : null;
+  const selectedChildLinks = selectedGroup
+    ? assetParentLinks.filter((link) => link.parentAssetKey === selectedGroup.key)
+    : [];
+  const selectedChildGroups = selectedChildLinks
+    .map((link) => assetGroupByKey.get(link.childAssetKey))
+    .filter((group): group is AssetGroup => Boolean(group));
+  const selectedSubassetItems = Array.from(new Map([
+    ...(selectedGroup?.items ?? (selectedAsset ? [selectedAsset] : [])),
+    ...selectedChildGroups.flatMap((group) => group.items),
+  ].map((item) => [item.id, item])).values());
+  const selectedParentCandidates = useMemo(() => {
+    if (!selectedAsset) return [] as AssetGroup[];
+    const childKey = mainAssetKey(selectedAsset);
+    const parentByChild = new Map(assetParentLinks.map((link) => [link.childAssetKey, link.parentAssetKey]));
+    return assetGroups.filter((group) => {
+      if (group.key === childKey || group.type !== selectedAsset.asset_type) return false;
+      const seen = new Set<string>([childKey]);
+      let cursor: string | undefined = group.key;
+      while (cursor) {
+        if (seen.has(cursor)) return false;
+        seen.add(cursor);
+        cursor = parentByChild.get(cursor);
+      }
+      return true;
+    });
+  }, [assetGroups, assetParentLinks, selectedAsset]);
   const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
     const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
@@ -1096,7 +1139,13 @@ export function App() {
       setUploadState("uploaded");
     }
     setSelectedEpisodeId(defaultEpisodeId);
-    const [, , , loadedTasks] = await Promise.all([loadAssets(projectId), loadStoryboards(projectId, defaultEpisodeId), loadGenerations(projectId), loadTasks(projectId)]);
+    const [, , , , loadedTasks] = await Promise.all([
+      loadAssets(projectId),
+      loadStoryboards(projectId, defaultEpisodeId),
+      loadGenerations(projectId),
+      loadAssetParentLinks(projectId),
+      loadTasks(projectId),
+    ]);
     const recoveryTaskId = sessionStorage.getItem("activeAnalysisTaskId");
     const storedRecoveryTask = loadedTasks.find((task) => task.id === recoveryTaskId);
     const recentRunningTask = loadedTasks.find((task) =>
@@ -1134,6 +1183,8 @@ export function App() {
   function clearCurrentWorkspace() {
     setEpisodes([]);
     setAssets([]);
+    setAssetParentLinks([]);
+    setAssetParentTargetId("");
     setStoryboards([]);
     setGenerations([]);
     setTasks([]);
@@ -1162,6 +1213,75 @@ export function App() {
     if (!projectId) return;
     const data = await request<{ assets: Asset[] }>(`/api/projects/${projectId}/assets`);
     setAssets(data.assets);
+  }
+
+  async function loadAssetParentLinks(projectId = currentProject?.id) {
+    if (!projectId) return [] as AssetParentLink[];
+    const data = await request<{ links: AssetParentLink[] }>(`/api/projects/${projectId}/asset-parent-links`);
+    setAssetParentLinks(data.links);
+    return data.links;
+  }
+
+  function collectAssetFamilyKeys(anchorKey: string, links: AssetParentLink[] = assetParentLinks) {
+    const parentByChild = new Map(links.map((link) => [link.childAssetKey, link.parentAssetKey]));
+    const childrenByParent = new Map<string, string[]>();
+    links.forEach((link) => {
+      childrenByParent.set(link.parentAssetKey, [...(childrenByParent.get(link.parentAssetKey) ?? []), link.childAssetKey]);
+    });
+    let rootKey = anchorKey;
+    const upwardSeen = new Set<string>();
+    while (parentByChild.has(rootKey) && !upwardSeen.has(rootKey)) {
+      upwardSeen.add(rootKey);
+      rootKey = parentByChild.get(rootKey)!;
+    }
+    const keys = new Set<string>();
+    const queue = [rootKey];
+    while (queue.length) {
+      const key = queue.shift()!;
+      if (keys.has(key)) continue;
+      keys.add(key);
+      queue.push(...(childrenByParent.get(key) ?? []));
+    }
+    return keys;
+  }
+
+  function assetAppearsInSelectedEpisode(asset: Asset) {
+    const appearances = asset.payload?.["出现集数"];
+    if (!selectedEpisode || !Array.isArray(appearances) || !appearances.length) return true;
+    return appearances.includes(selectedEpisode.episode_index);
+  }
+
+  async function moveAssetUnderParent(parentGroup: AssetGroup) {
+    if (!currentProject || !selectedAsset || !parentGroup.items[0]) return;
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/asset-parent-links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parentAssetId: parentGroup.items[0].id, childAssetId: selectedAsset.id }),
+      });
+      await loadAssetParentLinks(currentProject.id);
+      setAssetParentTargetId("");
+      setMessage(`已将 ${assetDisplayName(selectedAsset)} 添加到 ${parentGroup.name} 旗下`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "添加到主资产失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeAssetParentLink(link: AssetParentLink) {
+    if (!currentProject) return;
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/asset-parent-links/${link.id}`, { method: "DELETE" });
+      await loadAssetParentLinks(currentProject.id);
+      setMessage("已移出主资产旗下，原资产与分镜引用均保留");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "移出主资产失败");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadStoryboards(projectId = currentProject?.id, episodeId?: string | null) {
@@ -1901,6 +2021,22 @@ export function App() {
     updateWorkbenchPaneWidth(pane, current + sign * step * (pane === "assets" ? 1 : -1));
   }
 
+  async function bindStoryboardAssetFamily(anchorAsset: Asset) {
+    if (!selectedStoryboard) return;
+    const familyKeys = collectAssetFamilyKeys(mainAssetKey(anchorAsset));
+    const familyAssets = assets.filter((asset) => familyKeys.has(mainAssetKey(asset)) && assetAppearsInSelectedEpisode(asset));
+    if (!familyAssets.length) return;
+    const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
+    const referencedIds = new Set(currentReferences.map((item) => resolveUniqueAssetReference(item, assets)?.id).filter(Boolean));
+    const additions = familyAssets.filter((asset) => !referencedIds.has(asset.id)).map((asset) => asset.variable || assetDisplayVariable(asset));
+    if (!additions.length) {
+      setMessage("主资产与旗下资产已在当前分镜中绑定");
+      return;
+    }
+    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, ...additions])) return;
+    setMessage(`已绑定调用 ${familyAssets.map((asset) => assetDisplayName(asset)).join("、")}`);
+  }
+
   async function toggleStoryboardAsset(asset: Asset) {
     if (!selectedStoryboard) return;
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
@@ -2505,15 +2641,49 @@ export function App() {
                   </div>
                   <div className="panel-title">子资产候选</div>
                   <div className="subasset-list compact-subasset-list">
-                    {(selectedGroup?.items ?? [selectedAsset]).map((item) => (
+                    {selectedSubassetItems.map((item) => (
                       <article className={item.id === selectedAsset.id ? "subasset-card active" : "subasset-card"} key={item.id} onClick={() => setSelectedAssetId(item.id)}>
                         <div className="subasset-thumb-shell">{selectedAssetImageUrl(item) || originalAssetImageUrl(item)
                           ? <img className="subasset-thumb" src={selectedAssetImageUrl(item) || originalAssetImageUrl(item) || ""} alt={`${variantName(item)}资产图`} />
                           : <span className="asset-empty-thumb">暂无图片</span>}</div>
                         <b>{variantName(item)}</b>
-                        <span>{variantMeta(item) || assetDisplayVariable(item)}</span>
+                        <span>{selectedGroup?.items.some((groupItem) => groupItem.id === item.id) ? (variantMeta(item) || assetDisplayVariable(item)) : "旗下资产"}</span>
                       </article>
                     ))}
+                  </div>
+                  <div className="panel-title">资产归属</div>
+                  <div className="asset-parent-link-editor">
+                    {selectedParentGroup ? (
+                      <div className="asset-parent-current">
+                        <span>所属主资产：<b>{selectedParentGroup.name} → {selectedParentGroup.localizedName}</b></span>
+                        <button className="ghost small" disabled={busy || !selectedParentLink} onClick={() => selectedParentLink && removeAssetParentLink(selectedParentLink)}>移出旗下</button>
+                      </div>
+                    ) : (
+                      <div className="asset-parent-current"><span>当前资产保持独立主身份。</span></div>
+                    )}
+                    <div className="asset-parent-picker">
+                      <select aria-label="选择主资产" value={assetParentTargetId} onChange={(event) => setAssetParentTargetId(event.target.value)}>
+                        <option value="">选择要加入的主资产</option>
+                        {selectedParentCandidates.map((group) => (
+                          <option value={group.items[0]?.id ?? ""} key={group.key}>{group.name} → {group.localizedName}</option>
+                        ))}
+                      </select>
+                      <button className="primary small" disabled={busy || !assetParentTargetId} onClick={() => {
+                        const target = selectedParentCandidates.find((group) => group.items[0]?.id === assetParentTargetId);
+                        if (target) void moveAssetUnderParent(target);
+                      }}>添加到旗下</button>
+                    </div>
+                    {selectedChildGroups.length > 0 && (
+                      <div className="asset-owned-children">
+                        {selectedChildGroups.map((group) => {
+                          const link = selectedChildLinks.find((item) => item.childAssetKey === group.key);
+                          return <div className="asset-owned-child" key={group.key}>
+                            <span><b>{group.name} → {group.localizedName}</b><small>{group.items.length} 个子资产</small></span>
+                            <button className="ghost small" disabled={busy || !link} onClick={() => link && removeAssetParentLink(link)}>移出</button>
+                          </div>;
+                        })}
+                      </div>
+                    )}
                   </div>
                   <div className="asset-compare">
                     <article>
@@ -2659,9 +2829,18 @@ export function App() {
               {storyboardFilteredAssets.map((asset) => {
                 const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
                 const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
-                return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
-                  {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
-                </button>;
+                const familyKeys = collectAssetFamilyKeys(mainAssetKey(asset));
+                const familyAssets = assets.filter((item) => familyKeys.has(mainAssetKey(item)) && assetAppearsInSelectedEpisode(item));
+                return <div className="storyboard-asset-entry" key={asset.id}>
+                  <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
+                    {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
+                  </button>
+                  {familyAssets.length > 1 && (
+                    <button className="ghost small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => bindStoryboardAssetFamily(asset)}>
+                      绑定调用主资产与旗下资产（{familyAssets.length}）
+                    </button>
+                  )}
+                </div>;
               })}
               {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
             </div>

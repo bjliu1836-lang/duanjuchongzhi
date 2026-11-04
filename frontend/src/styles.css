@@ -1219,3 +1219,61 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
   body[data-screen="compare"] .composition-workspace.inspector-collapsed:not(.library-collapsed) { grid-template-columns: 270px minmax(0, 1fr) 0 !important; }
   body[data-screen="compare"] .composition-workspace.library-collapsed.inspector-collapsed { grid-template-columns: 0 minmax(0, 1fr) 0 !important; }
 }
+
+.asset-parent-link-editor {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 10px;
+  background: var(--panel, #fff);
+}
+
+.asset-parent-current,
+.asset-parent-picker,
+.asset-owned-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.asset-parent-picker select {
+  min-width: 0;
+  flex: 1;
+}
+
+.asset-owned-children {
+  display: grid;
+  gap: 6px;
+}
+
+.asset-owned-child {
+  padding-top: 6px;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+
+.asset-owned-child span,
+.asset-parent-current span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.asset-owned-child small {
+  color: var(--muted, #777);
+}
+
+.storyboard-asset-entry {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.storyboard-family-bind {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

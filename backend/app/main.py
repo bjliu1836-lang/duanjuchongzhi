@@ -378,6 +378,17 @@ def init_db() -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS asset_parent_links (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              parent_asset_id TEXT NOT NULL,
+              child_asset_id TEXT NOT NULL,
+              parent_asset_key TEXT NOT NULL,
+              child_asset_key TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(project_id, child_asset_key)
+            );
+
             CREATE TABLE IF NOT EXISTS asset_images (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -2386,6 +2397,11 @@ class AssetUpdate(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class AssetParentLinkRequest(BaseModel):
+    parentAssetId: str
+    childAssetId: str
+
+
 class AssetUploadRequest(BaseModel):
     pass
 
@@ -2775,6 +2791,94 @@ def sync_episode_ark_file(project_id: str, episode_id: str) -> dict[str, Any]:
             ).fetchone()
         )
         return {"episode": enrich_episode(updated), "ark": result}
+
+
+def asset_parent_group_key(asset: dict[str, Any]) -> str:
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else json.loads(asset.get("payload_json") or "{}")
+    return str(payload.get("项目主资产Key") or asset_project_main_key({**asset, "payload": payload}))
+
+
+def asset_parent_link_response(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "parentAssetId": row["parent_asset_id"],
+        "childAssetId": row["child_asset_id"],
+        "parentAssetKey": row["parent_asset_key"],
+        "childAssetKey": row["child_asset_key"],
+        "createdAt": row["created_at"],
+    }
+
+
+def load_asset_parent_candidate(conn: sqlite3.Connection, project_id: str, asset_id: str) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM assets WHERE id=? AND project_id=?", (asset_id, project_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset = row_to_dict(row)
+    asset["payload"] = json.loads(asset.pop("payload_json") or "{}")
+    return asset
+
+
+@app.get("/api/projects/{project_id}/asset-parent-links")
+def list_asset_parent_links(project_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        rows = conn.execute(
+            "SELECT * FROM asset_parent_links WHERE project_id=? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+        return {"links": [asset_parent_link_response(row_to_dict(row)) for row in rows]}
+
+
+@app.post("/api/projects/{project_id}/asset-parent-links")
+def create_asset_parent_link(project_id: str, payload: AssetParentLinkRequest) -> dict[str, Any]:
+    if payload.parentAssetId == payload.childAssetId:
+        raise HTTPException(status_code=400, detail="资产不能添加到自己旗下")
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        parent = load_asset_parent_candidate(conn, project_id, payload.parentAssetId)
+        child = load_asset_parent_candidate(conn, project_id, payload.childAssetId)
+        parent_key = asset_parent_group_key(parent)
+        child_key = asset_parent_group_key(child)
+        if parent_key == child_key:
+            raise HTTPException(status_code=400, detail="同一主资产不能互相挂载")
+        ancestor_key = parent_key
+        seen = {child_key}
+        while ancestor_key:
+            if ancestor_key in seen:
+                raise HTTPException(status_code=400, detail="不能形成循环的资产归属关系")
+            seen.add(ancestor_key)
+            ancestor = conn.execute(
+                "SELECT parent_asset_key FROM asset_parent_links WHERE project_id=? AND child_asset_key=?",
+                (project_id, ancestor_key),
+            ).fetchone()
+            ancestor_key = str(ancestor["parent_asset_key"]) if ancestor else ""
+        conn.execute("DELETE FROM asset_parent_links WHERE project_id=? AND child_asset_key=?", (project_id, child_key))
+        link_id = new_id("asset_link")
+        created_at = now_iso()
+        conn.execute(
+            """INSERT INTO asset_parent_links
+               (id,project_id,parent_asset_id,child_asset_id,parent_asset_key,child_asset_key,created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (link_id, project_id, payload.parentAssetId, payload.childAssetId, parent_key, child_key, created_at),
+        )
+        conn.commit()
+        row = row_to_dict(conn.execute("SELECT * FROM asset_parent_links WHERE id=?", (link_id,)).fetchone())
+        return {"link": asset_parent_link_response(row)}
+
+
+@app.delete("/api/projects/{project_id}/asset-parent-links/{link_id}")
+def delete_asset_parent_link(project_id: str, link_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        row = conn.execute(
+            "SELECT * FROM asset_parent_links WHERE id=? AND project_id=?",
+            (link_id, project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Asset parent link not found")
+        conn.execute("DELETE FROM asset_parent_links WHERE id=? AND project_id=?", (link_id, project_id))
+        conn.commit()
+        return {"deleted": True, "link": asset_parent_link_response(row_to_dict(row))}
 
 
 @app.get("/api/projects/{project_id}/assets")

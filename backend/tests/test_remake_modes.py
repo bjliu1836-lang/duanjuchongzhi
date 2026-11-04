@@ -3706,3 +3706,73 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
     assert "按明确目标国家（美国）和目标语言（英语）适配分镜" in payload["模式路由强约束"]
     summary_names = [item["本地化资产名称"] for item in payload["资产摘要"]]
     assert "Lin Hao" in summary_names
+
+
+def test_asset_parent_links_are_reversible_reject_cycles_and_preserve_references(client: TestClient):
+    project = create_project(client, title="asset-parent-links")
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("episode_parent", project["id"], 1, "parent.mp4", "C:/test/parent.mp4", "已上传", "2026-01-01T00:00:00Z"),
+        )
+        assets = [
+            ("asset_parent", "B主资产", "{{CHAR_001_SUB_01}}", "角色:B主资产"),
+            ("asset_child", "A资产", "{{CHAR_002_SUB_01}}", "角色:A资产"),
+            ("asset_grandchild", "C资产", "{{CHAR_003_SUB_01}}", "角色:C资产"),
+        ]
+        for asset_id, name, variable, main_key in assets:
+            payload = {"项目主资产Key": main_key, "项目子资产Key": f"{main_key}:默认", "出现集数": [1], "源事实快照": f"{name}源事实"}
+            conn.execute(
+                "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (asset_id, project["id"], "episode_parent", "角色", name, f"{name}EN", variable, "已确认", json.dumps(payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
+            )
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "storyboard_parent",
+                project["id"],
+                "episode_parent",
+                "分镜1",
+                "00:00:00-00:00:02",
+                "{{CHAR_002_SUB_01}} 出现在画面中。",
+                json.dumps({"引用资产变量": ["{{CHAR_002_SUB_01}}"]}, ensure_ascii=False),
+                "已生成",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+    created = client.post(
+        f"/api/projects/{project['id']}/asset-parent-links",
+        json={"parentAssetId": "asset_parent", "childAssetId": "asset_child"},
+    )
+    assert created.status_code == 200, created.text
+    first_link = created.json()["link"]
+
+    moved = client.post(
+        f"/api/projects/{project['id']}/asset-parent-links",
+        json={"parentAssetId": "asset_child", "childAssetId": "asset_grandchild"},
+    )
+    assert moved.status_code == 200, moved.text
+
+    cycle = client.post(
+        f"/api/projects/{project['id']}/asset-parent-links",
+        json={"parentAssetId": "asset_grandchild", "childAssetId": "asset_parent"},
+    )
+    assert cycle.status_code == 400
+    assert "循环" in cycle.json()["detail"]
+
+    listed = client.get(f"/api/projects/{project['id']}/asset-parent-links")
+    assert listed.status_code == 200
+    assert len(listed.json()["links"]) == 2
+
+    with main.connect() as conn:
+        child = json.loads(conn.execute("SELECT payload_json FROM assets WHERE id='asset_child'").fetchone()[0])
+        storyboard = json.loads(conn.execute("SELECT payload_json FROM storyboards WHERE id='storyboard_parent'").fetchone()[0])
+    assert child["源事实快照"] == "A资产源事实"
+    assert storyboard["引用资产变量"] == ["{{CHAR_002_SUB_01}}"]
+
+    deleted = client.delete(f"/api/projects/{project['id']}/asset-parent-links/{first_link['id']}")
+    assert deleted.status_code == 200
+    remaining = client.get(f"/api/projects/{project['id']}/asset-parent-links").json()["links"]
+    assert [item["childAssetKey"] for item in remaining] == ["角色:C资产"]
