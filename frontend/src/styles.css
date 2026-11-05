@@ -1806,7 +1806,10 @@ body[data-screen="assets"] .studio-preview-row {
   grid-template-columns: minmax(0, 1fr) 68px;
   gap: 10px;
   align-items: stretch;
+  width: 100%;
+  max-width: 100%;
   min-height: 0;
+  margin-inline: auto;
   padding: 0;
 }
 body[data-screen="assets"] .studio-preview-main {
@@ -1820,11 +1823,6 @@ body[data-screen="assets"] .studio-preview-main {
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 12px;
-}
-body[data-screen="assets"] .studio-preview-main::before {
-  content: "";
-  display: block;
-  padding-top: 56.25%;
 }
 body[data-screen="assets"] .studio-preview-main > img,
 body[data-screen="assets"] .studio-preview-main > .asset-empty-thumb,
@@ -1850,7 +1848,7 @@ body[data-screen="assets"] .asset-version-list {
 }
 body[data-screen="assets"] .asset-version { flex: 0 0 auto; width: 64px; height: 48px; }
 body[data-screen="assets"] .asset-version-list em { font-size: 10px; white-space: nowrap; }
-body[data-screen="assets"] .agent-generate-card { min-height: 0; }
+body[data-screen="assets"] .agent-generate-card { width: 100%; max-width: 100%; min-height: 0; margin-inline: auto; }
 body[data-screen="assets"] .agent-card-head { flex: 0 0 auto; margin-bottom: 7px; }
 body[data-screen="assets"] .agent-card-head h3 { margin: 0; font-size: 13px; }
 body[data-screen="assets"] .agent-prompt-box {

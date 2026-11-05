@@ -908,8 +908,8 @@ export function App() {
   const [assetPromptDraft, setAssetPromptDraft] = useState("");
   const [assetImageModel, setAssetImageModel] = useState(DEFAULT_ASSET_IMAGE_MODEL);
   const [assetImageCount, setAssetImageCount] = useState(1);
-  const [assetSourcePaneWidth, setAssetSourcePaneWidth] = useState(280);
-  const [assetPreviewHeight, setAssetPreviewHeight] = useState(0);
+  const [assetSourcePaneWidth, setAssetSourcePaneWidth] = useState(340);
+  const [assetPreviewSize, setAssetPreviewSize] = useState({ width: 0, height: 0 });
   const assetImageAspectRatio = "16:9";
   const assetPromptDraftRevision = useRef(new Map<string, number>());
   const selectedAssetIdForPrompt = useRef<string | null>(null);
@@ -949,7 +949,7 @@ export function App() {
   const storyboardPromptSaveRequests = useRef(new Map<string, { prompt: string; promise: Promise<boolean> }>());
   const assetImageInputRef = useRef<HTMLInputElement | null>(null);
   const assetDetailLayoutRef = useRef<HTMLDivElement | null>(null);
-  const assetPreviewFrameRef = useRef<HTMLDivElement | null>(null);
+  const assetGenerationPanelRef = useRef<HTMLElement | null>(null);
   const assetDetailDragRef = useRef<{ pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
   const pollingTaskIds = useRef(new Set<string>());
   const workbenchRef = useRef<HTMLElement | null>(null);
@@ -1070,26 +1070,37 @@ export function App() {
     "--asset-source-pane-width": `${assetSourcePaneWidth}px`,
   } as CSSProperties;
   useLayoutEffect(() => {
-    const frame = assetPreviewFrameRef.current;
-    if (assetView !== "detail" || !frame) {
-      setAssetPreviewHeight(0);
+    const panel = assetGenerationPanelRef.current;
+    if (assetView !== "detail" || !panel) {
+      setAssetPreviewSize({ width: 0, height: 0 });
       return;
     }
-    const updateHeight = () => {
-      const width = frame.getBoundingClientRect().width;
-      const nextHeight = Math.round(width * 9 / 16);
-      setAssetPreviewHeight((current) => Math.abs(current - nextHeight) > 1 ? nextHeight : current);
+    const updatePreviewSize = () => {
+      const rect = panel.getBoundingClientRect();
+      const availableWidth = Math.max(320, rect.width - 78);
+      const availableHeight = Math.max(260, Math.min(rect.height * 0.62, 560));
+      const nextWidth = Math.round(Math.min(availableWidth, availableHeight * 16 / 9));
+      const nextHeight = Math.round(nextWidth * 9 / 16);
+      setAssetPreviewSize((current) => {
+        if (Math.abs(current.width - nextWidth) <= 1 && Math.abs(current.height - nextHeight) <= 1) return current;
+        return { width: nextWidth, height: nextHeight };
+      });
     };
-    updateHeight();
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(frame);
-    window.addEventListener("resize", updateHeight);
+    updatePreviewSize();
+    const observer = new ResizeObserver(updatePreviewSize);
+    observer.observe(panel);
+    window.addEventListener("resize", updatePreviewSize);
     return () => {
       observer.disconnect();
-      window.removeEventListener("resize", updateHeight);
+      window.removeEventListener("resize", updatePreviewSize);
     };
   }, [assetView, selectedAsset?.id]);
-  const assetPreviewFrameStyle = assetPreviewHeight > 0 ? { height: `${assetPreviewHeight}px` } : undefined;
+  const assetPreviewFrameStyle = assetPreviewSize.width > 0
+    ? { width: `${assetPreviewSize.width}px`, height: `${assetPreviewSize.height}px` }
+    : undefined;
+  const assetPreviewRowStyle = assetPreviewSize.width > 0
+    ? { width: `${assetPreviewSize.width + 78}px` }
+    : undefined;
   const selectedStoryboardPrompt = useMemo(
     () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : String(
       selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""
@@ -2990,13 +3001,13 @@ export function App() {
                 >
                   <span></span>
                 </button>
-                <aside className="generation-panel asset-generation-studio">
+                <aside className="generation-panel asset-generation-studio" ref={assetGenerationPanelRef}>
                   <div className="studio-toolbar">
                     <div className="studio-title"><span>当前形象</span><b>{variantName(selectedAsset)}</b></div>
                     <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
                   </div>
-                  <div className="studio-preview-row">
-                    <div className="studio-preview-main" ref={assetPreviewFrameRef} style={assetPreviewFrameStyle}>
+                  <div className="studio-preview-row" style={assetPreviewRowStyle}>
+                    <div className="studio-preview-main" style={assetPreviewFrameStyle}>
                       {isGeneratingSelectedAsset ? (
                         <div className="studio-image-loading"><i></i><span>生成中</span></div>
                       ) : selectedAssetCurrentImage ? (
@@ -3021,7 +3032,7 @@ export function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="agent-generate-card">
+                  <div className="agent-generate-card" style={assetPreviewRowStyle}>
                     <div className="agent-card-head"><h3>Agent 生成{assetTab === "角色" ? "形象" : assetTab}</h3></div>
                     <div className="agent-prompt-box">
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
