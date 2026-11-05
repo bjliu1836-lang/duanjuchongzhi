@@ -825,11 +825,9 @@ button:disabled {
 .media-item > em { position: absolute; right: 10px; top: 2px; color: var(--green); font-size: 9px; font-style: normal; }
 .composition-center { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0,1fr) 40px; background: #f1f2f6; }
 .composition-canvas { display: grid; place-items: center; min-height: 0; overflow: hidden; background: #f1f2f6; }
-.canvas-inner { display: grid; place-items: center; height: 100%; width: 100%; }
-.canvas-inner video { max-width: 100%; max-height: 100%; width: auto; height: auto; background: #000; object-fit: contain; }
-.ratio-9-16 .canvas-inner video { height: min(100%, 70vh); aspect-ratio: 9/16; }
-.ratio-16-9 .canvas-inner video { width: min(100%, 78vw); aspect-ratio: 16/9; }
-.ratio-1-1 .canvas-inner video { height: min(100%, 70vh); aspect-ratio: 1/1; }
+/* 画框尺寸由 JS 按容器实测与目标画幅写入（见 VideoComposition.tsx），视频填满画框并等比留边。 */
+.canvas-inner { display: grid; place-items: center; width: 100%; height: 100%; overflow: hidden; border-radius: 10px; background: #000; }
+.canvas-inner video { display: block; width: 100%; height: 100%; background: #000; object-fit: contain; }
 .preview-empty, .composition-empty { color: var(--muted); font-size: 11px; text-align: center; padding: 18px; }
 .transport { display: flex; align-items: center; gap: 10px; padding: 4px 12px; background: #fff; border-top: 1px solid var(--line); font-size: 10px; color: #4d5368; }
 .transport button { background: transparent; color: #4d5368; border: 0; }
