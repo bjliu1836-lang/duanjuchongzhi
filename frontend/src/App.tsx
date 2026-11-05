@@ -2531,6 +2531,11 @@ export function App() {
             </button>
           ))}
         </nav>
+        {screen === "assets" && (
+          <div className="top-actions asset-top-actions">
+            <button className="primary enter-storyboards" disabled={busy || !assets.length} onClick={() => void enterStoryboards()}>进入分镜&nbsp; →</button>
+          </div>
+        )}
       </header>
 
       {message && message !== "准备就绪" && !modal && <div className={messageIsError ? "global-message error" : "global-message"} role={messageIsError ? "alert" : "status"} aria-live="polite"><span>{message}</span><button type="button" aria-label="关闭提示" onClick={() => setMessage("")}>×</button></div>}
@@ -2721,14 +2726,17 @@ export function App() {
         </section>
 
         <section className={screen === "assets" ? "screen active page-screen" : "screen page-screen"} id="assets">
-          <div className="page-head">
-            <h1>设定</h1>
-            <div>角色 {roleCount} / 子资产 {roleCount}　场景 {sceneCount} / 子资产 {sceneCount}　道具 {propCount}</div>
-          </div>
-          <div className="module-tabs">
-            {(["角色", "场景", "道具", "资产进度"] as AssetTab[]).map((tab) => (
-              <button className={assetTab === tab ? "active" : ""} key={tab} onClick={() => showAssetOverview(tab)}>{tab}</button>
-            ))}
+          <div className="asset-workspace-nav">
+            <div className="module-tabs" role="tablist" aria-label="资产类别">
+              {(["角色", "场景", "道具", "资产进度"] as AssetTab[]).map((tab) => (
+                <button type="button" role="tab" aria-selected={assetTab === tab} className={assetTab === tab ? "active" : ""} key={tab} onClick={() => showAssetOverview(tab)}>{tab}</button>
+              ))}
+            </div>
+            <div className="asset-count-summary" aria-label="资产统计">
+              <span>角色 <b>{roleCount}</b></span>
+              <span>场景 <b>{sceneCount}</b></span>
+              <span>道具 <b>{propCount}</b></span>
+            </div>
           </div>
 
           {analysisIsDegraded && assetView !== "detail" && (
@@ -2835,10 +2843,9 @@ export function App() {
 
           {assetView === "detail" && selectedAsset && (
             <div className="asset-detail sub-panel active">
-              <div className="detail-topbar">
-                <button className="ghost" onClick={() => setAssetView("overview")}>返回{assetTab}概览</button>
-                <h2>{selectedAsset.name} → {selectedAsset.localized_name}</h2>
-                <button className="primary" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
+              <div className="detail-topbar asset-detail-topbar">
+                <button className="ghost back-link" onClick={() => setAssetView("overview")}>← {assetTab}概览</button>
+                <h2>{selectedAsset.name} <span>→</span> {selectedAsset.localized_name}</h2>
               </div>
               <div className="generation-layout">
                 <section className="asset-source-panel">
@@ -2873,13 +2880,16 @@ export function App() {
                     ) : (
                       <div className="asset-empty-thumb asset-empty-large">暂无原资产图</div>
                     )}
-                    <span>源资产事实只读</span>
-                    <p>{originalAssetDescription(selectedAsset)}</p>
+                    <details className="asset-source-description">
+                      <summary>源资产事实 <span>只读</span></summary>
+                      <p>{originalAssetDescription(selectedAsset)}</p>
+                    </details>
                   </section>
                 </section>
                 <aside className="generation-panel asset-generation-studio">
                   <div className="studio-toolbar">
-                    <div className="studio-title"><b>{variantName(selectedAsset)}</b></div>
+                    <div className="studio-title"><span>当前形象</span><b>{variantName(selectedAsset)}</b></div>
+                    <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
                   </div>
                   <div className="studio-preview-row">
                     <div className="studio-preview-main">
@@ -2978,10 +2988,6 @@ export function App() {
             </div>
           )}
 
-          <div className="footer-actions">
-            <button className="ghost" onClick={() => setScreen("source")}>返回</button>
-            <button className="primary" disabled={busy || !assets.length} onClick={() => void enterStoryboards()}>进入分镜</button>
-          </div>
         </section>
 
         <section ref={workbenchRef} style={workbenchStyle} className={`screen workbench${screen === "segments" ? " active" : ""}${assetSidebarCollapsed ? " assets-collapsed" : ""}${previewPanelCollapsed ? " preview-collapsed" : ""}`} id="segments">
