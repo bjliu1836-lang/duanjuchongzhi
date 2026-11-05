@@ -2974,8 +2974,6 @@ export function App() {
                           </select>
                         </label>
                         <span className="asset-ratio-setting">比例 <b>16:9</b></span>
-                      </div>
-                      <div className="agent-prompt-footer">
                         <div className="agent-prompt-actions">
                           <button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>
                           {currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}
