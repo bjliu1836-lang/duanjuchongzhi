@@ -908,6 +908,8 @@ export function App() {
   const [assetPromptDraft, setAssetPromptDraft] = useState("");
   const [assetImageModel, setAssetImageModel] = useState(DEFAULT_ASSET_IMAGE_MODEL);
   const [assetImageCount, setAssetImageCount] = useState(1);
+  const [assetSourcePaneWidth, setAssetSourcePaneWidth] = useState(280);
+  const [assetPreviewHeight, setAssetPreviewHeight] = useState(0);
   const assetImageAspectRatio = "16:9";
   const assetPromptDraftRevision = useRef(new Map<string, number>());
   const selectedAssetIdForPrompt = useRef<string | null>(null);
@@ -946,6 +948,9 @@ export function App() {
   const storyboardSavedBodies = useRef(new Map<string, string>());
   const storyboardPromptSaveRequests = useRef(new Map<string, { prompt: string; promise: Promise<boolean> }>());
   const assetImageInputRef = useRef<HTMLInputElement | null>(null);
+  const assetDetailLayoutRef = useRef<HTMLDivElement | null>(null);
+  const assetPreviewFrameRef = useRef<HTMLDivElement | null>(null);
+  const assetDetailDragRef = useRef<{ pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
   const pollingTaskIds = useRef(new Set<string>());
   const workbenchRef = useRef<HTMLElement | null>(null);
   const splitterDragRef = useRef<{ pane: WorkbenchPane; pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
@@ -1061,6 +1066,30 @@ export function App() {
     "--asset-pane-width": `${assetPaneWidth}px`,
     "--preview-pane-width": `${previewPaneWidth}px`,
   } as CSSProperties;
+  const assetDetailLayoutStyle = {
+    "--asset-source-pane-width": `${assetSourcePaneWidth}px`,
+  } as CSSProperties;
+  useLayoutEffect(() => {
+    const frame = assetPreviewFrameRef.current;
+    if (assetView !== "detail" || !frame) {
+      setAssetPreviewHeight(0);
+      return;
+    }
+    const updateHeight = () => {
+      const width = frame.getBoundingClientRect().width;
+      const nextHeight = Math.round(width * 9 / 16);
+      setAssetPreviewHeight((current) => Math.abs(current - nextHeight) > 1 ? nextHeight : current);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(frame);
+    window.addEventListener("resize", updateHeight);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, [assetView, selectedAsset?.id]);
+  const assetPreviewFrameStyle = assetPreviewHeight > 0 ? { height: `${assetPreviewHeight}px` } : undefined;
   const selectedStoryboardPrompt = useMemo(
     () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : String(
       selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""
@@ -1461,6 +1490,46 @@ export function App() {
   function showAssetOverview(tab: AssetTab) {
     setAssetTab(tab);
     setAssetView("overview");
+  }
+
+  function boundedAssetSourcePaneWidth(width: number) {
+    const layoutWidth = assetDetailLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    const minimumLeft = 220;
+    const minimumRight = 560;
+    const maximumLeft = Math.max(minimumLeft, Math.min(560, layoutWidth - minimumRight - 12));
+    return Math.round(Math.max(minimumLeft, Math.min(maximumLeft, width)));
+  }
+
+  function updateAssetSourcePaneWidth(width: number) {
+    setAssetSourcePaneWidth(boundedAssetSourcePaneWidth(width));
+  }
+
+  function startAssetDetailResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const panel = assetDetailLayoutRef.current?.querySelector<HTMLElement>(".asset-source-panel");
+    if (!panel) return;
+    const startWidth = panel.getBoundingClientRect().width;
+    updateAssetSourcePaneWidth(startWidth);
+    assetDetailDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, target: event.currentTarget };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveAssetDetailResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = assetDetailDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    updateAssetSourcePaneWidth(drag.startWidth + event.clientX - drag.startX);
+  }
+
+  function endAssetDetailResize(event?: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = assetDetailDragRef.current;
+    if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+    assetDetailDragRef.current = null;
+    try {
+      if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
+    } catch {
+      // Pointer capture may already have been released by the browser.
+    }
   }
 
   function renderAssetCard(group: AssetGroup, onClick?: () => void, onRemove?: () => void) {
@@ -2864,7 +2933,7 @@ export function App() {
 
           {assetView === "detail" && selectedAsset && (
             <div className="asset-detail sub-panel active">
-              <div className="generation-layout">
+              <div className="generation-layout" ref={assetDetailLayoutRef} style={assetDetailLayoutStyle}>
                 <section className="asset-source-panel">
                   <div className="asset-detail-summary">
                     <article><span>资产变量</span><b>{assetDisplayVariable(selectedAsset)}</b></article>
@@ -2901,13 +2970,33 @@ export function App() {
                     </details>
                   </section>
                 </section>
+                <button
+                  type="button"
+                  className="asset-pane-splitter"
+                  role="separator"
+                  aria-label="拖拽调整参考区与生成区宽度"
+                  aria-orientation="vertical"
+                  aria-valuemin={220}
+                  aria-valuemax={560}
+                  aria-valuenow={assetSourcePaneWidth}
+                  onPointerDown={startAssetDetailResize}
+                  onPointerMove={moveAssetDetailResize}
+                  onPointerUp={endAssetDetailResize}
+                  onPointerCancel={endAssetDetailResize}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowLeft") updateAssetSourcePaneWidth(assetSourcePaneWidth - 16);
+                    if (event.key === "ArrowRight") updateAssetSourcePaneWidth(assetSourcePaneWidth + 16);
+                  }}
+                >
+                  <span></span>
+                </button>
                 <aside className="generation-panel asset-generation-studio">
                   <div className="studio-toolbar">
                     <div className="studio-title"><span>当前形象</span><b>{variantName(selectedAsset)}</b></div>
                     <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
                   </div>
                   <div className="studio-preview-row">
-                    <div className="studio-preview-main">
+                    <div className="studio-preview-main" ref={assetPreviewFrameRef} style={assetPreviewFrameStyle}>
                       {isGeneratingSelectedAsset ? (
                         <div className="studio-image-loading"><i></i><span>生成中</span></div>
                       ) : selectedAssetCurrentImage ? (
