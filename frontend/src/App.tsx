@@ -1076,11 +1076,21 @@ export function App() {
       return;
     }
     const updatePreviewSize = () => {
+      if (window.matchMedia("(max-width: 1100px)").matches) {
+        setAssetPreviewSize((current) => (current.width === 0 && current.height === 0 ? current : { width: 0, height: 0 }));
+        return;
+      }
       const rect = panel.getBoundingClientRect();
-      const availableWidth = Math.max(320, rect.width - 78);
-      const availableHeight = Math.max(260, Math.min(rect.height * 0.62, 560));
-      const nextWidth = Math.round(Math.min(availableWidth, availableHeight * 16 / 9));
-      const nextHeight = Math.round(nextWidth * 9 / 16);
+      // 确定性分配：先给提示词区预留空间，图片取剩余区域能放下的最大 16:9；
+      // 提示词区用 flex 吃掉图片之外的全部剩余高度，两块之和恒等于面板高度。
+      const historyColumn = 78; // 历史版本列 68px + 间距 10px
+      const chromeHeight = 34 + 24; // 工具栏 34px + 两个 12px 间隔
+      const availableWidth = Math.max(320, rect.width - historyColumn);
+      const contentHeight = Math.max(320, rect.height - chromeHeight);
+      const promptReserve = Math.min(340, Math.max(210, contentHeight * 0.34));
+      const maxImageHeight = Math.max(160, contentHeight - promptReserve);
+      const nextHeight = Math.round(Math.min(maxImageHeight, availableWidth * 9 / 16));
+      const nextWidth = Math.round(nextHeight * 16 / 9);
       setAssetPreviewSize((current) => {
         if (Math.abs(current.width - nextWidth) <= 1 && Math.abs(current.height - nextHeight) <= 1) return current;
         return { width: nextWidth, height: nextHeight };
@@ -1099,6 +1109,9 @@ export function App() {
     ? { width: `${assetPreviewSize.width}px`, height: `${assetPreviewSize.height}px` }
     : undefined;
   const assetPreviewRowStyle = assetPreviewSize.width > 0
+    ? { width: `${assetPreviewSize.width + 78}px`, height: `${assetPreviewSize.height}px` }
+    : undefined;
+  const assetPromptCardStyle = assetPreviewSize.width > 0
     ? { width: `${assetPreviewSize.width + 78}px` }
     : undefined;
   const selectedStoryboardPrompt = useMemo(
@@ -1506,8 +1519,8 @@ export function App() {
   function boundedAssetSourcePaneWidth(width: number) {
     const layoutWidth = assetDetailLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
     const minimumLeft = 220;
-    const minimumRight = 560;
-    const maximumLeft = Math.max(minimumLeft, Math.min(560, layoutWidth - minimumRight - 12));
+    const minimumRight = 430;
+    const maximumLeft = Math.max(minimumLeft, Math.min(Math.round(layoutWidth * 0.62), layoutWidth - minimumRight - 12));
     return Math.round(Math.max(minimumLeft, Math.min(maximumLeft, width)));
   }
 
@@ -2988,7 +3001,7 @@ export function App() {
                   aria-label="拖拽调整参考区与生成区宽度"
                   aria-orientation="vertical"
                   aria-valuemin={220}
-                  aria-valuemax={560}
+                  aria-valuemax={900}
                   aria-valuenow={assetSourcePaneWidth}
                   onPointerDown={startAssetDetailResize}
                   onPointerMove={moveAssetDetailResize}
@@ -3032,7 +3045,7 @@ export function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="agent-generate-card" style={assetPreviewRowStyle}>
+                  <div className="agent-generate-card" style={assetPromptCardStyle}>
                     <div className="agent-card-head"><h3>Agent 生成{assetTab === "角色" ? "形象" : assetTab}</h3></div>
                     <div className="agent-prompt-box">
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (

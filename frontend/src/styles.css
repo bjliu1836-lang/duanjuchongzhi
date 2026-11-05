@@ -1666,7 +1666,7 @@ body[data-screen="assets"] .generation-layout {
   gap: 0;
   max-width: none;
   padding: 16px;
-  overflow: visible;
+  overflow: hidden;
 }
 body[data-screen="assets"] .asset-source-panel {
   display: flex;
@@ -1674,7 +1674,7 @@ body[data-screen="assets"] .asset-source-panel {
   padding: 0 14px 0 0;
   border: 0;
   overflow-x: hidden;
-  overflow-y: visible;
+  overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: #d7dae3 transparent;
 }
@@ -1753,15 +1753,28 @@ body[data-screen="assets"] .compact-subasset-list .subasset-thumb-shell { width:
 body[data-screen="assets"] .compact-subasset-list .subasset-card b { font-size: 11px; }
 body[data-screen="assets"] .compact-subasset-list .subasset-card span { font-size: 10px; }
 body[data-screen="assets"] .asset-parent-link-editor { flex: 0 0 auto; margin-bottom: 12px; font-size: 11px; }
-.asset-reference-card { flex: 0 0 auto; padding-top: 12px; }
+.asset-reference-card {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 12px;
+}
 .asset-reference-card .original-asset-image {
   width: 100%;
-  height: clamp(96px, 18vh, 160px);
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 140px;
   max-height: none;
   margin: 7px 0;
   aspect-ratio: auto;
   border-radius: 9px;
+  object-fit: contain;
   background: #f5f6f8;
+}
+.asset-reference-card .asset-empty-large {
+  flex: 1 1 auto;
+  min-height: 140px;
 }
 .asset-source-description { color: var(--muted); font-size: 11px; }
 .asset-source-description summary { cursor: pointer; color: #656b7d; }
@@ -1775,13 +1788,12 @@ body[data-screen="assets"] .asset-parent-link-editor { flex: 0 0 auto; margin-bo
 }
 
 body[data-screen="assets"] .generation-panel.asset-generation-studio {
-  display: grid;
-  grid-template-rows: auto auto auto;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   min-height: 0;
   padding: 0;
-  overflow: visible;
+  overflow: hidden;
 }
 body[data-screen="assets"] .studio-toolbar {
   display: flex;
@@ -1806,11 +1818,13 @@ body[data-screen="assets"] .studio-preview-row {
   grid-template-columns: minmax(0, 1fr) 68px;
   gap: 10px;
   align-items: stretch;
+  flex: 0 0 auto;
   width: 100%;
   max-width: 100%;
   min-height: 0;
   margin-inline: auto;
   padding: 0;
+  overflow: hidden;
 }
 body[data-screen="assets"] .studio-preview-main {
   position: relative;
@@ -1863,7 +1877,7 @@ body[data-screen="assets"] .agent-prompt-box {
 body[data-screen="assets"] .agent-prompt-box:focus-within { border-color: #a99cf3; box-shadow: 0 0 0 3px rgba(109, 93, 252, .06); }
 body[data-screen="assets"] .agent-prompt-box textarea {
   flex: 1 1 auto;
-  min-height: clamp(180px, 24vh, 280px);
+  min-height: 0;
   padding: 6px;
   border: 0;
   border-radius: 6px;
@@ -1876,7 +1890,7 @@ body[data-screen="assets"] .asset-generation-options {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 10px;
   padding-top: 4px;
 }
@@ -1944,9 +1958,25 @@ body[data-screen="assets"] .agent-prompt-actions .primary { background: #6d5dfc;
   }
   body[data-screen="assets"] .generation-panel.asset-generation-studio {
     order: -1;
-    grid-template-rows: auto auto 250px;
     overflow: visible;
   }
+  body[data-screen="assets"] .studio-preview-row {
+    width: 100%;
+    height: auto;
+  }
+  body[data-screen="assets"] .studio-preview-main {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    aspect-ratio: 16 / 9;
+  }
+  body[data-screen="assets"] .agent-generate-card {
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 240px;
+  }
+  body[data-screen="assets"] .agent-prompt-box textarea { min-height: 180px; }
   body[data-screen="assets"] .asset-source-panel {
     padding: 16px 0 0;
     border-top: 1px solid var(--line);
