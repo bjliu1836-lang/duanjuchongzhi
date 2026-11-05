@@ -2,6 +2,12 @@ import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, CSSProperties, Form
 import { VideoComposition } from "./VideoComposition";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+const ASSET_IMAGE_MODELS = [
+  { id: "doubao-seedream-5-0-260128", label: "Seedream 5.0" },
+  { id: "doubao-seedream-4-5-251128", label: "Seedream 4.5" },
+  { id: "doubao-seedream-4-0-250828", label: "Seedream 4.0" },
+];
+const DEFAULT_ASSET_IMAGE_MODEL = ASSET_IMAGE_MODELS[0].id;
 const ROLE_FIXED_CONSTRAINT = `【固定约束】
 风格：真人写实风格 画质：模拟真实拍摄效果，8K超高清
 光线：明亮柔和
@@ -900,6 +906,9 @@ export function App() {
   const [replaceCharacters, setReplaceCharacters] = useState(false);
   const [replaceScenes, setReplaceScenes] = useState(false);
   const [assetPromptDraft, setAssetPromptDraft] = useState("");
+  const [assetImageModel, setAssetImageModel] = useState(DEFAULT_ASSET_IMAGE_MODEL);
+  const [assetImageCount, setAssetImageCount] = useState(1);
+  const assetImageAspectRatio = "16:9";
   const assetPromptDraftRevision = useRef(new Map<string, number>());
   const selectedAssetIdForPrompt = useRef<string | null>(null);
   const [frameRatio, setFrameRatio] = useState("9:16");
@@ -1457,9 +1466,16 @@ export function App() {
   function renderAssetCard(group: AssetGroup, onClick?: () => void, onRemove?: () => void) {
     const originalUrl = groupOriginalImageUrl(group);
     const confirmedUrl = groupConfirmedImageUrl(group);
+    const generatedUrl = group.items.map((item) => selectedAssetImageUrl(item)).find(Boolean) || "";
+    const generationStatus = group.items.some((item) => generatingAssetIds.has(item.id) || item.payload?.generationInProgress === true)
+      ? "生成中"
+      : group.items.some((item) => (item.images?.length ?? 0) > 0) ? "已生成" : "待生成";
     return (
       <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
-        <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+        <div className="asset-card-statuses">
+          <i className={`asset-generation-status ${generationStatus === "生成中" ? "generating" : generationStatus === "已生成" ? "generated" : ""}`}>{generationStatus}</i>
+          <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+        </div>
         <div className="asset-card-visuals">
           <figure>
             {originalUrl ? (
@@ -1474,13 +1490,13 @@ export function App() {
             <figcaption>{group.name}</figcaption>
           </figure>
           <figure>
-            {confirmedUrl ? (
-              <img className="asset-card-image" src={confirmedUrl} alt="已确认目标资产图" onClick={(event) => {
+            {generatedUrl ? (
+              <img className="asset-card-image" src={generatedUrl} alt={confirmedUrl ? "已确认目标资产图" : "目标资产图"} onClick={(event) => {
                 event.stopPropagation();
-                openImage(confirmedUrl, `${group.localizedName} 已确认资产图`);
+                openImage(generatedUrl, `${group.localizedName} 目标资产图`);
               }} />
             ) : (
-              <div className="asset-placeholder compact">待确认</div>
+              <div className="asset-placeholder compact">待生成</div>
             )}
             <em>新</em>
             <figcaption>{group.localizedName}</figcaption>
@@ -1882,9 +1898,14 @@ export function App() {
       await request(`/api/projects/${currentProject.id}/assets/${asset.id}/generate-image`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ finalPrompt: canonicalPrompt }),
+        body: JSON.stringify({
+          finalPrompt: canonicalPrompt,
+          model: assetImageModel,
+          count: assetImageCount,
+          aspectRatio: assetImageAspectRatio,
+        }),
       });
-      setMessage("资产图已生成");
+      setMessage(`已生成 ${assetImageCount} 张资产图，可在历史版本中切换`);
       await loadAssets(currentProject.id);
     } finally {
       const finished = new Set(generatingAssetIdsRef.current);
@@ -2843,17 +2864,11 @@ export function App() {
 
           {assetView === "detail" && selectedAsset && (
             <div className="asset-detail sub-panel active">
-              <div className="detail-topbar asset-detail-topbar">
-                <button className="ghost back-link" onClick={() => setAssetView("overview")}>← {assetTab}概览</button>
-                <h2>{selectedAsset.name} <span>→</span> {selectedAsset.localized_name}</h2>
-              </div>
               <div className="generation-layout">
                 <section className="asset-source-panel">
                   <div className="asset-detail-summary">
                     <article><span>资产变量</span><b>{assetDisplayVariable(selectedAsset)}</b></article>
                     <article><span>出现集数</span><b>{Array.isArray(selectedAsset.payload?.出现集数) && selectedAsset.payload.出现集数.length ? `第 ${selectedAsset.payload.出现集数.join("、")} 集` : "当前集"}</b></article>
-                    <article><span>剧情身份/功能</span><b>{pickText(selectedAsset.payload, ["剧情身份", "剧情功能"]) || "来自原片分析"}</b></article>
-                    <article><span>当前状态</span><b>{selectedAsset.status}</b></article>
                   </div>
                   <div className="panel-title">子资产候选</div>
                   <div className="subasset-list compact-subasset-list">
@@ -2945,8 +2960,22 @@ export function App() {
                         assetPromptDraftRevision.current.set(selectedAsset.id, (assetPromptDraftRevision.current.get(selectedAsset.id) ?? 0) + 1);
                         setAssetPromptDraft(event.target.value);
                       }} onBlur={() => saveAssetPrompt(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} placeholder="当前资产未返回提示词" disabled={busy} />
+                      <div className="asset-generation-options">
+                        <label>
+                          <span>模型</span>
+                          <select value={assetImageModel} onChange={(event) => setAssetImageModel(event.target.value)} disabled={isGeneratingSelectedAsset}>
+                            {ASSET_IMAGE_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span>张数</span>
+                          <select value={assetImageCount} onChange={(event) => setAssetImageCount(Number(event.target.value))} disabled={isGeneratingSelectedAsset}>
+                            {[1, 2, 3, 4].map((count) => <option key={count} value={count}>{count} 张</option>)}
+                          </select>
+                        </label>
+                        <span className="asset-ratio-setting">比例 <b>16:9</b></span>
+                      </div>
                       <div className="agent-prompt-footer">
-                        <div className="agent-model-note">按当前后端模型配置生成</div>
                         <div className="agent-prompt-actions">
                           <button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>
                           {currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}

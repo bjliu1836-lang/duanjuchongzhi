@@ -19,7 +19,7 @@
     "responseTimeoutSeconds": 900,
     "maxOutputTokens": 131072,
     "agentExtraTimeoutSeconds": 60,
-    "imageSize": "2K",
+    "imageSize": "2848x1600",
     "imageWatermark": true,
     "thinking": {
       "type": "disabled"

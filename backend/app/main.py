@@ -38,6 +38,13 @@ REMAKE_MODES = {"overseas_localization", "cg_3d", "asset_replacement"}
 ASSET_PROMPT_TEMPLATE_VERSION = "asset-prompt-v3-independent-visual"
 ASSET_SOURCE_SCHEMA_VERSION = "asset-source-snapshot-v2-canonical-reviewed"
 ASSET_LOCALIZATION_SCHEMA_VERSION = "asset-localized-profile-v2-source-bound"
+ASSET_IMAGE_MODELS = {
+    "doubao-seedream-5-0-260128",
+    "doubao-seedream-4-5-251128",
+    "doubao-seedream-4-0-250828",
+}
+ASSET_IMAGE_ASPECT_SIZES = {"16:9": "2848x1600"}
+DEFAULT_ASSET_IMAGE_ASPECT_RATIO = "16:9"
 STORYBOARD_STYLE_TEMPLATES = {
     "live_action": "真人实拍电影质感。角色与环境采用真实世界的比例、材质、自然光照及摄影成像，保持原分镜的动作、情绪、站位、构图和运镜；避免三维CG与卡通渲染质感。",
     "cg_3d": "高端三维游戏CG过场动画质感，Unreal Engine 5 cinematic render，Final Fantasy CG style，非摄影式三维网格与数字雕刻材质，PBR材质和电影级三维光照；保持原分镜的动作、情绪、站位、构图和运镜，角色与场景风格统一；避免真人摄影皮肤、照片颗粒与二维插画。",
@@ -2494,6 +2501,9 @@ class AssetUploadRequest(BaseModel):
 class AssetImageRequest(BaseModel):
     prompt: str | None = None
     finalPrompt: str | None = None
+    model: str | None = None
+    count: int = 1
+    aspectRatio: str = DEFAULT_ASSET_IMAGE_ASPECT_RATIO
 
 
 class SelectAssetImageRequest(BaseModel):
@@ -3272,89 +3282,123 @@ def generate_asset_image(project_id: str, asset_id: str, payload: AssetImageRequ
             conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
             conn.commit()
             raise HTTPException(status_code=500, detail=f"资产生图准备失败：{exc}") from exc
-        image_id = new_id("asset_image")
+        if not 1 <= payload.count <= 4:
+            conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
+            conn.commit()
+            raise HTTPException(status_code=422, detail="每次可生成 1 到 4 张资产图。")
+        aspect_ratio = payload.aspectRatio.strip()
+        if aspect_ratio not in ASSET_IMAGE_ASPECT_SIZES:
+            conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
+            conn.commit()
+            raise HTTPException(status_code=422, detail="资产图当前仅支持 16:9 比例。")
+        model_name = str(payload.model or agent.get("model_name") or "").strip()
+        if not model_name or (payload.model is not None and model_name not in ASSET_IMAGE_MODELS):
+            conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
+            conn.commit()
+            raise HTTPException(status_code=422, detail="请选择支持的 Seedream 图片模型。")
+        image_size = ASSET_IMAGE_ASPECT_SIZES[aspect_ratio]
         image_dir = PROJECTS_DIR / project_id / "assets" / asset["asset_type"]
         image_dir.mkdir(parents=True, exist_ok=True)
+        generated_images: list[tuple[Path, dict[str, Any]]] = []
         if agent.get("mode") == "mock":
-            image_path = image_dir / f"{image_id}.svg"
-            image_path.write_text(render_mock_asset_svg(asset, prompt), encoding="utf-8")
-            image_payload = {
-                "mock": True,
-                "agent": agent,
-                "note": "assetImageGeneration 未启用，使用本地 mock 占位图。",
-                "remakeMode": project.get("remake_mode", "overseas_localization"),
-                "templateVersion": ASSET_PROMPT_TEMPLATE_VERSION,
-                "targetDescription": asset_payload.get("目标生成描述", ""),
-                "promptSnapshot": prompt,
-            }
+            for image_index in range(payload.count):
+                image_id = new_id("asset_image")
+                image_path = image_dir / f"{image_id}.svg"
+                image_path.write_text(render_mock_asset_svg(asset, prompt), encoding="utf-8")
+                image_payload = {
+                    "mock": True,
+                    "agent": agent,
+                    "model": model_name,
+                    "aspectRatio": aspect_ratio,
+                    "size": image_size,
+                    "generationIndex": image_index + 1,
+                    "generationCount": payload.count,
+                    "note": "assetImageGeneration 未启用，使用本地 mock 占位图。",
+                    "remakeMode": project.get("remake_mode", "overseas_localization"),
+                    "templateVersion": ASSET_PROMPT_TEMPLATE_VERSION,
+                    "targetDescription": asset_payload.get("目标生成描述", ""),
+                    "promptSnapshot": prompt,
+                }
+                generated_images.append((image_path, image_payload))
         else:
             try:
                 config = load_models_config()
                 provider = get_model_provider(config)
-                image_result = provider.generate_image(
-                    model_name=agent.get("model_name", ""),
-                    prompt=enforce_role_cg_fixed_suffix(prompt, asset["asset_type"], project),
-                    size=str(config.get("volcengine", {}).get("imageSize") or "2K"),
-                    response_format="url",
-                    sequential_image_generation="disabled",
-                    # Asset sheets are clean reference plates; keep the global
-                    # watermark setting for other image-generation workflows.
-                    watermark=False,
-                    stream=False,
-                )
+                for image_index in range(payload.count):
+                    image_id = new_id("asset_image")
+                    image_result = provider.generate_image(
+                        model_name=model_name,
+                        prompt=enforce_role_cg_fixed_suffix(prompt, asset["asset_type"], project),
+                        size=image_size,
+                        response_format="url",
+                        sequential_image_generation="disabled",
+                        # Asset sheets are clean reference plates; keep the global
+                        # watermark setting for other image-generation workflows.
+                        watermark=False,
+                        stream=False,
+                    )
+                    mime_type = str(image_result.get("mime_type") or "image/png")
+                    image_path = image_dir / f"{image_id}{image_extension(mime_type)}"
+                    image_path.write_bytes(image_result["image_bytes"])
+                    image_payload = {
+                        "mock": False,
+                        "agent": agent,
+                        "model": image_result.get("model") or model_name,
+                        "source_url": image_result.get("image_url", ""),
+                        "aspectRatio": aspect_ratio,
+                        "size": image_result.get("size", image_size),
+                        "generationIndex": image_index + 1,
+                        "generationCount": payload.count,
+                        "mime_type": mime_type,
+                        "raw": image_result.get("raw", {}),
+                        "remakeMode": project.get("remake_mode", "overseas_localization"),
+                        "templateVersion": ASSET_PROMPT_TEMPLATE_VERSION,
+                        "targetDescription": asset_payload.get("目标生成描述", ""),
+                        "promptSnapshot": prompt,
+                    }
+                    generated_images.append((image_path, image_payload))
             except ProviderError as exc:
+                for generated_path, _ in generated_images:
+                    generated_path.unlink(missing_ok=True)
                 conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
                 conn.commit()
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except Exception as exc:
+                for generated_path, _ in generated_images:
+                    generated_path.unlink(missing_ok=True)
                 conn.execute("UPDATE asset_generation_jobs SET status='failed',updated_at=? WHERE id=?", (now_iso(), job_id))
                 conn.commit()
                 raise HTTPException(status_code=500, detail=f"资产生图失败：{exc}") from exc
-            mime_type = str(image_result.get("mime_type") or "image/png")
-            image_path = image_dir / f"{image_id}{image_extension(mime_type)}"
-            image_path.write_bytes(image_result["image_bytes"])
-            image_payload = {
-                "mock": False,
-                "agent": agent,
-                "model": image_result.get("model"),
-                "source_url": image_result.get("image_url", ""),
-                "size": image_result.get("size", "2K"),
-                "mime_type": mime_type,
-                "raw": image_result.get("raw", {}),
-                "remakeMode": project.get("remake_mode", "overseas_localization"),
-                "templateVersion": ASSET_PROMPT_TEMPLATE_VERSION,
-                "targetDescription": asset_payload.get("目标生成描述", ""),
-                "promptSnapshot": prompt,
-            }
         current_project = get_project_or_404(conn, project_id)
         if current_project.get("remake_mode", "overseas_localization") != project.get("remake_mode", "overseas_localization"):
-            image_path.unlink(missing_ok=True)
+            for generated_path, _ in generated_images:
+                generated_path.unlink(missing_ok=True)
             conn.execute("UPDATE asset_generation_jobs SET status='stale',updated_at=? WHERE id=?", (now_iso(), job_id))
             conn.commit()
             raise HTTPException(status_code=409, detail="项目模式已变化，旧模式生成结果已丢弃，请在当前项目重新生成。")
-        timestamp = now_iso()
         conn.execute(
             "UPDATE asset_images SET is_selected = 0 WHERE asset_id = ?",
             (asset_id,),
         )
-        conn.execute(
-            """
-            INSERT INTO asset_images
-            (id, project_id, asset_id, status, prompt, file_path, is_selected, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                image_id,
-                project_id,
-                asset_id,
-                "成功",
-                prompt,
-                str(image_path),
-                1,
-                json.dumps(image_payload, ensure_ascii=False),
-                timestamp,
-            ),
-        )
+        for image_index, (image_path, image_payload) in enumerate(generated_images):
+            conn.execute(
+                """
+                INSERT INTO asset_images
+                (id, project_id, asset_id, status, prompt, file_path, is_selected, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    image_path.stem,
+                    project_id,
+                    asset_id,
+                    "成功",
+                    prompt,
+                    str(image_path),
+                    1 if image_index == len(generated_images) - 1 else 0,
+                    json.dumps({**image_payload, "generationJobId": job_id}, ensure_ascii=False),
+                    now_iso(),
+                ),
+            )
         conn.execute(
             "UPDATE assets SET status = ? WHERE id = ? AND project_id = ?",
             ("已生成资产图", asset_id, project_id),

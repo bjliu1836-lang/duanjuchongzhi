@@ -255,6 +255,54 @@ def test_editable_final_prompt_persists_and_is_sent_exactly_without_retemplating
     assert "【基础设定】" not in provider_prompts[0]
 
 
+def test_asset_image_model_count_and_wide_ratio_create_real_history_versions(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="asset-image-options", remakeMode="overseas_localization", sourceLanguage="中文")
+    asset_id, _ = insert_source_records(project, selected_image=False)
+    provider_calls: list[dict] = []
+
+    class ProviderSpy:
+        def generate_image(self, **kwargs):
+            provider_calls.append(kwargs)
+            image = io.BytesIO()
+            Image.new("RGB", (16, 9), (80, 90, 100)).save(image, format="PNG")
+            return {
+                "image_bytes": image.getvalue(),
+                "mime_type": "image/png",
+                "size": kwargs["size"],
+                "model": kwargs["model_name"],
+                "raw": {},
+            }
+
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "doubao-seedream-5-0-260128", "prompt": "", "prompt_file": "test"})
+    monkeypatch.setattr(main, "load_models_config", lambda: {"volcengine": {"imageSize": "2K"}})
+    monkeypatch.setattr(main, "get_model_provider", lambda _config: ProviderSpy())
+    response = client.post(
+        f"/api/projects/{project['id']}/assets/{asset_id}/generate-image",
+        json={
+            "finalPrompt": "横向角色资产设定图",
+            "model": "doubao-seedream-4-5-251128",
+            "count": 3,
+            "aspectRatio": "16:9",
+        },
+    )
+    assert response.status_code == 200, response.text
+    images = response.json()["asset"]["images"]
+    assert len(provider_calls) == 3
+    assert {call["model_name"] for call in provider_calls} == {"doubao-seedream-4-5-251128"}
+    assert {call["size"] for call in provider_calls} == {"2848x1600"}
+    assert len(images) == 3
+    assert sum(image["is_selected"] for image in images) == 1
+    assert {image["payload"]["generationIndex"] for image in images} == {1, 2, 3}
+    assert {image["payload"]["aspectRatio"] for image in images} == {"16:9"}
+
+    rejected = client.post(
+        f"/api/projects/{project['id']}/assets/{asset_id}/generate-image",
+        json={"finalPrompt": "横向角色资产设定图", "model": "unsupported-model", "count": 5},
+    )
+    assert rejected.status_code == 422
+    assert len(provider_calls) == 3
+
+
 def test_blank_manual_final_prompt_fails_but_nonempty_unresolved_text_is_sent(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="manual-final-prompt-guard", remakeMode="overseas_localization", sourceLanguage="中文")
     asset_id, _ = insert_source_records(project, selected_image=False)
@@ -492,7 +540,8 @@ def test_provider_receives_exact_final_role_prompt_snapshot_and_size(client: Tes
     image = response.json()["asset"]["images"][0]
     assert captured["prompt"] == image["prompt"] == image["payload"]["promptSnapshot"]
     assert captured["prompt"].count(main.CG_ROLE_FIXED_TEMPLATE) == 1
-    assert captured["size"] == "2K"
+    assert captured["size"] == "2848x1600"
+    assert image["payload"]["aspectRatio"] == "16:9"
     assert image["payload"]["mock"] is False
     repeated = client.post(
         f"/api/projects/{project['id']}/assets/{asset_id}/generate-image",
