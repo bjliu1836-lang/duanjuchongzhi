@@ -3878,3 +3878,27 @@ def test_legacy_parent_links_migrate_into_custom_groups(client: TestClient):
     assert len(groups) == 1
     assert groups[0]["name"] == "白教练"
     assert {item["assetKey"] for item in groups[0]["members"]} == {"角色:白教练", "角色:1号球员"}
+
+
+def test_alias_occurs_standalone_skips_prefix_of_qualified_variable():
+    body = "出镜角色：@23号球员-CHAR001SUB01、@京北大学替补席球员群像-CHAR003SUB01。"
+    # 旧别名只是新展示变量的前缀，不应再被误判为独立引用（歧义误报根因）。
+    assert main._alias_occurs_standalone(body, "@23号球员") is False
+    assert main._alias_occurs_standalone(body, "@京北大学替补席球员群像") is False
+    # 完整展示变量正常命中。
+    assert main._alias_occurs_standalone(body, "@23号球员-CHAR001SUB01") is True
+    # 独立使用的旧别名仍然命中（不误伤真实待核对项）。
+    assert main._alias_occurs_standalone("他看向 @23号球员，随后传球。", "@23号球员") is True
+    assert main._alias_occurs_standalone("结尾是 @23号球员", "@23号球员") is True
+
+
+def test_alias_occurs_standalone_skips_prefix_of_qualified_variable():
+    body = "出镜角色：@23号球员-CHAR001SUB01、@京北大学替补席球员群像-CHAR003SUB01。"
+    # 旧别名只是新展示变量的前缀，不应再被误判为独立引用（歧义误报根因）。
+    assert main._alias_occurs_standalone(body, "@23号球员") is False
+    assert main._alias_occurs_standalone(body, "@京北大学替补席球员群像") is False
+    # 完整展示变量正常命中。
+    assert main._alias_occurs_standalone(body, "@23号球员-CHAR001SUB01") is True
+    # 独立使用的旧别名仍然命中（不误伤真实待核对项）。
+    assert main._alias_occurs_standalone("他看向 @23号球员，随后传球。", "@23号球员") is True
+    assert main._alias_occurs_standalone("结尾是 @23号球员", "@23号球员") is True

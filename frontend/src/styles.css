@@ -900,7 +900,7 @@ body[data-screen="segments"] .prompt-variable-thumb img { object-fit: contain; }
 body[data-screen="segments"] .prompt-variable-thumb:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
 body[data-screen="segments"] .prompt-variable-thumb-empty { background: linear-gradient(135deg, #f6f4fa, #ebe7f3); }
 body[data-screen="segments"] .prompt-editor-wrap { display: flex; flex: 1 1 auto; min-height: 180px; }
-body[data-screen="segments"] .prompt-rich-editor { width: 100%; min-height: 220px; flex: 1 1 auto; box-sizing: border-box; padding: 10px 12px; overflow: auto; border: 1px solid #d9d4e4; border-radius: 9px; background: #fff; color: var(--text); font-size: 13px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; }
+body[data-screen="segments"] .prompt-rich-editor { width: 100%; min-height: 0; flex: 1 1 auto; box-sizing: border-box; padding: 10px 12px; overflow: auto; border: 1px solid #d9d4e4; border-radius: 9px; background: #fff; color: var(--text); font-size: 13px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; }
 body[data-screen="segments"] .prompt-rich-editor:focus { border-color: #9a78e8; box-shadow: 0 0 0 3px #8f67ff18; }
 body[data-screen="segments"] .prompt-rich-editor:empty::before { content: attr(data-placeholder); color: #9a94a8; pointer-events: none; }
 body[data-screen="segments"] .prompt-variable-chip { display: inline-flex; max-width: 100%; align-items: center; vertical-align: baseline; gap: 4px; margin: 0 2px; padding: 1px 5px; border: 1px solid #ded5f1; border-radius: 5px; background: #f8f5ff; color: #574580; font-size: 11px; line-height: 1.45; cursor: zoom-in; user-select: all; }
@@ -2002,3 +2002,12 @@ body[data-screen="assets"] .agent-prompt-actions .primary { background: #6d5dfc;
   body[data-screen="assets"] .asset-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body[data-screen="assets"] .agent-prompt-actions { justify-content: flex-end; }
 }
+
+/* 原片对比：切分原片片段循环预览与片段切换 */
+body[data-screen="segments"] .original-clip-preview { display: flex; flex-direction: column; gap: 10px; }
+body[data-screen="segments"] .original-clip-preview video { width: 100%; border-radius: 10px; background: #000; }
+body[data-screen="segments"] .original-clip-preview .source-preview-label { color: var(--muted); font-size: 12px; line-height: 1.5; }
+body[data-screen="segments"] .original-clip-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+body[data-screen="segments"] .original-clip-list button { text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text); font-size: 12px; cursor: pointer; }
+body[data-screen="segments"] .original-clip-list button:hover { border-color: var(--purple); }
+body[data-screen="segments"] .original-clip-list button.active { border-color: var(--purple); background: #f5f0ff; color: var(--purple); }

@@ -3526,6 +3526,25 @@ def get_storyboard_response(conn: sqlite3.Connection, project_id: str, storyboar
     return {"storyboard": item}
 
 
+def _alias_occurs_standalone(text: str, token: str) -> bool:
+    """仅当别名以完整形式出现（而非更长展示别名的前缀）时才算命中。
+
+    展示变量形如 @23号球员-CHAR001SUB01，旧别名 @23号球员 是其前缀；
+    简单子串匹配会把旧别名误判为存在并造成歧义误报。这里要求别名出现后
+    不是紧跟 "-字母/数字" 的续接，否则该次出现归属于更长的展示别名。
+    """
+    start = 0
+    while True:
+        index = text.find(token, start)
+        if index < 0:
+            return False
+        following = text[index + len(token): index + len(token) + 2]
+        if re.match(r"-[A-Za-z0-9]", following):
+            start = index + 1
+            continue
+        return True
+
+
 def recompute_active_storyboard_reference_review(
     conn: sqlite3.Connection,
     project_id: str,
@@ -3575,7 +3594,7 @@ def recompute_active_storyboard_reference_review(
 
     # Match project-known aliases verbatim, then recognize unresolved ASCII
     # @mentions / canonical variables without consuming adjacent Chinese prose.
-    present_tokens = {token for token in known_tokens if token in active_text}
+    present_tokens = {token for token in known_tokens if _alias_occurs_standalone(active_text, token)}
     present_tokens.update(re.findall(r"\{\{[A-Za-z0-9_-]+\}\}|@[A-Za-z][A-Za-z0-9_-]*", active_text))
     active_reviews: list[dict[str, Any]] = []
     for token in sorted(present_tokens):

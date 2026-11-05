@@ -865,6 +865,51 @@ function getInitialWorkbenchPaneWidths() {
   };
 }
 
+// 原片对比：循环播放当前分镜对应的原片片段，并可切换查看全部切分片段。
+function OriginalClipPreview({ sourceUrl, storyboard, storyboards, onSelect }: {
+  sourceUrl: string;
+  storyboard: Storyboard;
+  storyboards: Storyboard[];
+  onSelect: (storyboard: Storyboard) => void;
+}) {
+  const range = parseRange(storyboard.time_range || "");
+  return (
+    <div className="original-clip-preview">
+      <div className="source-preview-label">原片片段 · {storyboard.title} · {storyboard.time_range}（循环）</div>
+      <video
+        key={storyboard.id}
+        src={sourceUrl}
+        controls
+        playsInline
+        autoPlay
+        muted
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start;
+        }}
+        onTimeUpdate={(event) => {
+          const video = event.currentTarget;
+          if (range.end > range.start && video.currentTime >= range.end) {
+            video.currentTime = range.start;
+            void video.play().catch(() => undefined);
+          }
+        }}
+      />
+      <div className="original-clip-list">
+        {storyboards.map((item) => (
+          <button
+            key={item.id}
+            className={item.id === storyboard.id ? "active" : ""}
+            onClick={() => onSelect(item)}
+          >
+            {item.title} · {item.time_range}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -922,6 +967,8 @@ export function App() {
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
   const [segmentPanel, setSegmentPanel] = useState<SegmentPanel>("shot-prompt");
+  // 右侧预览区分两种：整集原片参考（episode）与切分原片片段对比（segments）。
+  const [previewMode, setPreviewMode] = useState<"episode" | "segments">("episode");
   const [storyboardSaveStates, setStoryboardSaveStates] = useState<Record<string, "saved" | "saving" | "failed">>({});
   const [activeAnalysisTask, setActiveAnalysisTask] = useState<Task | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState({ story: 0, asset: 0 });
@@ -1035,27 +1082,38 @@ export function App() {
     const memberKeys = new Set(selectedCustomGroup.members.map((member) => member.assetKey));
     return assetGroups.filter((group) => memberKeys.has(group.key));
   }, [assetGroups, selectedCustomGroup]);
+  // 稳定变量（如 {{CHAR_001_SUB_01}}）按集隔离，同一变量在不同集会重复出现。
+  // 后端按"项目子资产Key"合并资产，episode_id 只保留首条而"出现集数"跨多集，
+  // 因此必须按"出现集数"（episode_index）过滤，否则跨集多命中会被误判为歧义、缩略图无法解析。
+  const storyboardScopeAssets = useMemo(() => {
+    const episodeIndex = selectedEpisode?.episode_index;
+    return assets.filter((asset) => {
+      const appearances = asset.payload?.["出现集数"];
+      if (!episodeIndex || !Array.isArray(appearances) || !appearances.length) return true;
+      return appearances.includes(episodeIndex);
+    });
+  }, [assets, selectedEpisode]);
   const selectedStoryboardReferenceTokens = useMemo(() => {
     if (!selectedStoryboard) return [];
     const payloadRefs = splitAssetVariableValues(selectedStoryboard.payload?.["引用资产变量"]);
-    return canonicalizeAssetReferences(payloadRefs, assets);
-  }, [assets, selectedStoryboard]);
+    return canonicalizeAssetReferences(payloadRefs, storyboardScopeAssets);
+  }, [storyboardScopeAssets, selectedStoryboard]);
   const selectedStoryboardAssets = useMemo(() => {
     const matches = selectedStoryboardReferenceTokens
-      .map((token) => resolveUniqueAssetReference(token, assets))
+      .map((token) => resolveUniqueAssetReference(token, storyboardScopeAssets))
       .filter((asset): asset is Asset => Boolean(asset));
     return Array.from(new Map(matches.map((asset) => [asset.id, asset])).values());
-  }, [assets, selectedStoryboardReferenceTokens]);
+  }, [storyboardScopeAssets, selectedStoryboardReferenceTokens]);
   function getLatestStoryboardReferenceTokens(storyboard: Storyboard) {
     const draft = storyboardReferenceDrafts.current.get(storyboard.id);
-    if (draft && draft.projectId === currentProject?.id) return canonicalizeAssetReferences(draft.references, assets);
+    if (draft && draft.projectId === currentProject?.id) return canonicalizeAssetReferences(draft.references, storyboardScopeAssets);
     if (selectedStoryboard?.id === storyboard.id) return [...selectedStoryboardReferenceTokens];
-    return canonicalizeAssetReferences(splitAssetVariableValues(storyboard.payload?.["引用资产变量"]), assets);
+    return canonicalizeAssetReferences(splitAssetVariableValues(storyboard.payload?.["引用资产变量"]), storyboardScopeAssets);
   }
   const selectedStoryboardReferenceItems = useMemo(() => {
     const seen = new Set<string>();
     return selectedStoryboardReferenceTokens.flatMap((token) => {
-      const asset = resolveUniqueAssetReference(token, assets);
+      const asset = resolveUniqueAssetReference(token, storyboardScopeAssets);
       const key = asset ? `asset:${asset.id}` : `reference:${token}`;
       if (seen.has(key)) return [];
       seen.add(key);
@@ -1124,10 +1182,10 @@ export function App() {
     if (!selectedStoryboard || !promptInputRef.current) return;
     const previous = promptEditorSync.current;
     if (previous?.storyboardId === selectedStoryboard.id && promptCompositionActive.current) return;
-    if (previous?.storyboardId === selectedStoryboard.id && previous.value === selectedStoryboardPrompt && previous.assets === assets) return;
-    renderPromptEditor(promptInputRef.current, selectedStoryboardPrompt, assets, openImage);
-    promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: selectedStoryboardPrompt, assets };
-  }, [selectedStoryboard?.id, selectedStoryboardPrompt, assets]);
+    if (previous?.storyboardId === selectedStoryboard.id && previous.value === selectedStoryboardPrompt && previous.assets === storyboardScopeAssets) return;
+    renderPromptEditor(promptInputRef.current, selectedStoryboardPrompt, storyboardScopeAssets, openImage);
+    promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: selectedStoryboardPrompt, assets: storyboardScopeAssets };
+  }, [selectedStoryboard?.id, selectedStoryboardPrompt, storyboardScopeAssets]);
   const mentionOptions = useMemo(() => {
     const query = (mentionQuery ?? "").toLowerCase();
     return assets.filter((asset) => {
@@ -2188,7 +2246,7 @@ export function App() {
       }
     }
     const value = readPromptEditor(editor);
-    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
     updateStoryboardPromptText(value);
     if (!promptCompositionActive.current) updatePromptMention(value, promptSelectionOffset(editor) ?? value.length);
   }
@@ -2202,7 +2260,7 @@ export function App() {
   async function saveStoryboardReferenceOverrides(storyboard: Storyboard, references: string[]) {
     if (!currentProject) return false;
     const projectId = currentProject.id;
-    const normalizedReferences = canonicalizeAssetReferences(references.filter(Boolean), assets);
+    const normalizedReferences = canonicalizeAssetReferences(references.filter(Boolean), storyboardScopeAssets);
     storyboardReferenceDrafts.current.set(storyboard.id, { projectId, references: normalizedReferences });
     const revision = (storyboardReferenceRevision.current.get(storyboard.id) ?? 0) + 1;
     storyboardReferenceRevision.current.set(storyboard.id, revision);
@@ -2310,7 +2368,7 @@ export function App() {
       return;
     }
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    const referencedIds = new Set(currentReferences.map((item) => resolveUniqueAssetReference(item, assets)?.id).filter(Boolean));
+    const referencedIds = new Set(currentReferences.map((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id).filter(Boolean));
     const additions = groupAssets.filter((asset) => !referencedIds.has(asset.id)).map((asset) => asset.variable || assetDisplayVariable(asset));
     if (!additions.length) {
       setMessage("该资产组已在当前分镜中调用");
@@ -2323,8 +2381,8 @@ export function App() {
   async function toggleStoryboardAsset(asset: Asset) {
     if (!selectedStoryboard) return;
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    const wasReferenced = currentReferences.some((item) => resolveUniqueAssetReference(item, assets)?.id === asset.id);
-    const nextRefs = currentReferences.filter((item) => resolveUniqueAssetReference(item, assets)?.id !== asset.id);
+    const wasReferenced = currentReferences.some((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id === asset.id);
+    const nextRefs = currentReferences.filter((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id !== asset.id);
     if (!wasReferenced) nextRefs.push(asset.variable || assetDisplayVariable(asset));
     if (!await saveStoryboardReferenceOverrides(selectedStoryboard, nextRefs)) return;
     if (wasReferenced) setMessage(`已移除引用 ${assetDisplayName(asset)}`);
@@ -2335,7 +2393,7 @@ export function App() {
     if (!selectedStoryboard) return;
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
     const nextReferences = asset
-      ? currentReferences.filter((item) => resolveUniqueAssetReference(item, assets)?.id !== asset.id)
+      ? currentReferences.filter((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id !== asset.id)
       : currentReferences.filter((item) => item !== token);
     if (!await saveStoryboardReferenceOverrides(selectedStoryboard, nextReferences)) return;
     setMessage(`已移除引用 ${asset ? assetDisplayName(asset) : token}`);
@@ -2426,7 +2484,7 @@ export function App() {
   function handlePromptInput(event: FormEvent<HTMLDivElement>) {
     const editor = event.currentTarget;
     const value = readPromptEditor(editor);
-    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
     updateStoryboardPromptText(value);
     if (promptCompositionActive.current || (event.nativeEvent as InputEvent).isComposing) return;
     const caret = promptSelectionOffset(editor) ?? value.length;
@@ -2439,7 +2497,7 @@ export function App() {
     if (!editor) return;
     const value = readPromptEditor(editor);
     const caret = promptSelectionOffset(editor) ?? value.length;
-    renderPromptEditor(editor, value, assets, openImage);
+    renderPromptEditor(editor, value, storyboardScopeAssets, openImage);
     const point = promptDomPoint(editor, caret);
     const range = document.createRange();
     range.setStart(point.node, point.offset);
@@ -2447,7 +2505,7 @@ export function App() {
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
     updateStoryboardPromptText(value);
     updatePromptMention(value, caret);
   }
@@ -2456,7 +2514,7 @@ export function App() {
     if (!selectedStoryboard || mentionQuery === null || !mentionRange) return;
     const value = promptInputRef.current ? readPromptEditor(promptInputRef.current) : selectedStoryboardPrompt;
     const stableToken = asset.variable || asset.id;
-    if (promptInputRef.current) insertPromptToken(promptInputRef.current, mentionRange.start, mentionRange.end, stableToken, assets, openImage);
+    if (promptInputRef.current) insertPromptToken(promptInputRef.current, mentionRange.start, mentionRange.end, stableToken, storyboardScopeAssets, openImage);
     if (promptInputRef.current) {
       const selection = window.getSelection();
       const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
@@ -2470,10 +2528,10 @@ export function App() {
       }
     }
     const nextValue = promptInputRef.current ? readPromptEditor(promptInputRef.current) : `${value.slice(0, mentionRange.start)}${stableToken} ${value.slice(mentionRange.end)}`;
-    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: nextValue, assets };
+    if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value: nextValue, assets: storyboardScopeAssets };
     updateStoryboardPromptText(nextValue);
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    if (!currentReferences.some((item) => resolveUniqueAssetReference(item, assets)?.id === asset.id)) {
+    if (!currentReferences.some((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id === asset.id)) {
       void saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, stableToken]);
     }
     setMentionQuery(null);
@@ -2508,7 +2566,7 @@ export function App() {
       if (!editor || !selection?.rangeCount || !editor.contains(selection.anchorNode)) return;
       document.execCommand("insertText", false, "\n");
       const value = readPromptEditor(editor);
-      if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+      if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
       updateStoryboardPromptText(value);
       setMentionQuery(null);
       setMentionRange(null);
@@ -3224,8 +3282,8 @@ export function App() {
                     <div ref={promptInputRef} className="prompt-rich-editor" role="textbox" aria-label="编辑当前分镜正文" aria-multiline="true" contentEditable={!busy} suppressContentEditableWarning data-placeholder={selectedStoryboard.payload?.["使用回退占位"] === true ? "请填写可核实的具体镜头事实；保存后即可作为手工分镜使用。" : "输入分镜正文；输入 @ 可插入资产变量"} onInput={handlePromptInput} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCompositionStart={() => { promptCompositionActive.current = true; }} onCompositionEnd={handlePromptCompositionEnd} onKeyDown={handlePromptMentionKeys} onBlur={(event) => {
                       const value = readPromptEditor(event.currentTarget);
                       if (selectedStoryboard) {
-                        renderPromptEditor(event.currentTarget, value, assets, openImage);
-                        promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets };
+                        renderPromptEditor(event.currentTarget, value, storyboardScopeAssets, openImage);
+                        promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
                       }
                       if (selectedStoryboard && (
                         value !== storyboardSavedBodies.current.get(selectedStoryboard.id)
@@ -3259,10 +3317,25 @@ export function App() {
             {segmentPanel === "shot-history" && <div className="sub-panel simple-panel active">{generations.slice(0, 5).map((item, index) => <div className="log-row" key={item.id}><b>第 {index + 1} 条</b><span>{mockGenerationLabel(item.status)}</span></div>)}<button className="ghost full" onClick={() => setSegmentPanel("shot-prompt")}>返回提示词</button></div>}
           </section>
           <aside className={`video-preview${previewPanelCollapsed ? " folded" : ""}`}>
-            <div className="preview-tabs"><button className={segmentPanel === "shot-prompt" ? "active" : ""} onClick={() => setSegmentPanel("shot-prompt")}>分镜生成</button><button className={segmentPanel === "shot-history" ? "active" : ""} onClick={() => setSegmentPanel("shot-history")}>任务记录</button></div>
+            <div className="preview-tabs"><button className={previewMode === "episode" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("episode"); }}>分镜生成</button><button className={previewMode === "segments" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("segments"); }}>原片对比</button></div>
             <div className="preview-content">
-              {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
-              <div className="video-not-ready compact-note">生成结果尚未产生真实视频；模拟任务不会显示为可播放结果。</div>
+              {previewMode === "segments" ? (
+                selectedEpisode?.file_url && selectedStoryboard ? (
+                  <OriginalClipPreview
+                    sourceUrl={apiAssetUrl(selectedEpisode.file_url)}
+                    storyboard={selectedStoryboard}
+                    storyboards={storyboards}
+                    onSelect={(item) => { void selectStoryboardWithSave(item); }}
+                  />
+                ) : (
+                  <div className="video-not-ready">选择分镜后可查看对应原片片段。</div>
+                )
+              ) : (
+                <>
+                  {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
+                  <div className="video-not-ready compact-note">生成结果尚未产生真实视频；模拟任务不会显示为可播放结果。</div>
+                </>
+              )}
             </div>
           </aside>
           <button type="button" className="workbench-splitter preview-pane-splitter" role="separator" aria-label="调整预览栏宽度" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={getWorkbenchPaneMaxWidth("preview")} aria-valuenow={previewPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("preview", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("preview", event)} />
