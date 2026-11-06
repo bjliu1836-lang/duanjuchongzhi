@@ -222,17 +222,31 @@ button:disabled {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  min-width: 64px;
-  padding: 8px 12px;
+  gap: 4px;
+  padding: 5px 5px 6px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #fff;
   font-size: 12px;
   cursor: pointer;
 }
-.gen-version b { font-size: 12px; font-weight: 600; }
-.gen-version em { color: var(--muted); font-size: 10px; font-style: normal; }
+.gen-version video {
+  display: block;
+  width: 56px;
+  aspect-ratio: 9 / 16;
+  border-radius: 7px;
+  background: #101116;
+  object-fit: cover;
+  pointer-events: none;
+}
+.gen-version .gen-version-thumb-empty {
+  display: block;
+  width: 56px;
+  aspect-ratio: 9 / 16;
+  border-radius: 7px;
+  background: #e9eaf0;
+}
+.gen-version b { font-size: 11px; font-weight: 600; }
 .gen-version.active { border-color: #7f77dd; background: #eeedfe; }
 .gen-version-empty { color: var(--muted); font-size: 11px; }
 .video-not-ready { display: grid; min-height: 320px; place-items: center; border: 1px dashed var(--line); border-radius: 12px; background: #f8f9fc; color: var(--muted); text-align: center; padding: 24px; }

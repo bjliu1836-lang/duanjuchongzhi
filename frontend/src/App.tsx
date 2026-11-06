@@ -3267,21 +3267,22 @@ export function App() {
                 )
               ) : (
                 <>
-                  {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
                   <div className="storyboard-gen-preview">
                     {activeGeneration?.output_url ? (
                       <video key={activeGeneration.id} src={apiAssetUrl(activeGeneration.output_url)} controls playsInline loop muted autoPlay />
                     ) : (
-                      <div className="asset-empty-thumb asset-empty-large">尚未生成视频；在分镜正文下方点击「生成」创建第一个版本</div>
+                      <div className="asset-empty-thumb asset-empty-large">尚未生成视频；在分镜正文下方点击「生成」创建第一个版本；原片可切到「原片对比」查看</div>
                     )}
                   </div>
                   <div className="storyboard-gen-versions">
                     <span>历史版本</span>
                     <div className="storyboard-gen-version-list">
                       {storyboardGenerations.map((gen, index) => (
-                        <button type="button" className={gen.id === activeGeneration?.id ? "gen-version active" : "gen-version"} key={gen.id} onClick={() => setSelectedGenerationId(gen.id)} title={gen.created_at}>
+                        <button type="button" className={gen.id === activeGeneration?.id ? "gen-version active" : "gen-version"} key={gen.id} onClick={() => setSelectedGenerationId(gen.id)} title={`切换到版本 v${storyboardGenerations.length - index} · ${gen.created_at}`}>
+                          {gen.output_url
+                            ? <video src={apiAssetUrl(gen.output_url)} preload="metadata" muted playsInline aria-hidden="true" />
+                            : <i className="gen-version-thumb-empty"></i>}
                           <b>v{storyboardGenerations.length - index}</b>
-                          <em>{gen.status}</em>
                         </button>
                       ))}
                       {!storyboardGenerations.length && <em className="gen-version-empty">暂无版本，生成后在此管理</em>}
