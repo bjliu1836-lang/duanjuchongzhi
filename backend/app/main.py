@@ -3920,6 +3920,7 @@ def list_video_generations(project_id: str) -> dict[str, Any]:
         generations = rows_to_dicts(rows)
         for item in generations:
             item["payload"] = json.loads(item.pop("payload_json"))
+            item["output_url"] = data_file_url(str(item.get("output_path") or ""))
         return {"videoGenerations": generations}
 
 
@@ -7742,12 +7743,32 @@ def run_video_generation(conn: sqlite3.Connection, project: dict[str, Any], stor
     generation_id = new_id("video")
     output_dir = PROJECTS_DIR / project["id"] / "outputs" / "videos"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{generation_id}.txt"
-    output_path.write_text(
-        f"Mock video generation placeholder\n\nStoryboard: {storyboard['id']}\n\nPrompt:\n{storyboard['prompt']}\n",
-        encoding="utf-8",
+    output_path = output_dir / f"{generation_id}.mp4"
+    # 演示模式：从 data/mock 轮转复制预存模拟视频，让"生成"可重复地产出可播放的多版本。
+    mock_variants = sorted((DATA_DIR / "mock").glob("demo-v*.mp4"))
+    existing_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM video_generations WHERE project_id = ? AND storyboard_id = ?",
+        (project["id"], storyboard["id"]),
+    ).fetchone()["c"]
+    demo_variant = 0
+    if mock_variants:
+        demo_variant = existing_count % len(mock_variants)
+        shutil.copyfile(mock_variants[demo_variant], output_path)
+    else:
+        output_path.write_text(
+            f"Mock video generation placeholder\n\nStoryboard: {storyboard['id']}\n\nPrompt:\n{storyboard['prompt']}\n",
+            encoding="utf-8",
+        )
+    payload = {
+        "mock": True,
+        "demo": True,
+        "demoVariant": demo_variant + 1,
+        "note": "演示用预存模拟视频；真实视频生成接入后这里保存真实 mp4 输出路径",
+    }
+    conn.execute(
+        "UPDATE video_generations SET is_selected = 0 WHERE project_id = ? AND storyboard_id = ?",
+        (project["id"], storyboard["id"]),
     )
-    payload = {"mock": True, "note": "真实视频生成接入后这里保存 mp4 输出路径"}
     conn.execute(
         """
         INSERT INTO video_generations

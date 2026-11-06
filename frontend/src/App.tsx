@@ -8,6 +8,12 @@ const ASSET_IMAGE_MODELS = [
   { id: "doubao-seedream-4-0-250828", label: "Seedream 4.0" },
 ];
 const DEFAULT_ASSET_IMAGE_MODEL = ASSET_IMAGE_MODELS[0].id;
+const VIDEO_MODELS = [
+  { id: "doubao-seedance-1-5-pro-251215", label: "Seedance 1.5 Pro" },
+  { id: "doubao-seedance-1-0-pro-250528", label: "Seedance 1.0 Pro" },
+  { id: "doubao-seedance-1-0-lite-t2v-250428", label: "Seedance 1.0 Lite" },
+];
+const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
 const ROLE_FIXED_CONSTRAINT = `【固定约束】
 风格：真人写实风格 画质：模拟真实拍摄效果，8K超高清
 光线：明亮柔和
@@ -27,7 +33,7 @@ type AssetTab = "角色" | "场景" | "道具" | "资产进度";
 type UploadMode = "folder" | "single";
 type ModalName = "upload-confirm-modal" | "image-view-modal" | null;
 type AssetView = "overview" | "detail" | "group-detail";
-type SegmentPanel = "shot-prompt" | "shot-assets" | "shot-history";
+type SegmentPanel = "shot-prompt" | "shot-assets";
 type WorkbenchPane = "assets" | "preview";
 
 type Project = {
@@ -107,6 +113,8 @@ type VideoGeneration = {
   storyboard_id: string;
   status: string;
   output_path: string;
+  output_url?: string;
+  is_selected?: number;
   created_at: string;
   payload?: Record<string, any>;
 };
@@ -834,12 +842,6 @@ function isTaskRunning(task?: Task | null) {
   return Boolean(task && ["运行中", "pending", "processing"].includes(task.status));
 }
 
-function mockGenerationLabel(status: string) {
-  if (["成功", "完成", "completed"].includes(status)) return "模拟请求已完成（未生成视频）";
-  if (["失败", "failed"].includes(status)) return "模拟请求失败（未生成视频）";
-  return "模拟请求处理中（未生成视频）";
-}
-
 function getInitialWorkbenchPaneWidths() {
   const workbenchWidth = Math.max(window.innerWidth, 940);
   const gap = Math.min(14, Math.max(8, workbenchWidth * 0.01));
@@ -949,6 +951,9 @@ export function App() {
   const selectedAssetIdForPrompt = useRef<string | null>(null);
   const [frameRatio, setFrameRatio] = useState("9:16");
   const [resolution, setResolution] = useState("720p");
+  const [videoModel, setVideoModel] = useState(DEFAULT_VIDEO_MODEL);
+  const [videoDuration, setVideoDuration] = useState(4);
+  const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
   const [styleType, setStyleType] = useState("写实通用");
   const [assetTab, setAssetTab] = useState<AssetTab>("角色");
   const [assetView, setAssetView] = useState<AssetView>("overview");
@@ -970,7 +975,6 @@ export function App() {
   const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具">("角色");
   const [busy, setBusy] = useState(false);
   const [storyboardLoading, setStoryboardLoading] = useState(false);
-  const [storyboardMenuOpen, setStoryboardMenuOpen] = useState(false);
   const [generatingAssetIds, setGeneratingAssetIds] = useState<Set<string>>(() => new Set());
   const generatingAssetIdsRef = useRef<Set<string>>(new Set());
   const [message, setMessage] = useState("准备就绪");
@@ -1481,10 +1485,11 @@ export function App() {
     });
   }
 
-  async function loadGenerations(projectId = currentProject?.id) {
-    if (!projectId) return;
+  async function loadGenerations(projectId = currentProject?.id): Promise<VideoGeneration[]> {
+    if (!projectId) return [];
     const data = await request<{ videoGenerations: VideoGeneration[] }>(`/api/projects/${projectId}/video-generations`);
     setGenerations(data.videoGenerations);
+    return data.videoGenerations;
   }
 
   async function loadTasks(projectId = currentProject?.id) {
@@ -1891,14 +1896,40 @@ export function App() {
       await storyboardPatchQueue.current;
       const task = await runBackendTask("video_generation");
       if (task) {
-        setScreen("compare");
-        setMessage("模拟生成任务已记录；当前没有生成可播放视频");
+        setMessage("正在生成新版本…");
+        void waitVideoTaskAndRefresh(task.id, selectedStoryboard?.id ?? null);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "视频生成失败");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function waitVideoTaskAndRefresh(taskId: string, storyboardId: string | null) {
+    if (!currentProject) return;
+    const projectId = currentProject.id;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      try {
+        const data = await request<{ task: Task }>(`/api/tasks/${taskId}`);
+        if (isTaskRunning(data.task)) continue;
+        const latest = await loadGenerations(projectId);
+        if (data.task.status === "成功" || data.task.status === "completed") {
+          const newest = latest.find((item) => item.storyboard_id === storyboardId) ?? latest[0];
+          if (newest) setSelectedGenerationId(newest.id);
+          setMessage("已生成新版本，可在历史版本中切换");
+        } else {
+          setMessage(data.task.message || "视频生成失败");
+        }
+        return;
+      } catch {
+        // 单次轮询失败可忽略，继续等待
+      }
+    }
+    const latest = await loadGenerations(projectId).catch(() => [] as VideoGeneration[]);
+    const newest = latest.find((item) => item.storyboard_id === storyboardId) ?? latest[0];
+    if (newest) setSelectedGenerationId(newest.id);
   }
 
   async function confirmAsset(assetId: string) {
@@ -2120,23 +2151,7 @@ export function App() {
       }
     }
     setSelectedStoryboardId(nextStoryboard.id);
-    setStoryboardMenuOpen(false);
     setSegmentPanel("shot-prompt");
-  }
-
-  async function copyStoryboardPrompt() {
-    if (!selectedStoryboard || !promptInputRef.current) return;
-    try {
-      await navigator.clipboard.writeText(readPromptEditor(promptInputRef.current));
-      setMessage("已复制当前分镜正文");
-    } catch {
-      promptInputRef.current.focus();
-      const range = document.createRange();
-      range.selectNodeContents(promptInputRef.current);
-      window.getSelection()?.removeAllRanges();
-      window.getSelection()?.addRange(range);
-      setMessage("浏览器不允许自动复制，正文已选中，请按 Ctrl+C 复制");
-    }
   }
 
   function handlePromptCopy(event: ReactClipboardEvent<HTMLDivElement>) {
@@ -2168,12 +2183,6 @@ export function App() {
     if (selectedStoryboard) promptEditorSync.current = { storyboardId: selectedStoryboard.id, value, assets: storyboardScopeAssets };
     updateStoryboardPromptText(value);
     if (!promptCompositionActive.current) updatePromptMention(value, promptSelectionOffset(editor) ?? value.length);
-  }
-
-  async function selectAdjacentStoryboard(direction: -1 | 1) {
-    const index = storyboards.findIndex((item) => item.id === selectedStoryboard?.id);
-    const next = storyboards[index + direction];
-    if (next) await selectStoryboardWithSave(next);
   }
 
   async function saveStoryboardReferenceOverrides(storyboard: Storyboard, references: string[]) {
@@ -2357,25 +2366,6 @@ export function App() {
     });
     await loadStoryboards(currentProject.id, selectedEpisodeId);
     setSelectedStoryboardId(storyboard.id);
-  }
-
-  async function renameStoryboard(storyboard: Storyboard) {
-    if (!currentProject) return;
-    const title = window.prompt("分镜名称", storyboard.title);
-    if (title === null || !title.trim()) return;
-    const timeRange = window.prompt("时间范围", storyboard.time_range);
-    if (timeRange === null || !timeRange.trim()) return;
-    const data = await request<{ storyboard: Storyboard }>(
-      `/api/projects/${currentProject.id}/storyboards/${storyboard.id}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim(), timeRange: timeRange.trim() }),
-      }
-    );
-    setStoryboards((items) => items.map((item) => (item.id === storyboard.id ? data.storyboard : item)));
-    setSelectedStoryboardId(data.storyboard.id);
-    setMessage("分镜信息已更新");
   }
 
   function updateStoryboardPromptText(value: string) {
@@ -2590,7 +2580,19 @@ export function App() {
   const selectedAssetFavoriteImageId = String(selectedAsset?.payload?.["收藏版本图片ID"] ?? "");
   const selectedImageVersion = selectedAssetImage(selectedAsset);
   const isGeneratingSelectedAsset = Boolean(selectedAsset && (generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true));
+  const storyboardGenerations = useMemo(
+    () => generations.filter((item) => item.storyboard_id === selectedStoryboard?.id),
+    [generations, selectedStoryboard?.id]
+  );
+  const activeGeneration =
+    storyboardGenerations.find((item) => item.id === selectedGenerationId)
+    ?? storyboardGenerations.find((item) => item.is_selected === 1)
+    ?? storyboardGenerations[0]
+    ?? null;
   const messageIsError = /(失败|错误|冲突|无法|不可|请重试|未保存)/.test(message);
+  useEffect(() => {
+    setSelectedGenerationId(null);
+  }, [selectedStoryboard?.id]);
   useEffect(() => {
     if (!message || messageIsError) return;
     const timer = window.setTimeout(() => setMessage(""), 4200);
@@ -3145,8 +3147,7 @@ export function App() {
             {!assetSidebarCollapsed && <button type="button" className="pane-edge-toggle asset-edge-toggle" onClick={() => setAssetSidebarCollapsed(true)}>‹ 收起资产库</button>}
             {!previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(true)}>收起原片 ›</button>}
             <div className="shot-head">
-              <div className="storyboard-heading"><div className="storyboard-stepper"><button className="ghost small" disabled={!selectedStoryboard || storyboards.findIndex((item) => item.id === selectedStoryboard.id) <= 0} onClick={() => void selectAdjacentStoryboard(-1)}>上一镜</button><span>{selectedStoryboard ? `${storyboards.findIndex((item) => item.id === selectedStoryboard.id) + 1} / ${storyboards.length}` : `0 / ${storyboards.length}`}</span><button className="ghost small" disabled={!selectedStoryboard || storyboards.findIndex((item) => item.id === selectedStoryboard.id) >= storyboards.length - 1} onClick={() => void selectAdjacentStoryboard(1)}>下一镜</button></div><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2></div>
-              <div className="shot-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => void copyStoryboardPrompt()}>复制提示词</button><div className="storyboard-more-wrap"><button className="ghost small" aria-haspopup="menu" aria-expanded={storyboardMenuOpen} onClick={() => setStoryboardMenuOpen((open) => !open)}>更多 ▾</button>{storyboardMenuOpen && <div className="storyboard-more-menu" role="menu"><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void renameStoryboard(selectedStoryboard); }}>编辑名称与时间</button><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void createStoryboard(selectedStoryboard); }}>复制分镜</button><button role="menuitem" onClick={() => { setStoryboardMenuOpen(false); if (selectedStoryboard) void deleteStoryboard(selectedStoryboard); }}>删除分镜</button></div>}</div><button className="primary small" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true || storyboardHasUnresolvedReferences} title={storyboardHasUnresolvedReferences ? "请先完成资产引用核对" : undefined} onClick={runVideoGeneration}>生成模拟任务</button></div>
+              <div className="storyboard-heading"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2></div>
             </div>
             {segmentPanel === "shot-prompt" && !selectedStoryboard && (
               storyboardLoading ? (
@@ -3217,11 +3218,38 @@ export function App() {
                     )}
                   </div>
                 </div>
-                <div className="generation-mode-note">视频生成当前为模拟任务，尚未生成可播放视频。</div>
+                <div className="video-generate-bar">
+                  <div className="video-generate-options">
+                    <label>
+                      <span>视频模型</span>
+                      <select value={videoModel} onChange={(event) => setVideoModel(event.target.value)} disabled={busy}>
+                        {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>画幅</span>
+                      <select value={frameRatio} onChange={(event) => setFrameRatio(event.target.value)} disabled={busy}>
+                        {["9:16", "16:9"].map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>清晰度</span>
+                      <select value={resolution} onChange={(event) => setResolution(event.target.value)} disabled={busy}>
+                        {["720p", "1080p"].map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>时长</span>
+                      <select value={videoDuration} onChange={(event) => setVideoDuration(Number(event.target.value))} disabled={busy}>
+                        {[4, 6, 8].map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <button className="primary video-generate-submit" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true || storyboardHasUnresolvedReferences} title={storyboardHasUnresolvedReferences ? "请先完成资产引用核对" : undefined} onClick={runVideoGeneration}>生成</button>
+                </div>
               </div>
             )}
             {segmentPanel === "shot-assets" && <div className="sub-panel simple-panel active">{selectedStoryboardAssets.map((asset) => <span className="chip" key={asset.id}>{assetDisplayVariable(asset)}</span>)}<button className="ghost full" onClick={() => setSegmentPanel("shot-prompt")}>返回提示词</button></div>}
-            {segmentPanel === "shot-history" && <div className="sub-panel simple-panel active">{generations.slice(0, 5).map((item, index) => <div className="log-row" key={item.id}><b>第 {index + 1} 条</b><span>{mockGenerationLabel(item.status)}</span></div>)}<button className="ghost full" onClick={() => setSegmentPanel("shot-prompt")}>返回提示词</button></div>}
           </section>
           <aside className={`video-preview${previewPanelCollapsed ? " folded" : ""}`}>
             <div className="preview-tabs"><button className={previewMode === "episode" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("episode"); }}>分镜生成</button><button className={previewMode === "segments" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("segments"); }}>原片对比</button></div>
@@ -3240,7 +3268,25 @@ export function App() {
               ) : (
                 <>
                   {selectedEpisode?.file_url ? <div className="storyboard-source-preview"><div className="source-preview-label">原片参考 · {selectedEpisode.filename}</div><video key={`${selectedEpisode.id}-${selectedStoryboard?.id ?? "none"}`} src={apiAssetUrl(selectedEpisode.file_url)} controls playsInline onLoadedMetadata={(event) => { const range = selectedStoryboard ? parseRange(selectedStoryboard.time_range) : null; const video = event.currentTarget; if (range && Number.isFinite(range.start) && range.start < video.duration) video.currentTime = range.start; }} onError={() => setMessage("原片暂时无法播放，请检查该集视频文件")}/><span>{selectedStoryboard ? `定位时间：${selectedStoryboard.time_range}` : "选择分镜后定位到对应原片时间"}</span></div> : <div className="video-not-ready">当前集没有可播放原片。</div>}
-                  <div className="video-not-ready compact-note">生成结果尚未产生真实视频；模拟任务不会显示为可播放结果。</div>
+                  <div className="storyboard-gen-preview">
+                    {activeGeneration?.output_url ? (
+                      <video key={activeGeneration.id} src={apiAssetUrl(activeGeneration.output_url)} controls playsInline loop muted autoPlay />
+                    ) : (
+                      <div className="asset-empty-thumb asset-empty-large">尚未生成视频；在分镜正文下方点击「生成」创建第一个版本</div>
+                    )}
+                  </div>
+                  <div className="storyboard-gen-versions">
+                    <span>历史版本</span>
+                    <div className="storyboard-gen-version-list">
+                      {storyboardGenerations.map((gen, index) => (
+                        <button type="button" className={gen.id === activeGeneration?.id ? "gen-version active" : "gen-version"} key={gen.id} onClick={() => setSelectedGenerationId(gen.id)} title={gen.created_at}>
+                          <b>v{storyboardGenerations.length - index}</b>
+                          <em>{gen.status}</em>
+                        </button>
+                      ))}
+                      {!storyboardGenerations.length && <em className="gen-version-empty">暂无版本，生成后在此管理</em>}
+                    </div>
+                  </div>
                 </>
               )}
             </div>
