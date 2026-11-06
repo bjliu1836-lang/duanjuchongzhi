@@ -12,8 +12,213 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 function fmt(ms: number) { const s = Math.max(0, ms) / 1000; return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; }
 
-export function VideoComposition({ projectId, episodeId, episodeIndex, active, onMessage }: { projectId?: string; episodeId?: string; episodeIndex?: number; active: boolean; onMessage: (message: string) => void }) {
+export type ComparisonStoryboard = {
+  storyboardId: string;
+  title: string;
+  generationId: string | null;
+  originalStartMs: number;
+  originalEndMs: number;
+};
+
+type ComparisonClip = ComparisonStoryboard & {
+  media?: Media;
+  startMs: number;
+  durationMs: number;
+};
+
+function OriginalComparison({ assets, items, episodeIndex, onExit, onMessage }: {
+  assets: Media[];
+  items: ComparisonStoryboard[];
+  episodeIndex?: number;
+  onExit: () => void;
+  onMessage: (message: string) => void;
+}) {
+  const original = assets.find((item) => item.kind === "episode_video");
+  const clips = useMemo(() => {
+    let offset = 0;
+    return items.map((item): ComparisonClip => {
+      const media = assets.find((asset) => asset.id === item.generationId && asset.kind === "generated_video");
+      const originalDuration = Math.max(0, item.originalEndMs - item.originalStartMs);
+      const durationMs = Math.max(1, media?.durationMs || originalDuration || 4000);
+      const clip = { ...item, media, startMs: offset, durationMs };
+      offset += durationMs;
+      return clip;
+    });
+  }, [assets, items]);
+  const generatedTotalMs = clips.reduce((sum, clip) => sum + clip.durationMs, 0);
+  const originalDurationMs = Math.max(original?.durationMs || 0, ...items.map((item) => item.originalEndMs), 1);
+  const totalMs = Math.max(originalDurationMs, generatedTotalMs, 1);
+  const [playhead, setPlayhead] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [audioSide, setAudioSide] = useState<"original" | "generated">("generated");
+  const playheadRef = useRef(0);
+  const playingRef = useRef(false);
+  const originalRef = useRef<HTMLVideoElement>(null);
+  const generatedRef = useRef<HTMLVideoElement>(null);
+  const frameRef = useRef<number | null>(null);
+  const lastTickRef = useRef(0);
+  const lastCorrectionRef = useRef(0);
+  const activeClip = clips.find((clip) => playhead >= clip.startMs && playhead < clip.startMs + clip.durationMs) ?? clips[clips.length - 1];
+  const activeClipId = activeClip?.storyboardId ?? "";
+  const playheadRatio = `${Math.min(100, playhead / totalMs * 100)}%`;
+
+  function changePlaying(value: boolean) {
+    playingRef.current = value;
+    setPlaying(value);
+  }
+
+  function alignVideoToTime(video: HTMLVideoElement | null, targetMs: number, sourceDurationMs: number) {
+    if (!video || !Number.isFinite(video.duration)) return;
+    const targetSeconds = Math.max(0, Math.min(targetMs / 1000, Math.max(0, sourceDurationMs / 1000 - 0.001)));
+    if (Math.abs(video.currentTime - targetSeconds) > 0.04) video.currentTime = targetSeconds;
+  }
+
+  function seekTo(value: number) {
+    const target = Math.max(0, Math.min(value, totalMs));
+    playheadRef.current = target;
+    setPlayhead(target);
+    alignVideoToTime(originalRef.current, target, originalDurationMs);
+    const targetClip = clips.find((clip) => target >= clip.startMs && target < clip.startMs + clip.durationMs) ?? clips[clips.length - 1];
+    if (targetClip?.media && generatedRef.current?.dataset.storyboardId === targetClip.storyboardId) {
+      alignVideoToTime(generatedRef.current, target - targetClip.startMs, targetClip.durationMs);
+    }
+  }
+
+  function togglePlayback() {
+    if (playingRef.current) {
+      changePlaying(false);
+      return;
+    }
+    if (playheadRef.current >= totalMs - 1) seekTo(0);
+    changePlaying(true);
+  }
+
+  useEffect(() => {
+    playingRef.current = playing;
+    const originalVideo = originalRef.current;
+    if (originalVideo) {
+      originalVideo.muted = audioSide !== "original";
+      if (playing && playheadRef.current < originalDurationMs) void originalVideo.play().catch(() => undefined);
+      else originalVideo.pause();
+    }
+    const generatedVideo = generatedRef.current;
+    if (generatedVideo) {
+      generatedVideo.muted = audioSide !== "generated";
+      if (playing && activeClip?.media && playheadRef.current < generatedTotalMs) void generatedVideo.play().catch(() => undefined);
+      else generatedVideo.pause();
+    }
+  }, [playing, audioSide, activeClipId, originalDurationMs, generatedTotalMs]);
+
+  useEffect(() => {
+    if (!playing) {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      return;
+    }
+    lastTickRef.current = performance.now();
+    const tick = (now: number) => {
+      const elapsed = Math.min(250, now - lastTickRef.current);
+      lastTickRef.current = now;
+      const next = Math.min(totalMs, playheadRef.current + elapsed);
+      playheadRef.current = next;
+      setPlayhead(next);
+      if (now - lastCorrectionRef.current > 450) {
+        lastCorrectionRef.current = now;
+        if (next < originalDurationMs && originalRef.current && Math.abs(originalRef.current.currentTime * 1000 - next) > 220) {
+          alignVideoToTime(originalRef.current, next, originalDurationMs);
+        }
+        const currentClip = clips.find((clip) => next >= clip.startMs && next < clip.startMs + clip.durationMs) ?? clips[clips.length - 1];
+        if (currentClip?.media && generatedRef.current?.dataset.storyboardId === currentClip.storyboardId) {
+          const localMs = next - currentClip.startMs;
+          if (Math.abs(generatedRef.current.currentTime * 1000 - localMs) > 220) alignVideoToTime(generatedRef.current, localMs, currentClip.durationMs);
+        }
+      }
+      if (next >= totalMs) {
+        changePlaying(false);
+        return;
+      }
+      frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  }, [playing, totalMs, originalDurationMs, clips]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    originalRef.current?.pause();
+    generatedRef.current?.pause();
+  }, []);
+
+  function onOriginalLoaded(video: HTMLVideoElement) {
+    alignVideoToTime(video, playheadRef.current, originalDurationMs);
+    video.muted = audioSide !== "original";
+    if (playingRef.current && playheadRef.current < originalDurationMs) void video.play().catch(() => undefined);
+  }
+
+  function onGeneratedLoaded(video: HTMLVideoElement) {
+    const currentClip = clips.find((clip) => clip.storyboardId === video.dataset.storyboardId);
+    if (!currentClip?.media) return;
+    alignVideoToTime(video, playheadRef.current - currentClip.startMs, currentClip.durationMs);
+    video.muted = audioSide !== "generated";
+    if (playingRef.current && activeClipId === currentClip.storyboardId) void video.play().catch(() => undefined);
+  }
+
+  function timelineTrack(side: "original" | "generated") {
+    return <div className="comparison-timeline-track">
+      {side === "original" ? items.map((item, index) => {
+        const start = Math.max(0, item.originalStartMs);
+        const end = Math.max(start + 1, item.originalEndMs || start + 4000);
+        return <button type="button" key={item.storyboardId} className="comparison-track-clip original" style={{ left: `${start / totalMs * 100}%`, width: `${Math.max(1.5, (end - start) / totalMs * 100)}%` }} onClick={() => seekTo(start)} title={`${item.title} · ${fmt(start)}`}>{index + 1}</button>;
+      }) : clips.map((clip, index) => <button type="button" key={clip.storyboardId} className={`comparison-track-clip generated${clip.media ? "" : " missing"}`} style={{ left: `${clip.startMs / totalMs * 100}%`, width: `${Math.max(1.5, clip.durationMs / totalMs * 100)}%` }} onClick={() => seekTo(clip.startMs)} title={`${clip.title}${clip.media ? ` · ${fmt(clip.durationMs)}` : " · 待生成"}`}>{clip.media ? index + 1 : "—"}</button>)}
+      <i className="comparison-shared-playhead" style={{ left: playheadRatio }} />
+    </div>;
+  }
+
+  function timeline(side: "original" | "generated") {
+    return <div className="comparison-timeline">
+      <div className="comparison-timeline-ruler">{[0, .25, .5, .75, 1].map((point) => <span key={point}>{fmt(totalMs * point)}</span>)}</div>
+      <input aria-label={side === "original" ? "原片时间轴，拖动时生成侧同步" : "生成片时间轴，拖动时原片同步"} type="range" min="0" max={totalMs} step="50" value={playhead} onChange={(event) => seekTo(Number(event.target.value))} />
+      {timelineTrack(side)}
+      <div className="comparison-timeline-caption"><span>{side === "original" ? "原片分镜区间 · 点击片段定位" : "当前采用版本 · 虚线为待生成缺口"}</span><b>{fmt(playhead)} / {fmt(totalMs)}</b></div>
+    </div>;
+  }
+
+  return <section className="composition-workspace original-comparison">
+    <header className="composition-toolbar">
+      <div><b>第{episodeIndex ?? ""}集 · 原片同步对比</b><span className="save-state saved">● 从 0 秒共用绝对时间</span></div>
+      <div className="composition-settings">
+        <button onClick={togglePlayback}>{playing ? "同步暂停" : "同步播放"}</button>
+        <button onClick={() => setAudioSide((side) => side === "generated" ? "original" : "generated")}>声音：{audioSide === "generated" ? "生成片" : "原片"}</button>
+        <button onClick={() => seekTo(0)}>回到 0 秒</button>
+        <button className="export-action" onClick={onExit}>退出对比</button>
+      </div>
+    </header>
+    <div className="original-comparison-grid">
+      <section className="original-comparison-panel">
+        <div className="comparison-panel-head"><b>原片完整视频</b><span>{fmt(originalDurationMs)}</span></div>
+        <div className="comparison-video-frame">
+          {original ? <video ref={originalRef} src={`${API_BASE}${original.fileUrl}`} playsInline onLoadedMetadata={(event) => onOriginalLoaded(event.currentTarget)} onError={() => onMessage("原片无法播放，请检查视频编码")} /> : <div className="preview-empty">当前集没有可播放原片</div>}
+        </div>
+        {timeline("original")}
+      </section>
+      <section className="original-comparison-panel">
+        <div className="comparison-panel-head"><b>新生成整集 · {activeClip?.title ?? "暂无分镜"}</b><span>{fmt(generatedTotalMs)}</span></div>
+        <div className="comparison-video-frame">
+          {activeClip?.media ? <video key={activeClip.storyboardId} data-storyboard-id={activeClip.storyboardId} ref={generatedRef} src={`${API_BASE}${activeClip.media.fileUrl}`} playsInline onLoadedMetadata={(event) => onGeneratedLoaded(event.currentTarget)} onError={() => onMessage(`${activeClip.title}生成视频无法播放`)} /> : <div className="preview-empty">{activeClip ? `${activeClip.title}尚未生成，时间轴保留对应缺口` : "暂无可播放的生成片段"}</div>}
+          <span className="comparison-version-label">{activeClip?.media ? "当前采用版本" : "待生成"}</span>
+        </div>
+        {timeline("generated")}
+      </section>
+    </div>
+  </section>;
+}
+
+export function VideoComposition({ projectId, episodeId, episodeIndex, comparisonItems = [], active, onMessage }: { projectId?: string; episodeId?: string; episodeIndex?: number; comparisonItems?: ComparisonStoryboard[]; active: boolean; onMessage: (message: string) => void }) {
   const [assets, setAssets] = useState<Media[]>([]);
+  const [comparisonMode, setComparisonMode] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [jobs, setJobs] = useState<ExportJob[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -56,7 +261,7 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, active, o
     if (!selected && draftData.draft.edit.clips.length) setSelected(draftData.draft.edit.clips[0].id);
     return true;
   }
-  useEffect(() => { activeEpisodeKey.current = projectId && episodeId ? projectId + ":" + episodeId : ""; refreshSequence.current += 1; loadedEpisodeKey.current = ""; setDraft(null); setAssets([]); setSelected(null); setPlayhead(0); }, [projectId, episodeId]);
+  useEffect(() => { activeEpisodeKey.current = projectId && episodeId ? projectId + ":" + episodeId : ""; refreshSequence.current += 1; loadedEpisodeKey.current = ""; setDraft(null); setAssets([]); setSelected(null); setPlayhead(0); setComparisonMode(false); }, [projectId, episodeId]);
   useEffect(() => {
     const key = projectId && episodeId ? projectId + ":" + episodeId : "";
     if (!active || !key || loadedEpisodeKey.current === key) return;
@@ -193,8 +398,10 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, active, o
   if (!projectId || !episodeId) return <div className="composition-no-project">先选择项目和剧集，再导入要编辑的视频。</div>;
   const activeSource = assets.find((item) => item.id === activeMediaId) ?? assets.find((item) => item.id === clips[0]?.sourceId);
 
+  if (comparisonMode) return <OriginalComparison assets={assets} items={comparisonItems} episodeIndex={episodeIndex} onExit={() => setComparisonMode(false)} onMessage={onMessage} />;
+
   return <section className={`composition-workspace${libraryCollapsed ? " library-collapsed" : ""}${inspectorCollapsed ? " inspector-collapsed" : ""}`}>
-    <header className="composition-toolbar"><div><b>{draft?.title ?? `第${episodeIndex ?? ""}集合成`}</b><span className={saveState === "已保存" ? "save-state saved" : "save-state"}>● {saveState}</span><button onClick={() => setLibraryCollapsed((value) => !value)}>{libraryCollapsed ? "显示素材" : "收起素材"}</button><button onClick={() => setInspectorCollapsed((value) => !value)}>{inspectorCollapsed ? "显示检查器" : "收起检查器"}</button>{saveState === "保存冲突" && <button onClick={() => refresh().then(() => setSaveState("已保存")).catch((error) => onMessage(error.message))}>重新加载服务器版本</button>}</div><div className="composition-settings"><label>画幅<select value={draft?.edit.aspectRatio ?? "9:16"} onChange={(event) => draft && patchDraft({ ...draft.edit, aspectRatio: event.target.value })}><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label>分辨率<select value={draft?.edit.resolution ?? "720p"} onChange={(event) => draft && patchDraft({ ...draft.edit, resolution: event.target.value })}><option>720p</option><option>1080p</option></select></label><button disabled={busy || saveState === "已保存"} onClick={saveDraft}>保存草稿</button><button className="export-action" disabled={busy || !clips.length} onClick={exportSelection}>导出所选片段</button></div></header>
+    <header className="composition-toolbar"><div><b>{draft?.title ?? `第${episodeIndex ?? ""}集合成`}</b><span className={saveState === "已保存" ? "save-state saved" : "save-state"}>● {saveState}</span><button onClick={() => setComparisonMode(true)}>和原片对比</button><button onClick={() => setLibraryCollapsed((value) => !value)}>{libraryCollapsed ? "显示素材" : "收起素材"}</button><button onClick={() => setInspectorCollapsed((value) => !value)}>{inspectorCollapsed ? "显示检查器" : "收起检查器"}</button>{saveState === "保存冲突" && <button onClick={() => refresh().then(() => setSaveState("已保存")).catch((error) => onMessage(error.message))}>重新加载服务器版本</button>}</div><div className="composition-settings"><label>画幅<select value={draft?.edit.aspectRatio ?? "9:16"} onChange={(event) => draft && patchDraft({ ...draft.edit, aspectRatio: event.target.value })}><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label>分辨率<select value={draft?.edit.resolution ?? "720p"} onChange={(event) => draft && patchDraft({ ...draft.edit, resolution: event.target.value })}><option>720p</option><option>1080p</option></select></label><button disabled={busy || saveState === "已保存"} onClick={saveDraft}>保存草稿</button><button className="export-action" disabled={busy || !clips.length} onClick={exportSelection}>导出所选片段</button></div></header>
     <div className="composition-body">
       <aside className={`composition-library${libraryCollapsed ? " folded" : ""}`}><div className="library-head"><b>素材库</b><button onClick={() => uploadRef.current?.click()} disabled={busy}>导入本地视频</button><input ref={uploadRef} hidden type="file" accept="video/*,.mkv,.webm" onChange={uploadVideo} /></div><input className="media-search" placeholder="搜索素材" value={query} onChange={(event) => setQuery(event.target.value)} /><div className="media-list">{filteredAssets.map((asset) => { const added = clips.some((clip) => clip.sourceId === asset.id); return <article className="media-item" key={asset.id}>{asset.thumbnailUrl ? <img className="media-thumbnail" src={`${API_BASE}${asset.thumbnailUrl}`} alt="" /> : <div className="media-icon">▶</div>}<div className="media-copy"><b title={asset.name}>{asset.name}</b><span>{fmt(asset.durationMs)} · {asset.width}×{asset.height}</span><small>{asset.source}{asset.hasAudio ? " · 含音轨" : " · 无音轨"}</small></div><div className="media-actions"><button onClick={() => addAsset(asset)}>加入</button>{selectedClip && <button title="替换当前片段素材" onClick={() => addAsset(asset, true)}>替换</button>}</div>{added && <em>已添加</em>}</article>; })}{!filteredAssets.length && <p className="composition-empty">当前集还没有可用视频。原片仅作参考，点击“加入”后才会进入时间线。</p>}</div></aside>
       <div className="composition-center"><div ref={canvasRef} className={`composition-canvas ratio-${(draft?.edit.aspectRatio ?? "9:16").replace(":", "-")}`}><div className="canvas-inner" style={frameStyle}>{activeSource ? <video ref={videoRef} src={`${API_BASE}${activeSource.fileUrl}`} controls={false} onTimeUpdate={onTimeUpdate} onEnded={() => selected && playNextClip(selected)} onError={() => onMessage("当前素材无法在浏览器播放，请重新导入兼容的视频编码")} /> : <div className="preview-empty">选择时间线片段预览</div>}</div></div><div className="transport"><button onClick={togglePlayback} disabled={!clips.length}>{playing ? "暂停" : "播放"}</button><span>{fmt(playhead)} / {fmt(totalMs)}</span><input aria-label="播放位置" type="range" min="0" max={Math.max(1, totalMs)} value={Math.min(playhead, totalMs)} onChange={(event) => seekTo(Number(event.target.value))} disabled={!clips.length} /><label>音量 <input type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={(event) => { if (videoRef.current) videoRef.current.volume = Number(event.target.value); }} /></label></div></div>

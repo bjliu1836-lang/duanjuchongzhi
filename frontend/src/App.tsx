@@ -14,6 +14,15 @@ const VIDEO_MODELS = [
   { id: "doubao-seedance-1-0-lite-t2v-250428", label: "Seedance 1.0 Lite" },
 ];
 const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
+const VOICE_PRESETS = [
+  { id: "calm-male", name: "沉稳男声", description: "成熟 · 稳定 · 叙事" },
+  { id: "bright-male", name: "清亮男声", description: "青年 · 清亮 · 直接" },
+  { id: "gentle-female", name: "温和女声", description: "柔和 · 亲切 · 舒缓" },
+  { id: "bright-female", name: "清亮女声", description: "明快 · 清晰 · 活泼" },
+  { id: "young-neutral", name: "少年声", description: "年轻 · 自然 · 轻快" },
+  { id: "narrator", name: "纪录旁白", description: "低沉 · 克制 · 客观" },
+];
+const DEFAULT_VOICE_CONFIG = { voiceId: VOICE_PRESETS[0].id, voiceName: VOICE_PRESETS[0].name, rate: 1, pitch: 1, volume: 1 };
 const ROLE_FIXED_CONSTRAINT = `【固定约束】
 风格：真人写实风格 画质：模拟真实拍摄效果，8K超高清
 光线：明亮柔和
@@ -75,6 +84,14 @@ type Asset = {
   status: string;
   payload?: Record<string, any>;
   images?: Array<{ id: string; file_path: string; file_url?: string; is_selected: number; prompt?: string; created_at?: string; payload?: Record<string, any> }>;
+};
+
+type VoiceConfiguration = typeof DEFAULT_VOICE_CONFIG & { updatedAt?: string };
+type VoiceEditorState = {
+  assetId: string;
+  roleName: string;
+  sample: string;
+  config: VoiceConfiguration;
 };
 
 type CustomAssetGroupMember = {
@@ -943,6 +960,8 @@ export function App() {
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
   const [shotMenu, setShotMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [deletingStoryboard, setDeletingStoryboard] = useState<Storyboard | null>(null);
+  const [voiceEditor, setVoiceEditor] = useState<VoiceEditorState | null>(null);
+  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
   const [styleType, setStyleType] = useState("写实通用");
   const [assetTab, setAssetTab] = useState<AssetTab>("角色");
   const [assetView, setAssetView] = useState<AssetView>("overview");
@@ -958,6 +977,7 @@ export function App() {
   const [analysisNow, setAnalysisNow] = useState(Date.now());
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
+  const [mentionMenuPosition, setMentionMenuPosition] = useState({ left: 12, top: 12 });
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [storyboardAssetSearch, setStoryboardAssetSearch] = useState("");
   const [storyboardAssetLayout, setStoryboardAssetLayout] = useState<"list" | "grid">("list");
@@ -1117,12 +1137,25 @@ export function App() {
   }, [selectedStoryboard?.id, selectedStoryboardPrompt, storyboardScopeAssets]);
   const mentionOptions = useMemo(() => {
     const query = (mentionQuery ?? "").toLowerCase();
-    return assets.filter((asset) => {
+    return storyboardScopeAssets.filter((asset) => {
       if (!query) return true;
-      return `${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(query);
+      return `${asset.asset_type} ${assetDisplayName(asset)} ${assetDisplayVariable(asset)}`.toLowerCase().includes(query);
     }).slice(0, 40);
-  }, [assets, mentionQuery]);
+  }, [storyboardScopeAssets, mentionQuery]);
   useEffect(() => setActiveMentionIndex(0), [mentionQuery]);
+  useEffect(() => {
+    document.querySelector(`[data-mention-index="${activeMentionIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [activeMentionIndex]);
+  useEffect(() => {
+    if (mentionQuery === null) return;
+    const update = () => updateMentionMenuPosition();
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+    };
+  }, [mentionQuery]);
   useEffect(() => {
     if (!selectedStoryboard) return;
     const savedBody = selectedStoryboard.payload?.["使用回退占位"] === true
@@ -1504,6 +1537,69 @@ export function App() {
     setAssetView("overview");
   }
 
+  function openVoiceConfiguration(group: AssetGroup) {
+    const asset = group.items[0];
+    if (!asset) return;
+    const saved = asset.payload?.["音色配置"];
+    const config = {
+      ...DEFAULT_VOICE_CONFIG,
+      ...(saved && typeof saved === "object" ? saved : {}),
+      rate: Number(saved?.rate ?? DEFAULT_VOICE_CONFIG.rate),
+      pitch: Number(saved?.pitch ?? DEFAULT_VOICE_CONFIG.pitch),
+      volume: Number(saved?.volume ?? DEFAULT_VOICE_CONFIG.volume),
+    };
+    setVoiceEditor({ assetId: asset.id, roleName: group.localizedName || group.name, sample: `你好，我是${group.localizedName || group.name}。`, config });
+  }
+
+  function closeVoiceConfiguration() {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    setVoiceSpeaking(false);
+    setVoiceEditor(null);
+  }
+
+  function toggleVoicePreview() {
+    if (!voiceEditor || !("speechSynthesis" in window)) {
+      setMessage("当前浏览器不支持语音试听；音色配置仍可保存");
+      return;
+    }
+    if (voiceSpeaking) {
+      window.speechSynthesis.cancel();
+      setVoiceSpeaking(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(voiceEditor.sample.trim() || voiceEditor.roleName);
+    utterance.lang = "zh-CN";
+    utterance.rate = voiceEditor.config.rate;
+    utterance.pitch = voiceEditor.config.pitch;
+    utterance.volume = voiceEditor.config.volume;
+    utterance.voice = window.speechSynthesis.getVoices().find((voice) => voice.lang.toLowerCase().startsWith("zh")) ?? null;
+    utterance.onend = () => setVoiceSpeaking(false);
+    utterance.onerror = () => setVoiceSpeaking(false);
+    setVoiceSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function saveVoiceConfiguration() {
+    if (!currentProject || !voiceEditor) return;
+    setBusy(true);
+    try {
+      const config = { ...voiceEditor.config, updatedAt: new Date().toISOString() };
+      const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${voiceEditor.assetId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: { "音色配置": config } }),
+      });
+      setAssets((items) => items.map((item) => item.id === data.asset.id ? data.asset : item));
+      closeVoiceConfiguration();
+      setMessage(`已保存 ${data.asset.localized_name || data.asset.name} 的音色配置`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "音色配置保存失败，请重试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function renderAssetCard(group: AssetGroup, onClick?: () => void, onRemove?: () => void) {
     const originalUrl = groupOriginalImageUrl(group);
     const confirmedUrl = groupConfirmedImageUrl(group);
@@ -1511,6 +1607,7 @@ export function App() {
     const generationStatus = group.items.some((item) => generatingAssetIds.has(item.id) || item.payload?.generationInProgress === true)
       ? "生成中"
       : group.items.some((item) => (item.images?.length ?? 0) > 0) ? "已生成" : "待生成";
+    const voiceConfig = group.type === "角色" ? group.items[0]?.payload?.["音色配置"] as VoiceConfiguration | undefined : undefined;
     return (
       <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
         <div className="asset-card-statuses">
@@ -1545,6 +1642,10 @@ export function App() {
         </div>
         <b>{group.name} → {group.localizedName}</b>
         <span>{group.items.length} 个子资产 · {assetDisplayMeta(group.items[0])}</span>
+        {group.type === "角色" && <div className="asset-voice-action">
+          <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}>配置音色</button>
+          <small>{voiceConfig?.voiceName ? `${voiceConfig.voiceName} · ${Number(voiceConfig.rate ?? 1).toFixed(1)}×` : "未配置 · 点击选择声音并试听"}</small>
+        </div>}
         {onRemove && <button className="ghost small asset-card-remove" disabled={busy} onClick={(event) => { event.stopPropagation(); onRemove(); }}>移出组</button>}
       </article>
     );
@@ -2376,11 +2477,25 @@ export function App() {
       : item));
   }
 
+  function updateMentionMenuPosition() {
+    const editor = promptInputRef.current;
+    if (!editor) return;
+    const selection = window.getSelection();
+    const caretRect = selection?.rangeCount ? selection.getRangeAt(0).getBoundingClientRect() : null;
+    const editorRect = editor.getBoundingClientRect();
+    const anchor = caretRect && (caretRect.width || caretRect.height || caretRect.top) ? caretRect : editorRect;
+    const width = Math.min(360, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12));
+    const top = Math.max(12, Math.min(anchor.bottom + 7, window.innerHeight - 292));
+    setMentionMenuPosition({ left: Math.round(left), top: Math.round(top) });
+  }
+
   function updatePromptMention(value: string, caret: number) {
     const at = value.lastIndexOf("@", Math.max(0, caret - 1));
     const query = at >= 0 ? value.slice(at + 1, caret) : "";
     const prefix = at > 0 ? value[at - 1] : "";
     if (at >= 0 && !/[\p{L}\p{N}_@]/u.test(prefix) && /^[\p{L}\p{N}_-]*$/u.test(query)) {
+      updateMentionMenuPosition();
       setMentionQuery(query);
       setMentionRange({ start: at, end: caret });
     } else {
@@ -2493,6 +2608,17 @@ export function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [modal]);
   useEffect(() => {
+    if (!voiceEditor) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || busy) return;
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+      setVoiceSpeaking(false);
+      setVoiceEditor(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [voiceEditor?.assetId, busy]);
+  useEffect(() => {
     const releaseDragOnBlur = () => endWorkbenchResize();
     window.addEventListener("blur", releaseDragOnBlur);
     return () => {
@@ -2588,6 +2714,18 @@ export function App() {
     ?? storyboardGenerations.find((item) => item.is_selected === 1)
     ?? storyboardGenerations[0]
     ?? null;
+  const videoComparisonItems = useMemo(() => storyboards.map((storyboard) => {
+    const range = parseRange(storyboard.time_range || "");
+    const versions = generations.filter((item) => item.storyboard_id === storyboard.id && Boolean(item.output_url));
+    const selectedVersion = versions.find((item) => item.is_selected === 1) ?? versions[0] ?? null;
+    return {
+      storyboardId: storyboard.id,
+      title: storyboard.title,
+      generationId: selectedVersion?.id ?? null,
+      originalStartMs: Math.round(Math.max(0, range.start) * 1000),
+      originalEndMs: Math.round(Math.max(range.start, range.end) * 1000),
+    };
+  }), [storyboards, generations]);
   const messageIsError = /(失败|错误|冲突|无法|不可|请重试|未保存)/.test(message);
   useEffect(() => {
     setSelectedGenerationId(null);
@@ -3217,19 +3355,19 @@ export function App() {
                       setMentionRange(null);
                     }} />
                     {mentionQuery !== null && mentionRange !== null && (
-                      <div className="mention-menu">
+                      <div className="mention-menu" role="listbox" aria-label="选择要插入的资产" style={mentionMenuPosition}>
                         <b>选择资产 · ↑↓ 导航 · Enter 插入 · Esc 关闭</b>
                         {mentionOptions.map((asset, index) => {
                           const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
-                          return <button key={asset.id} className={index === activeMentionIndex ? "active" : ""} aria-selected={index === activeMentionIndex} onMouseDown={(event) => {
+                          return <button key={asset.id} data-mention-index={index} role="option" className={index === activeMentionIndex ? "active" : ""} aria-selected={index === activeMentionIndex} onMouseDown={(event) => {
                             event.preventDefault();
                             insertMention(asset);
                           }}>
                             <span className={`mention-thumb ${assetThumbClass(asset)}`}>{thumbUrl ? <img src={thumbUrl} alt="" onError={(event) => { event.currentTarget.hidden = true; }} /> : <span aria-hidden="true">　</span>}</span>
-                            <span><strong>{assetDisplayName(asset)}</strong><small>{assetDisplayVariable(asset)}</small></span>
+                            <span><strong>{assetDisplayName(asset)}</strong><small>{asset.asset_type} · {assetDisplayVariable(asset)}</small></span>
                           </button>;
                         })}
-                        {!mentionOptions.length && <em>无匹配资产</em>}
+                        {!mentionOptions.length && <em>当前集无匹配资产</em>}
                       </div>
                     )}
                   </div>
@@ -3345,9 +3483,35 @@ export function App() {
         </section>
 
         <section className={screen === "compare" ? "screen active video-page" : "screen video-page"} id="compare">
-          <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} active={screen === "compare"} onMessage={setMessage} />
+          <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} comparisonItems={videoComparisonItems} active={screen === "compare"} onMessage={setMessage} />
         </section>
       </main>
+
+      {voiceEditor && (
+        <div className="modal-overlay open" aria-hidden="false" onClick={(event) => {
+          if (event.currentTarget === event.target && !busy) closeVoiceConfiguration();
+        }}>
+          <section className="upload-confirm-dialog voice-config-dialog" role="dialog" aria-modal="true" aria-labelledby="voice-config-title">
+            <div className="modal-titlebar light"><h3 id="voice-config-title">配置音色 · {voiceEditor.roleName}</h3><button type="button" aria-label="关闭音色配置" disabled={busy} onClick={closeVoiceConfiguration}>×</button></div>
+            <div className="confirm-body voice-config-body">
+              <div className="voice-config-section"><b>选择音色</b><span>配置属于角色本身，不绑定某个图片版本。</span></div>
+              <div className="voice-preset-grid">
+                {VOICE_PRESETS.map((preset) => <button type="button" key={preset.id} className={voiceEditor.config.voiceId === preset.id ? "voice-preset active" : "voice-preset"} onClick={() => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, voiceId: preset.id, voiceName: preset.name } } : current)}>
+                  <b>{preset.name}</b><span>{preset.description}</span>
+                </button>)}
+              </div>
+              <div className="voice-parameter-grid">
+                <label><span>语速 <b>{voiceEditor.config.rate.toFixed(1)}×</b></span><input type="range" min="0.5" max="2" step="0.1" value={voiceEditor.config.rate} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, rate: Number(event.target.value) } } : current)} /></label>
+                <label><span>音调 <b>{voiceEditor.config.pitch.toFixed(1)}</b></span><input type="range" min="0.5" max="1.5" step="0.1" value={voiceEditor.config.pitch} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, pitch: Number(event.target.value) } } : current)} /></label>
+                <label><span>音量 <b>{Math.round(voiceEditor.config.volume * 100)}%</b></span><input type="range" min="0" max="1" step="0.1" value={voiceEditor.config.volume} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, volume: Number(event.target.value) } } : current)} /></label>
+              </div>
+              <label className="voice-sample"><span>试听文本</span><textarea rows={3} value={voiceEditor.sample} onChange={(event) => setVoiceEditor((current) => current ? { ...current, sample: event.target.value } : current)} /></label>
+              <div className="voice-preview-row"><button type="button" className="ghost" onClick={toggleVoicePreview}>{voiceSpeaking ? "停止试听" : "试听"}</button><span>试听使用浏览器语音做参数原型；正式配音接入后沿用此配置。</span></div>
+            </div>
+            <div className="confirm-actions"><button type="button" className="ghost" disabled={busy} onClick={closeVoiceConfiguration}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => void saveVoiceConfiguration()}>{busy ? "保存中…" : "保存音色配置"}</button></div>
+          </section>
+        </div>
+      )}
 
       {deletingStoryboard && (
         <div className="modal-overlay open" aria-hidden="false" onClick={(event) => {

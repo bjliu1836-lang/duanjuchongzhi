@@ -146,7 +146,7 @@ def make_router(
             for row in gens:
                 generation = dict(row)
                 payload = json.loads(generation.get("payload_json") or "{}")
-                if payload.get("mock") or not generation.get("output_path"):
+                if not generation.get("output_path"):
                     continue
                 path = Path(generation["output_path"]).resolve()
                 try:
@@ -158,7 +158,7 @@ def make_router(
                         meta = media_probe(path)
                     except HTTPException:
                         continue
-                    items.append({"id": generation["id"], "episodeId": episode_id, "name": path.name, "kind": "generated_video", "source": "真实生成文件", "fileUrl": data_file_url(str(path)), "thumbnailUrl": make_thumbnail(project_id, episode_id, generation["id"], path), **meta})
+                    items.append({"id": generation["id"], "episodeId": episode_id, "name": path.name, "kind": "generated_video", "source": "演示生成文件" if payload.get("mock") else "真实生成文件", "fileUrl": data_file_url(str(path)), "thumbnailUrl": make_thumbnail(project_id, episode_id, generation["id"], path), **meta})
             return items
 
     def resolve_clips(conn: sqlite3.Connection, project_id: str, episode_id: str, clips: list[ClipInput]) -> list[dict[str, Any]]:
