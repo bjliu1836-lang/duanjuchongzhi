@@ -2138,27 +2138,6 @@ export function App() {
     } finally { setBusy(false); }
   }
 
-  async function applyProjectMode() {
-    if (!currentProject) return;
-    const body = { remakeMode, sourceLanguage, storyboardVisualStyle: remakeMode === "cg_3d" ? "cg_3d" : storyboardVisualStyle, replaceCharacters, replaceScenes, targetCountry, targetLanguage };
-    setBusy(true);
-    try {
-      try {
-        const data = await request<{ project: Project }>(`/api/projects/${currentProject.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        setCurrentProject(data.project);
-        setStoryboardVisualStyle(data.project.storyboard_visual_style ?? "live_action");
-        await Promise.all([loadAssets(currentProject.id), loadStoryboards(currentProject.id)]);
-        setMessage("项目制作模式已更新；受影响分镜待更新");
-      } catch (error) {
-        if (!String(error).includes("409")) throw error;
-        const data = await request<{ project: Project }>(`/api/projects/${currentProject.id}/derive`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: `${currentProject.title}（新制作模式）`, ...body }) });
-        await loadProjects();
-        await selectProject(data.project.id);
-        setMessage("已另存为新制作项目；源视频、解析与分镜已复用，旧目标图未复制");
-      }
-    } finally { setBusy(false); }
-  }
-
   async function saveStoryboardVisualStyle(style: "live_action" | "cg_3d") {
     if (!currentProject) return;
     const data = await request<{ project: Project }>(`/api/projects/${currentProject.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ storyboardVisualStyle: style }) });
@@ -2494,7 +2473,8 @@ export function App() {
     const at = value.lastIndexOf("@", Math.max(0, caret - 1));
     const query = at >= 0 ? value.slice(at + 1, caret) : "";
     const prefix = at > 0 ? value[at - 1] : "";
-    if (at >= 0 && !/[\p{L}\p{N}_@]/u.test(prefix) && /^[\p{L}\p{N}_-]*$/u.test(query)) {
+    // 只排除邮箱式 ASCII 前缀；中文提示词末尾直接输入 @ 也必须拉起资产列表。
+    if (at >= 0 && !/[A-Za-z0-9_@]/.test(prefix) && /^[\p{L}\p{N}_-]*$/u.test(query)) {
       updateMentionMenuPosition();
       setMentionQuery(query);
       setMentionRange({ start: at, end: caret });
@@ -2816,14 +2796,6 @@ export function App() {
               </section>
             )}
 
-            {effectiveUploadState === "uploaded" && (
-              <section className="source-summary">
-                <article><span>文件夹名称</span><b>{selectedSource?.title ?? currentProject?.title ?? "未选择"}</b></article>
-                <article><span>总集数</span><b>{episodes.length || sourceEpisodeCount} 集</b></article>
-                <article><span>上传状态</span><b>{uploadedEpisodeCount || episodes.length || sourceEpisodeCount}/{episodes.length || sourceEpisodeCount} 已完成</b></article>
-              </section>
-            )}
-
             <div className="config-row">
               <label className="select-field">画面类型<select value={storyboardVisualStyle ?? "live_action"} onChange={(event) => { const style = event.target.value as "live_action" | "cg_3d"; setStoryboardVisualStyle(style); setRemakeMode(style === "cg_3d" ? "cg_3d" : targetLanguage === "沿用原片语言" ? "asset_replacement" : "overseas_localization"); }}><option value="live_action">真人</option><option value="cg_3d">3D</option></select></label>
               <label className="select-field">地区语言<select value={targetLanguage} onChange={(event) => { const language = event.target.value; setTargetLanguage(language); setTargetCountry(language === "沿用原片语言" ? "中国" : language === "日语" ? "日本" : language === "韩语" ? "韩国" : language === "英语" ? "美国" : "海外"); setRemakeMode(storyboardVisualStyle === "cg_3d" ? "cg_3d" : language === "沿用原片语言" ? "asset_replacement" : "overseas_localization"); setReplaceCharacters(language === "沿用原片语言"); setReplaceScenes(language === "沿用原片语言"); }}><option value="沿用原片语言">国内（原片语言）</option><option value="英语">海外·英语</option><option value="日语">海外·日语</option><option value="韩语">海外·韩语</option><option value="西班牙语">海外·西班牙语</option><option value="法语">海外·法语</option></select></label>
@@ -2836,7 +2808,6 @@ export function App() {
                   {remakeMode === "overseas_localization" && <div className="param-row"><span>风格</span><div className="param-options">{["写实通用", "欧美短剧", "广告质感"].map((item) => <button className={styleType === item ? "active" : ""} key={item} onClick={() => setStyleType(item)}>{item}</button>)}</div></div>}
                 </div>
               </details>
-              {currentProject && <button className="ghost" disabled={busy} onClick={applyProjectMode}>应用项目模式</button>}
               <button className="create-btn in-card" disabled={busy || !selectedSource} onClick={() => setModal("upload-confirm-modal")}>开始上传</button>
             </div>
 
