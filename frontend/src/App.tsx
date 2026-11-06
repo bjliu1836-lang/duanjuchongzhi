@@ -2937,35 +2937,31 @@ export function App() {
                   <div className="asset-source-head">
                     <h2 className="asset-source-name">{variantName(selectedAsset)}</h2>
                     <span className="asset-source-meta">{assetDisplayVariable(selectedAsset)} · {Array.isArray(selectedAsset.payload?.出现集数) && selectedAsset.payload.出现集数.length ? `第 ${selectedAsset.payload.出现集数.join("、")} 集` : "当前集"}{selectedAssetCustomGroup ? ` · ${selectedAssetCustomGroup.name}` : ""}</span>
-                    <details className="asset-source-description">
-                      <summary>源资产事实 <span>只读</span></summary>
-                      <p>{originalAssetDescription(selectedAsset)}</p>
-                    </details>
                   </div>
                   <figure className="asset-source-figure">
-                    <div className="asset-figure-space">
-                      <div className="asset-figure-frame">
-                        {selectedAssetOriginalImage ? (
-                          <img className="clickable-image" src={selectedAssetOriginalImage} alt="原片截图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原片截图`)} />
-                        ) : (
-                          <div className="asset-empty-thumb asset-empty-large">暂无原片截图</div>
-                        )}
-                      </div>
+                    <div className="asset-figure-frame">
+                      {selectedAssetOriginalImage ? (
+                        <img className="clickable-image" src={selectedAssetOriginalImage} alt="原片截图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原片截图`)} />
+                      ) : (
+                        <div className="asset-empty-thumb asset-empty-large">暂无原片截图</div>
+                      )}
                     </div>
                     <figcaption>原片截图</figcaption>
                   </figure>
                   <figure className="asset-source-figure">
-                    <div className="asset-figure-space">
-                      <div className="asset-figure-frame">
-                        {selectedAssetGeneratedImage ? (
-                          <img className="clickable-image" src={selectedAssetGeneratedImage} alt="确认版本" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 确认版本`)} />
-                        ) : (
-                          <div className="asset-empty-thumb asset-empty-large">确认版本待生成</div>
-                        )}
-                      </div>
+                    <div className="asset-figure-frame">
+                      {selectedAssetGeneratedImage ? (
+                        <img className="clickable-image" src={selectedAssetGeneratedImage} alt="确认版本" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 确认版本`)} />
+                      ) : (
+                        <div className="asset-empty-thumb asset-empty-large">确认版本待生成</div>
+                      )}
                     </div>
                     <figcaption>确认版本</figcaption>
                   </figure>
+                  <section className="asset-source-facts">
+                    <div className="panel-title">源资产事实 <span>只读</span></div>
+                    <p>{originalAssetDescription(selectedAsset)}</p>
+                  </section>
                 </section>
                 <aside className="generation-panel asset-generation-studio">
                   <div className="studio-toolbar">
@@ -2981,40 +2977,38 @@ export function App() {
                       <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
                     </div>
                   </div>
-                  <div className="studio-preview-row">
-                    <div className="studio-preview-main">
-                      {isGeneratingSelectedAsset ? (
-                        <div className="studio-image-loading"><i></i><span>生成中</span></div>
-                      ) : selectedAssetGeneratedImage ? (
-                        <img className="studio-generated-image clickable-image" src={selectedAssetGeneratedImage} alt="当前生效资产图" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 当前生效资产图`)} />
-                      ) : (
-                          <div className="asset-empty-thumb asset-empty-large">暂无生成图，生成或上传后在此预览</div>
-                      )}
-                      <button
-                        type="button"
-                        className="studio-upload-fab"
-                        aria-label="上传本地图片作为一个历史版本"
-                        title="上传本地图片作为一个历史版本"
-                        onClick={() => assetImageInputRef.current?.click()}
-                        disabled={busy || isGeneratingSelectedAsset}
-                      >上传</button>
-                    </div>
-                    <div className="studio-current">
-                      <span>历史版本</span>
-                      <div className="asset-version-list">
-                        {(selectedAsset.images ?? []).map((image, index) => {
-                          const imageUrl = apiAssetUrl(image.file_url || image.payload?.source_url);
-                          const isFavorite = selectedAssetFavoriteImageId === image.id;
-                          return (
-                            <button className={image.id === selectedImageVersion?.id ? "asset-version active" : "asset-version"} key={image.id} onClick={() => selectAssetImageVersion(selectedAsset.id, image.id)} disabled={busy}>
-                              {imageUrl ? <img src={imageUrl} alt={`历史版本 ${index + 1}`} /> : <i></i>}
-                              {isFavorite && <em className="asset-version-fav" aria-label="已收藏">★</em>}
-                              <span>v{(selectedAsset.images?.length ?? 0) - index}</span>
-                            </button>
-                          );
-                        })}
-                        {!selectedAsset.images?.length && <em>暂无历史版本</em>}
-                      </div>
+                  <div className="studio-preview-main">
+                    {isGeneratingSelectedAsset ? (
+                      <div className="studio-image-loading"><i></i><span>生成中</span></div>
+                    ) : selectedAssetGeneratedImage ? (
+                      <img className="studio-generated-image clickable-image" src={selectedAssetGeneratedImage} alt="当前生效资产图" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 当前生效资产图`)} />
+                    ) : (
+                        <div className="asset-empty-thumb asset-empty-large">暂无生成图，生成或上传后在此预览</div>
+                    )}
+                    <button
+                      type="button"
+                      className="studio-upload-fab"
+                      aria-label="上传本地图片作为一个历史版本"
+                      title="上传本地图片作为一个历史版本"
+                      onClick={() => assetImageInputRef.current?.click()}
+                      disabled={busy || isGeneratingSelectedAsset}
+                    >上传</button>
+                  </div>
+                  <div className="studio-current">
+                    <span>历史版本</span>
+                    <div className="asset-version-list">
+                      {(selectedAsset.images ?? []).map((image, index) => {
+                        const imageUrl = apiAssetUrl(image.file_url || image.payload?.source_url);
+                        const isFavorite = selectedAssetFavoriteImageId === image.id;
+                        return (
+                          <button className={image.id === selectedImageVersion?.id ? "asset-version active" : "asset-version"} key={image.id} onClick={() => selectAssetImageVersion(selectedAsset.id, image.id)} disabled={busy}>
+                            {imageUrl ? <img src={imageUrl} alt={`历史版本 ${index + 1}`} /> : <i></i>}
+                            {isFavorite && <em className="asset-version-fav" aria-label="已收藏">★</em>}
+                            <span>v{(selectedAsset.images?.length ?? 0) - index}</span>
+                          </button>
+                        );
+                      })}
+                      {!selectedAsset.images?.length && <em>暂无历史版本</em>}
                     </div>
                   </div>
                   <div className="agent-generate-card">
