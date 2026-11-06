@@ -858,12 +858,10 @@ function getInitialWorkbenchPaneWidths() {
   };
 }
 
-// 原片对比：循环播放当前分镜对应的原片片段，并可切换查看全部切分片段。
-function OriginalClipPreview({ sourceUrl, storyboard, storyboards, onSelect }: {
+// 原片对比：只循环播放当前选中分镜对应的原片片段，分镜切换统一由底部卡片承担。
+function OriginalClipPreview({ sourceUrl, storyboard }: {
   sourceUrl: string;
   storyboard: Storyboard;
-  storyboards: Storyboard[];
-  onSelect: (storyboard: Storyboard) => void;
 }) {
   const range = parseRange(storyboard.time_range || "");
   return (
@@ -888,17 +886,6 @@ function OriginalClipPreview({ sourceUrl, storyboard, storyboards, onSelect }: {
           }
         }}
       />
-      <div className="original-clip-list">
-        {storyboards.map((item) => (
-          <button
-            key={item.id}
-            className={item.id === storyboard.id ? "active" : ""}
-            onClick={() => onSelect(item)}
-          >
-            {item.title} · {item.time_range}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
@@ -954,6 +941,8 @@ export function App() {
   const [videoModel, setVideoModel] = useState(DEFAULT_VIDEO_MODEL);
   const [videoDuration, setVideoDuration] = useState(4);
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
+  const [shotMenu, setShotMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [deletingStoryboard, setDeletingStoryboard] = useState<Storyboard | null>(null);
   const [styleType, setStyleType] = useState("写实通用");
   const [assetTab, setAssetTab] = useState<AssetTab>("角色");
   const [assetView, setAssetView] = useState<AssetView>("overview");
@@ -2151,6 +2140,7 @@ export function App() {
       }
     }
     setSelectedStoryboardId(nextStoryboard.id);
+    setShotMenu(null);
     setSegmentPanel("shot-prompt");
   }
 
@@ -2349,12 +2339,21 @@ export function App() {
 
   async function deleteStoryboard(storyboard: Storyboard) {
     if (!currentProject) return;
-    if (!window.confirm(`确认删除 ${storyboard.title}？关联的生成记录也会移除。`)) return;
-    await request(`/api/projects/${currentProject.id}/storyboards/${storyboard.id}`, { method: "DELETE" });
-    const next = storyboards.find((item) => item.id !== storyboard.id);
-    setSelectedStoryboardId(next?.id ?? null);
-    await loadStoryboards(currentProject.id, selectedEpisodeId);
-    setMessage("分镜已删除");
+    setBusy(true);
+    try {
+      await request(`/api/projects/${currentProject.id}/storyboards/${storyboard.id}`, { method: "DELETE" });
+      const deletedIndex = storyboards.findIndex((item) => item.id === storyboard.id);
+      const remaining = storyboards.filter((item) => item.id !== storyboard.id);
+      const next = remaining[Math.min(Math.max(deletedIndex, 0), Math.max(remaining.length - 1, 0))];
+      setSelectedStoryboardId(next?.id ?? null);
+      await loadStoryboards(currentProject.id, selectedEpisodeId);
+      setDeletingStoryboard(null);
+      setMessage("分镜已删除");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "分镜删除失败，请重试");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function moveStoryboard(storyboard: Storyboard, direction: "up" | "down") {
@@ -2592,7 +2591,24 @@ export function App() {
   const messageIsError = /(失败|错误|冲突|无法|不可|请重试|未保存)/.test(message);
   useEffect(() => {
     setSelectedGenerationId(null);
+    setShotMenu(null);
   }, [selectedStoryboard?.id]);
+  useEffect(() => {
+    if (!shotMenu) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".shot-card-menu") && !target?.closest(".shot-card-menu-trigger")) setShotMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShotMenu(null);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [shotMenu]);
   useEffect(() => {
     if (!message || messageIsError) return;
     const timer = window.setTimeout(() => setMessage(""), 4200);
@@ -3259,8 +3275,6 @@ export function App() {
                   <OriginalClipPreview
                     sourceUrl={apiAssetUrl(selectedEpisode.file_url)}
                     storyboard={selectedStoryboard}
-                    storyboards={storyboards}
-                    onSelect={(item) => { void selectStoryboardWithSave(item); }}
                   />
                 ) : (
                   <div className="video-not-ready">选择分镜后可查看对应原片片段。</div>
@@ -3294,10 +3308,36 @@ export function App() {
           </aside>
           <button type="button" className="workbench-splitter preview-pane-splitter" role="separator" aria-label="调整预览栏宽度" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={getWorkbenchPaneMaxWidth("preview")} aria-valuenow={previewPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("preview", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("preview", event)} />
           <section className="shot-strip">
-            <div className="strip-head"><h3>{storyboards.length ? storyboards.every((item) => item.payload?.["使用回退占位"] === true) ? `${storyboards.length} 个待分析片段` : `${storyboards.length} 个分镜${storyboards.some((item) => item.payload?.["使用回退占位"] === true) ? "（含待分析片段）" : " · 自动切分"}` : "尚无已分析分镜"}</h3><div className="strip-actions"><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "up")}>上移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && moveStoryboard(selectedStoryboard, "down")}>下移</button><button className="ghost small" disabled={!selectedStoryboard} onClick={() => selectedStoryboard && deleteStoryboard(selectedStoryboard)}>删除</button></div></div>
             <div className="thumb-row">
               {storyboards.map((storyboard, index) => (
-                <div className="shot-thumb-wrap" key={storyboard.id}><StoryboardFrameThumb storyboard={storyboard} sourceUrl={selectedEpisode?.file_url ? apiAssetUrl(selectedEpisode.file_url) : undefined} selected={storyboard.id === selectedStoryboard?.id} onClick={() => void selectStoryboardWithSave(storyboard)} /><span className="shot-card-index">{index + 1}</span><button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button></div>
+                <div className="shot-thumb-wrap" key={storyboard.id}>
+                  <StoryboardFrameThumb storyboard={storyboard} sourceUrl={selectedEpisode?.file_url ? apiAssetUrl(selectedEpisode.file_url) : undefined} selected={storyboard.id === selectedStoryboard?.id} onClick={() => void selectStoryboardWithSave(storyboard)} />
+                  <span className="shot-card-index">{index + 1}</span>
+                  <button
+                    type="button"
+                    className="shot-card-menu-trigger"
+                    aria-label={`${storyboard.title}操作`}
+                    aria-haspopup="menu"
+                    aria-expanded={shotMenu?.id === storyboard.id}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (shotMenu?.id === storyboard.id) {
+                        setShotMenu(null);
+                        return;
+                      }
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setShotMenu({ id: storyboard.id, x: rect.right, y: rect.bottom + 6 });
+                    }}
+                  >⋯</button>
+                  {shotMenu?.id === storyboard.id && (
+                    <div className="shot-card-menu" role="menu" style={{ left: shotMenu.x, top: shotMenu.y }} onClick={(event) => event.stopPropagation()}>
+                      <button type="button" role="menuitem" disabled={index === 0} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "up"); }}>上移</button>
+                      <button type="button" role="menuitem" disabled={index === storyboards.length - 1} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "down"); }}>下移</button>
+                      <button type="button" role="menuitem" className="danger" onClick={() => { setShotMenu(null); setDeletingStoryboard(storyboard); }}>删除</button>
+                    </div>
+                  )}
+                  <button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button>
+                </div>
               ))}
               <button className="add-shot-card" onClick={() => createStoryboard()}>+ 新增分镜</button>
             </div>
@@ -3308,6 +3348,23 @@ export function App() {
           <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} active={screen === "compare"} onMessage={setMessage} />
         </section>
       </main>
+
+      {deletingStoryboard && (
+        <div className="modal-overlay open" aria-hidden="false" onClick={(event) => {
+          if (event.currentTarget === event.target && !busy) setDeletingStoryboard(null);
+        }}>
+          <section className="upload-confirm-dialog storyboard-delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-storyboard-title">
+            <div className="modal-titlebar light"><h3 id="delete-storyboard-title">确认删除分镜？</h3><button type="button" aria-label="关闭删除确认" disabled={busy} onClick={() => setDeletingStoryboard(null)}>×</button></div>
+            <div className="confirm-body">
+              <div className="confirm-copy">
+                <b>{deletingStoryboard.title}</b>
+                <span>时间范围：{deletingStoryboard.time_range || "未设置"}。删除后，关联的生成记录也会一并移除，且无法恢复。</span>
+              </div>
+            </div>
+            <div className="confirm-actions"><button type="button" className="ghost" disabled={busy} onClick={() => setDeletingStoryboard(null)}>取消</button><button type="button" className="primary shot-delete-confirm" disabled={busy} onClick={() => void deleteStoryboard(deletingStoryboard)}>{busy ? "删除中…" : "确认删除"}</button></div>
+          </section>
+        </div>
+      )}
 
       {modal === "upload-confirm-modal" && (
         <div className="modal-overlay open" aria-hidden="false" onClick={(event) => event.currentTarget === event.target && setModal(null)}>

@@ -214,6 +214,12 @@ button:disabled {
   text-align: center;
   padding: 16px;
 }
+/* 分镜页资产列表把通用空图固定为 42px；生成预览占位必须恢复整栏宽度。 */
+body[data-screen="segments"] .storyboard-gen-preview .asset-empty-thumb {
+  width: 100%;
+  height: auto;
+  flex: 0 0 auto;
+}
 .storyboard-gen-versions { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .storyboard-gen-versions > span { color: var(--muted); font-size: 11px; }
 .storyboard-gen-version-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
@@ -1016,6 +1022,52 @@ body[data-screen="segments"] .shot-frame-copy b, body[data-screen="segments"] .s
 body[data-screen="segments"] .shot-frame-copy b { color: var(--text); font-size: 11px; }
 body[data-screen="segments"] .shot-frame-copy small { margin: 0; font-size: 10px; }
 body[data-screen="segments"] .shot-card-index { position: absolute; left: 5px; top: 5px; padding: 2px 5px; border-radius: 5px; background: #221d2bdd; color: white; font-size: 9px; pointer-events: none; }
+body[data-screen="segments"] .shot-card-menu-trigger {
+  position: absolute;
+  z-index: 4;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  width: 27px;
+  height: 25px;
+  padding: 0 0 6px;
+  place-items: center;
+  border: 1px solid #ffffff38;
+  border-radius: 7px;
+  background: #17131dc9;
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+body[data-screen="segments"] .shot-card-menu-trigger:hover,
+body[data-screen="segments"] .shot-card-menu-trigger[aria-expanded="true"] { background: #6d5dfc; }
+body[data-screen="segments"] .shot-card-menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  width: 124px;
+  padding: 5px;
+  transform: translateX(-100%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 30px #211a3b26;
+}
+body[data-screen="segments"] .shot-card-menu button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+body[data-screen="segments"] .shot-card-menu button:hover:not(:disabled) { background: #f5f1ff; }
+body[data-screen="segments"] .shot-card-menu button:disabled { color: #b7b4bf; cursor: not-allowed; }
+body[data-screen="segments"] .shot-card-menu button.danger { color: #c13b43; }
+body[data-screen="segments"] .shot-strip .thumb-row { margin-top: 0; }
 body[data-screen="segments"] .shot-thumb-wrap .insert-shot { width: 25px; min-width: 25px; padding: 0; }
 
 .composition-workspace {
@@ -1230,6 +1282,9 @@ body[data-screen="segments"] .storyboard-ref-chips.is-empty { display: none; }
 .upload-confirm-dialog .modal-titlebar { flex: 0 0 auto; position: sticky; top: 0; z-index: 2; }
 .upload-confirm-dialog .confirm-body { min-height: 0; overflow: auto; }
 .upload-confirm-dialog .confirm-actions { flex: 0 0 auto; position: sticky; bottom: 0; z-index: 2; }
+.storyboard-delete-dialog { width: min(440px, calc(100vw - 48px)); }
+.storyboard-delete-dialog .confirm-copy { margin-bottom: 10px; }
+.storyboard-delete-dialog .shot-delete-confirm { background: #c13b43; }
 .image-view-dialog { display: flex; flex-direction: column; max-height: calc(100dvh - 24px); }
 .image-view-dialog .modal-titlebar { flex: 0 0 auto; }
 .image-view-body { flex: 1 1 auto; min-height: 0; height: auto; max-height: calc(100dvh - 120px); overflow: auto; }
