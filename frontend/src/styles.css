@@ -3151,3 +3151,17 @@ body[data-screen] .episode-reupload:not(:disabled):hover { border-color: #8b75f0
   body[data-screen="home"] .library-actions { width: 100%; }
   body[data-screen="home"] .library-actions button { flex: 1; }
 }
+
+/* 分镜「插入镜次」悬浮按钮：深色底 + 紫色描边，避免悬停时出现白色圆点。 */
+body[data-screen] .insert-shot {
+  border-color: #463c5e;
+  background: #1b1923;
+  color: #bda9ff;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .45);
+}
+body[data-screen] .insert-shot:hover,
+body[data-screen] .insert-shot:focus-visible {
+  border-color: #8b72ff;
+  background: #2a2438;
+  color: #d5c8ff;
+}
