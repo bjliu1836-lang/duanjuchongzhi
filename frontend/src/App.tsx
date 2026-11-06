@@ -194,15 +194,6 @@ function variantName(asset: Asset) {
   );
 }
 
-function variantMeta(asset: Asset) {
-  const child = currentChild(asset);
-  return [
-    pickText(child, ["差异类型"]),
-    pickText(child, ["差异标签"]),
-    pickText(child, ["子资产编号"]) || pickText(asset.payload, ["道具编号"]),
-  ].filter(Boolean).join(" · ");
-}
-
 function assetPrompt(asset: Asset) {
   const child = currentChild(asset);
   const isPlaceholder = (value: string) =>
@@ -953,8 +944,6 @@ export function App() {
   const [assetPromptDraft, setAssetPromptDraft] = useState("");
   const [assetImageModel, setAssetImageModel] = useState(DEFAULT_ASSET_IMAGE_MODEL);
   const [assetImageCount, setAssetImageCount] = useState(1);
-  const [assetSourcePaneWidth, setAssetSourcePaneWidth] = useState(340);
-  const [assetPreviewSize, setAssetPreviewSize] = useState({ width: 0, height: 0 });
   const assetImageAspectRatio = "16:9";
   const assetPromptDraftRevision = useRef(new Map<string, number>());
   const selectedAssetIdForPrompt = useRef<string | null>(null);
@@ -995,9 +984,6 @@ export function App() {
   const storyboardSavedBodies = useRef(new Map<string, string>());
   const storyboardPromptSaveRequests = useRef(new Map<string, { prompt: string; promise: Promise<boolean> }>());
   const assetImageInputRef = useRef<HTMLInputElement | null>(null);
-  const assetDetailLayoutRef = useRef<HTMLDivElement | null>(null);
-  const assetGenerationPanelRef = useRef<HTMLElement | null>(null);
-  const assetDetailDragRef = useRef<{ pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
   const pollingTaskIds = useRef(new Set<string>());
   const workbenchRef = useRef<HTMLElement | null>(null);
   const splitterDragRef = useRef<{ pane: WorkbenchPane; pointerId: number; startX: number; startWidth: number; target: HTMLButtonElement } | null>(null);
@@ -1073,8 +1059,6 @@ export function App() {
     () => customAssetGroups.filter((group) => group.assetType === storyboardAssetTab),
     [customAssetGroups, storyboardAssetTab]
   );
-  const selectedGroup = selectedAsset ? assetGroups.find((group) => group.key === mainAssetKey(selectedAsset)) : null;
-  const selectedSubassetItems = selectedGroup?.items ?? (selectedAsset ? [selectedAsset] : []);
   const selectedAssetCustomGroup = selectedAsset ? customGroupByAssetKey.get(mainAssetKey(selectedAsset)) ?? null : null;
   const selectedCustomGroup = selectedCustomGroupId ? customGroupById.get(selectedCustomGroupId) ?? null : null;
   const selectedCustomGroupGroups = useMemo(() => {
@@ -1124,54 +1108,6 @@ export function App() {
     "--asset-pane-width": `${assetPaneWidth}px`,
     "--preview-pane-width": `${previewPaneWidth}px`,
   } as CSSProperties;
-  const assetDetailLayoutStyle = {
-    "--asset-source-pane-width": `${assetSourcePaneWidth}px`,
-  } as CSSProperties;
-  useLayoutEffect(() => {
-    const panel = assetGenerationPanelRef.current;
-    if (assetView !== "detail" || !panel) {
-      setAssetPreviewSize({ width: 0, height: 0 });
-      return;
-    }
-    const updatePreviewSize = () => {
-      if (window.matchMedia("(max-width: 1100px)").matches) {
-        setAssetPreviewSize((current) => (current.width === 0 && current.height === 0 ? current : { width: 0, height: 0 }));
-        return;
-      }
-      const rect = panel.getBoundingClientRect();
-      // 确定性分配：先给提示词区预留空间，图片取剩余区域能放下的最大 16:9；
-      // 提示词区用 flex 吃掉图片之外的全部剩余高度，两块之和恒等于面板高度。
-      const historyColumn = 78; // 历史版本列 68px + 间距 10px
-      const chromeHeight = 34 + 24; // 工具栏 34px + 两个 12px 间隔
-      const availableWidth = Math.max(320, rect.width - historyColumn);
-      const contentHeight = Math.max(320, rect.height - chromeHeight);
-      const promptReserve = Math.min(340, Math.max(210, contentHeight * 0.34));
-      const maxImageHeight = Math.max(160, contentHeight - promptReserve);
-      const nextHeight = Math.round(Math.min(maxImageHeight, availableWidth * 9 / 16));
-      const nextWidth = Math.round(nextHeight * 16 / 9);
-      setAssetPreviewSize((current) => {
-        if (Math.abs(current.width - nextWidth) <= 1 && Math.abs(current.height - nextHeight) <= 1) return current;
-        return { width: nextWidth, height: nextHeight };
-      });
-    };
-    updatePreviewSize();
-    const observer = new ResizeObserver(updatePreviewSize);
-    observer.observe(panel);
-    window.addEventListener("resize", updatePreviewSize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updatePreviewSize);
-    };
-  }, [assetView, selectedAsset?.id]);
-  const assetPreviewFrameStyle = assetPreviewSize.width > 0
-    ? { width: `${assetPreviewSize.width}px`, height: `${assetPreviewSize.height}px` }
-    : undefined;
-  const assetPreviewRowStyle = assetPreviewSize.width > 0
-    ? { width: `${assetPreviewSize.width + 78}px`, height: `${assetPreviewSize.height}px` }
-    : undefined;
-  const assetPromptCardStyle = assetPreviewSize.width > 0
-    ? { width: `${assetPreviewSize.width + 78}px` }
-    : undefined;
   const selectedStoryboardPrompt = useMemo(
     () => selectedStoryboard?.payload?.["使用回退占位"] === true ? "" : String(
       selectedStoryboard?.payload?.["分镜生成正文"] ?? selectedStoryboard?.payload?.["源分镜文本"] ?? selectedStoryboard?.prompt ?? ""
@@ -1574,46 +1510,6 @@ export function App() {
     setAssetView("overview");
   }
 
-  function boundedAssetSourcePaneWidth(width: number) {
-    const layoutWidth = assetDetailLayoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
-    const minimumLeft = 220;
-    const minimumRight = 430;
-    const maximumLeft = Math.max(minimumLeft, Math.min(Math.round(layoutWidth * 0.62), layoutWidth - minimumRight - 12));
-    return Math.round(Math.max(minimumLeft, Math.min(maximumLeft, width)));
-  }
-
-  function updateAssetSourcePaneWidth(width: number) {
-    setAssetSourcePaneWidth(boundedAssetSourcePaneWidth(width));
-  }
-
-  function startAssetDetailResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const panel = assetDetailLayoutRef.current?.querySelector<HTMLElement>(".asset-source-panel");
-    if (!panel) return;
-    const startWidth = panel.getBoundingClientRect().width;
-    updateAssetSourcePaneWidth(startWidth);
-    assetDetailDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, target: event.currentTarget };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function moveAssetDetailResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    const drag = assetDetailDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    updateAssetSourcePaneWidth(drag.startWidth + event.clientX - drag.startX);
-  }
-
-  function endAssetDetailResize(event?: ReactPointerEvent<HTMLButtonElement>) {
-    const drag = assetDetailDragRef.current;
-    if (!drag || (event && drag.pointerId !== event.pointerId)) return;
-    assetDetailDragRef.current = null;
-    try {
-      if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
-    } catch {
-      // Pointer capture may already have been released by the browser.
-    }
-  }
-
   function renderAssetCard(group: AssetGroup, onClick?: () => void, onRemove?: () => void) {
     const originalUrl = groupOriginalImageUrl(group);
     const confirmedUrl = groupConfirmedImageUrl(group);
@@ -2012,6 +1908,29 @@ export function App() {
       await request(`/api/projects/${currentProject.id}/assets/${assetId}/confirm`, { method: "POST" });
       setMessage("资产已确认");
       await loadAssets(currentProject.id);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleAssetFavoriteVersion() {
+    if (!currentProject || !selectedAsset) return;
+    const currentFavorite = String(selectedAsset.payload?.["收藏版本图片ID"] ?? "");
+    const currentImageId = selectedImageVersion?.id ?? "";
+    if (!currentImageId) {
+      setMessage("暂无可收藏的版本，请先生成或上传资产图");
+      return;
+    }
+    const nextFavorite = currentFavorite === currentImageId ? "" : currentImageId;
+    setBusy(true);
+    try {
+      const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: { "收藏版本图片ID": nextFavorite } }),
+      });
+      setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item));
+      setMessage(nextFavorite ? "已收藏当前预览版本" : "已取消收藏");
     } finally {
       setBusy(false);
     }
@@ -2668,9 +2587,7 @@ export function App() {
     || (activeAnalysisTask?.result?.模型错误 ? "方舟分析超时，当前为基础可编辑资产：" + String(activeAnalysisTask.result.模型错误).slice(0, 120) : null);
   const selectedAssetGeneratedImage = selectedAssetImageUrl(selectedAsset);
   const selectedAssetOriginalImage = originalAssetImageUrl(selectedAsset);
-  const selectedAssetCurrentImage = selectedAsset?.payload?.effectiveAssetSource === "source"
-    ? selectedAssetOriginalImage
-    : selectedAssetGeneratedImage;
+  const selectedAssetFavoriteImageId = String(selectedAsset?.payload?.["收藏版本图片ID"] ?? "");
   const selectedImageVersion = selectedAssetImage(selectedAsset);
   const isGeneratingSelectedAsset = Boolean(selectedAsset && (generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true));
   const messageIsError = /(失败|错误|冲突|无法|不可|请重试|未保存)/.test(message);
@@ -2920,7 +2837,7 @@ export function App() {
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
                 <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
-                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button><button className="ghost" onClick={() => selectedEpisodeId && startAnalysis("normal")} disabled={busy || !selectedEpisodeId}>重提当前集</button><button className="ghost" onClick={() => startSeriesAnalysis("normal")} disabled={busy || !episodes.length}>重提整剧</button></div>
+                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button></div>
               </div>
               {assetSelectionMode && (
                 <div className="asset-batch-bar">
@@ -3015,86 +2932,83 @@ export function App() {
 
           {assetView === "detail" && selectedAsset && (
             <div className="asset-detail sub-panel active">
-              <div className="generation-layout" ref={assetDetailLayoutRef} style={assetDetailLayoutStyle}>
+              <div className="generation-layout">
                 <section className="asset-source-panel">
-                  <div className="asset-detail-summary">
-                    <article><span>资产变量</span><b>{assetDisplayVariable(selectedAsset)}</b></article>
-                    <article><span>出现集数</span><b>{Array.isArray(selectedAsset.payload?.出现集数) && selectedAsset.payload.出现集数.length ? `第 ${selectedAsset.payload.出现集数.join("、")} 集` : "当前集"}</b></article>
-                  </div>
-                  <div className="panel-title">子资产候选</div>
-                  <div className="subasset-list compact-subasset-list">
-                    {selectedSubassetItems.map((item) => (
-                      <article className={item.id === selectedAsset.id ? "subasset-card active" : "subasset-card"} key={item.id} onClick={() => setSelectedAssetId(item.id)}>
-                        <div className="subasset-thumb-shell">{selectedAssetImageUrl(item) || originalAssetImageUrl(item)
-                          ? <img className="subasset-thumb" src={selectedAssetImageUrl(item) || originalAssetImageUrl(item) || ""} alt={`${variantName(item)}资产图`} />
-                          : <span className="asset-empty-thumb">暂无图片</span>}</div>
-                        <b>{variantName(item)}</b>
-                        <span>{variantMeta(item) || assetDisplayVariable(item)}</span>
-                      </article>
-                    ))}
-                  </div>
-                  <div className="panel-title">所属资产组</div>
-                  <div className="asset-parent-link-editor">
-                    <div className="asset-parent-current">
-                      <span>{selectedAssetCustomGroup ? <>当前资产属于「<b>{selectedAssetCustomGroup.name}</b>」。</> : "当前资产尚未加入资产组。"}</span>
-                    </div>
-                  </div>
-                  <section className="asset-reference-card">
-                    <div className="panel-title">原片参考</div>
-                    {selectedAssetOriginalImage ? (
-                      <img className="original-asset-image clickable-image" src={selectedAssetOriginalImage} alt="原资产图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原资产图`)} />
-                    ) : (
-                      <div className="asset-empty-thumb asset-empty-large">暂无原资产图</div>
-                    )}
+                  <div className="asset-source-head">
+                    <h2 className="asset-source-name">{variantName(selectedAsset)}</h2>
+                    <span className="asset-source-meta">{assetDisplayVariable(selectedAsset)} · {Array.isArray(selectedAsset.payload?.出现集数) && selectedAsset.payload.出现集数.length ? `第 ${selectedAsset.payload.出现集数.join("、")} 集` : "当前集"}{selectedAssetCustomGroup ? ` · ${selectedAssetCustomGroup.name}` : ""}</span>
                     <details className="asset-source-description">
                       <summary>源资产事实 <span>只读</span></summary>
                       <p>{originalAssetDescription(selectedAsset)}</p>
                     </details>
-                  </section>
+                  </div>
+                  <figure className="asset-source-figure">
+                    <div className="asset-figure-space">
+                      <div className="asset-figure-frame">
+                        {selectedAssetOriginalImage ? (
+                          <img className="clickable-image" src={selectedAssetOriginalImage} alt="原片截图" onClick={() => openImage(selectedAssetOriginalImage, `${selectedAsset.name} 原片截图`)} />
+                        ) : (
+                          <div className="asset-empty-thumb asset-empty-large">暂无原片截图</div>
+                        )}
+                      </div>
+                    </div>
+                    <figcaption>原片截图</figcaption>
+                  </figure>
+                  <figure className="asset-source-figure">
+                    <div className="asset-figure-space">
+                      <div className="asset-figure-frame">
+                        {selectedAssetGeneratedImage ? (
+                          <img className="clickable-image" src={selectedAssetGeneratedImage} alt="确认版本" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 确认版本`)} />
+                        ) : (
+                          <div className="asset-empty-thumb asset-empty-large">确认版本待生成</div>
+                        )}
+                      </div>
+                    </div>
+                    <figcaption>确认版本</figcaption>
+                  </figure>
                 </section>
-                <button
-                  type="button"
-                  className="asset-pane-splitter"
-                  role="separator"
-                  aria-label="拖拽调整参考区与生成区宽度"
-                  aria-orientation="vertical"
-                  aria-valuemin={220}
-                  aria-valuemax={900}
-                  aria-valuenow={assetSourcePaneWidth}
-                  onPointerDown={startAssetDetailResize}
-                  onPointerMove={moveAssetDetailResize}
-                  onPointerUp={endAssetDetailResize}
-                  onPointerCancel={endAssetDetailResize}
-                  onKeyDown={(event) => {
-                    if (event.key === "ArrowLeft") updateAssetSourcePaneWidth(assetSourcePaneWidth - 16);
-                    if (event.key === "ArrowRight") updateAssetSourcePaneWidth(assetSourcePaneWidth + 16);
-                  }}
-                >
-                  <span></span>
-                </button>
-                <aside className="generation-panel asset-generation-studio" ref={assetGenerationPanelRef}>
+                <aside className="generation-panel asset-generation-studio">
                   <div className="studio-toolbar">
                     <div className="studio-title"><span>当前形象</span><b>{variantName(selectedAsset)}</b></div>
-                    <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
+                    <div className="studio-actions">
+                      <button
+                        type="button"
+                        className={selectedAssetFavoriteImageId && selectedAssetFavoriteImageId === selectedImageVersion?.id ? "ghost studio-favorite active" : "ghost studio-favorite"}
+                        onClick={() => void toggleAssetFavoriteVersion().catch((error) => setMessage(error.message))}
+                        disabled={busy || !selectedImageVersion}
+                        title={selectedImageVersion ? (selectedAssetFavoriteImageId === selectedImageVersion.id ? "取消收藏当前版本" : "收藏当前预览版本") : "暂无可收藏的版本"}
+                      >{selectedAssetFavoriteImageId && selectedAssetFavoriteImageId === selectedImageVersion?.id ? "★ 已收藏" : "收藏版本"}</button>
+                      <button className="primary studio-confirm" onClick={() => confirmAsset(selectedAsset.id)} disabled={busy}>确认{assetTab}</button>
+                    </div>
                   </div>
-                  <div className="studio-preview-row" style={assetPreviewRowStyle}>
-                    <div className="studio-preview-main" style={assetPreviewFrameStyle}>
+                  <div className="studio-preview-row">
+                    <div className="studio-preview-main">
                       {isGeneratingSelectedAsset ? (
                         <div className="studio-image-loading"><i></i><span>生成中</span></div>
-                      ) : selectedAssetCurrentImage ? (
-                        <img className="studio-generated-image clickable-image" src={selectedAssetCurrentImage} alt={selectedAsset?.payload?.effectiveAssetSource === "source" ? "当前沿用的原片资产图" : "当前目标资产图"} onClick={() => openImage(selectedAssetCurrentImage, `${variantName(selectedAsset)} 当前生效资产图`)} />
+                      ) : selectedAssetGeneratedImage ? (
+                        <img className="studio-generated-image clickable-image" src={selectedAssetGeneratedImage} alt="当前生效资产图" onClick={() => openImage(selectedAssetGeneratedImage, `${variantName(selectedAsset)} 当前生效资产图`)} />
                       ) : (
-                          <div className="asset-empty-thumb asset-empty-large">暂无当前采用图</div>
+                          <div className="asset-empty-thumb asset-empty-large">暂无生成图，生成或上传后在此预览</div>
                       )}
+                      <button
+                        type="button"
+                        className="studio-upload-fab"
+                        aria-label="上传本地图片作为一个历史版本"
+                        title="上传本地图片作为一个历史版本"
+                        onClick={() => assetImageInputRef.current?.click()}
+                        disabled={busy || isGeneratingSelectedAsset}
+                      >上传</button>
                     </div>
                     <div className="studio-current">
                       <span>历史版本</span>
                       <div className="asset-version-list">
                         {(selectedAsset.images ?? []).map((image, index) => {
                           const imageUrl = apiAssetUrl(image.file_url || image.payload?.source_url);
+                          const isFavorite = selectedAssetFavoriteImageId === image.id;
                           return (
                             <button className={image.id === selectedImageVersion?.id ? "asset-version active" : "asset-version"} key={image.id} onClick={() => selectAssetImageVersion(selectedAsset.id, image.id)} disabled={busy}>
                               {imageUrl ? <img src={imageUrl} alt={`历史版本 ${index + 1}`} /> : <i></i>}
+                              {isFavorite && <em className="asset-version-fav" aria-label="已收藏">★</em>}
                               <span>v{(selectedAsset.images?.length ?? 0) - index}</span>
                             </button>
                           );
@@ -3103,7 +3017,7 @@ export function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="agent-generate-card" style={assetPromptCardStyle}>
+                  <div className="agent-generate-card">
                     <div className="agent-card-head"><h3>Agent 生成{assetTab === "角色" ? "形象" : assetTab}</h3></div>
                     <div className="agent-prompt-box">
                       {selectedAsset.payload?.["目标画像状态"] === "待源事实核对" && (
@@ -3146,7 +3060,6 @@ export function App() {
                         </label>
                         <span className="asset-ratio-setting">比例 <b>16:9</b></span>
                         <div className="agent-prompt-actions">
-                          <button className="ghost" onClick={() => assetImageInputRef.current?.click()} disabled={busy}>上传目标图</button>
                           {currentProject?.remake_mode === "asset_replacement" && <button className="ghost" onClick={async () => { const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${selectedAsset.id}/restore-original`, { method: "POST" }); setAssets((items) => items.map((item) => item.id === selectedAsset.id ? data.asset : item)); setAssetPromptDraft(assetPrompt(data.asset)); setMessage("已设为沿用原貌；受影响分镜待更新"); }}>沿用原貌</button>}
                           <input ref={assetImageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.currentTarget.files?.[0]; void uploadTargetAssetImage(file).catch((error) => setMessage(error.message)); event.currentTarget.value = ""; }} />
                           <button className="primary agent-cost" onClick={() => generateAssetImage(selectedAsset, assetPromptDraft).catch((error) => setMessage(error.message))} disabled={generatingAssetIds.has(selectedAsset.id) || selectedAsset.payload?.generationInProgress === true || !assetPromptDraft.trim()}>生成资产图</button>
