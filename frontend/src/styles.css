@@ -2488,6 +2488,26 @@ body[data-screen="home"] .project-info .project-mode-tag { background: #20242e; 
 body[data-screen="home"] .project-load-error { border-color: #573136; background: #25181b; color: #e5a4aa; }
 body[data-screen="home"] .list-pagination { color: #92929f; }
 
+/* 上传失败时，操作列提供原位重新上传入口。 */
+.episode-reupload {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.episode-reupload:not(:disabled) {
+  border-color: #bba7ff;
+  background: #f5f1ff;
+  color: #6549b6;
+  font-weight: 650;
+}
+.episode-reupload:not(:disabled):hover { border-color: #9a78e8; background: #eee7ff; }
+.episode-reupload:disabled { cursor: default; opacity: .4; }
+
 @media (max-width: 700px) {
   body[data-screen="home"] .app-top .steps { gap: 4px; }
   body[data-screen="home"] .app-top .step { flex: 1 0 auto; padding: 8px 10px; white-space: nowrap; }

@@ -989,6 +989,7 @@ export function App() {
   const [message, setMessage] = useState("准备就绪");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const retryUploadInputRef = useRef<HTMLInputElement | null>(null);
   const promptInputRef = useRef<HTMLDivElement | null>(null);
   const promptEditorSync = useRef<{ storyboardId: string; value: string; assets: Asset[] } | null>(null);
   const promptCompositionActive = useRef(false);
@@ -1697,7 +1698,7 @@ export function App() {
     }
   }
 
-  async function uploadEpisodes(files = selectedFiles) {
+  async function uploadEpisodes(files = selectedFiles, options: { reuseCurrentProject?: boolean } = {}) {
     if (selectedSource?.kind === "local" && !files?.length) {
       setMessage("未读取到本地视频文件，请重新选择文件夹后再上传");
       setModal(null);
@@ -1708,13 +1709,13 @@ export function App() {
     setScreen("source");
     setModal(null);
     try {
-      const project = currentProject && !episodes.length
+      const project = currentProject && (options.reuseCurrentProject || !episodes.length)
         ? currentProject
         : await createProjectForUpload(selectedSource?.title ?? "未命名本地视频项目");
       const body = new FormData();
       Array.from(files ?? []).forEach((file) => body.append("files", file));
       await request(`/api/projects/${project.id}/episodes/upload`, { method: "POST", body });
-      setMessage("视频已保存并同步 Ark");
+      setMessage("视频已保存并上传完成");
       await selectProject(project.id);
       setUploadState("uploaded");
     } catch (error) {
@@ -1725,19 +1726,19 @@ export function App() {
     }
   }
 
-  async function syncArkFile(episodeId: string) {
-    if (!currentProject) return;
-    setBusy(true);
-    try {
-      const data = await request<{ ark: { file_id: string; error: string } }>(
-        `/api/projects/${currentProject.id}/episodes/${episodeId}/sync-ark-file`,
-        { method: "POST" }
-      );
-      setMessage(data.ark.file_id ? "Ark 文件同步已完成" : `Ark 文件同步失败：${data.ark.error}`);
-      await selectProject(currentProject.id);
-    } finally {
-      setBusy(false);
-    }
+  async function handleReuploadSelection(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (!files.length) return;
+    setSelectedFiles(files);
+    setSelectedSource((current) => current ?? {
+      kind: "local",
+      uploadMode: files.length === 1 ? "single" : "folder",
+      title: currentProject?.title ?? "未命名本地视频项目",
+      meta: files.length === 1 ? `本地单个视频 · 1 集 · ${files[0].name}` : `本地文件夹 · ${files.length} 个视频文件`,
+    });
+    setUploadState("selected");
+    await uploadEpisodes(files, { reuseCurrentProject: true });
   }
 
   async function runBackendTask(taskType: "asset_extraction" | "storyboard_generation" | "video_generation" | "series_analysis", options: { force?: boolean } = {}) {
@@ -2851,7 +2852,7 @@ export function App() {
 
         <section className={screen === "source" ? "screen active page-screen" : "screen page-screen"} id="source">
           <div className="info-bar">
-            {effectiveUploadState === "uploading" ? `正在上传《${selectedSource?.title ?? currentProject?.title ?? "当前项目"}》原片视频。上传完成后，再选择分析方式。` : effectiveUploadState === "failed" ? "上传失败，请返回重新选择或重试上传。" : "原片视频已上传完成，现在可以选择分析方式。"}
+            {effectiveUploadState === "uploading" ? `正在上传《${selectedSource?.title ?? currentProject?.title ?? "当前项目"}》原片视频。上传完成后，再选择分析方式。` : effectiveUploadState === "failed" ? "上传失败，请在下方失败剧集的操作列点击「重新上传」。" : "原片视频已上传完成，现在可以选择分析方式。"}
           </div>
           <div className="page-head">
             <h1>原片剧集</h1>
@@ -2861,18 +2862,21 @@ export function App() {
             <table>
               <thead><tr><th>剧集信息</th><th>时长</th><th>大小</th><th>状态</th><th>操作</th></tr></thead>
               <tbody>
-                {pagedEpisodes.map((episode) => (
-                  <tr key={episode.id} className={episode.id === selectedEpisodeId ? "selected" : ""} onClick={() => { if (!episode.id.startsWith("pending-")) setSelectedEpisodeId(episode.id); }}>
+                {pagedEpisodes.map((episode) => {
+                  const uploaded = Boolean(episode.ark_file_id || episode.status.includes("已上传"));
+                  const failed = !uploaded && (effectiveUploadState === "failed" || /失败|failed/i.test(episode.status));
+                  return <tr key={episode.id} className={episode.id === selectedEpisodeId ? "selected" : ""} onClick={() => { if (!episode.id.startsWith("pending-")) setSelectedEpisodeId(episode.id); }}>
                     <td><button type="button" className="episode-select" aria-pressed={episode.id === selectedEpisodeId} disabled={episode.id.startsWith("pending-")}><b>第 {episode.episode_index} 集</b><span>{episode.filename}</span></button></td>
                     <td>--:--</td>
                     <td>{formatBytes(episode.size_bytes)}</td>
-                    <td><span className="episode-status"><i className={`dot ${episode.ark_file_id || episode.status.includes("已上传") ? "green" : effectiveUploadState === "failed" ? "red" : "blue"}`}></i>{episode.ark_file_id || episode.status.includes("已上传") ? "上传成功" : effectiveUploadState === "uploading" ? "上传中" : effectiveUploadState === "failed" ? "上传失败" : "等待上传"}</span></td>
-                    <td>{episode.id.startsWith("pending") ? <span>待上传</span> : <a onClick={() => syncArkFile(episode.id)}>同步 Ark</a>}</td>
-                  </tr>
-                ))}
+                    <td><span className="episode-status"><i className={`dot ${uploaded ? "green" : failed ? "red" : "blue"}`}></i>{uploaded ? "上传成功" : effectiveUploadState === "uploading" ? "上传中" : failed ? "上传失败" : "等待上传"}</span></td>
+                    <td><button type="button" className="episode-reupload" disabled={busy || !failed} onClick={(event) => { event.stopPropagation(); retryUploadInputRef.current?.click(); }}>重新上传</button></td>
+                  </tr>;
+                })}
               </tbody>
             </table>
           </div>
+          <input hidden multiple type="file" accept="video/*" ref={retryUploadInputRef} onChange={(event: ChangeEvent<HTMLInputElement>) => { void handleReuploadSelection(event); }} />
           {sourceEpisodeRows.length > sourcePageSize && <div className="list-pagination"><button className="ghost" disabled={sourcePage === 0} onClick={() => setSourcePage((page) => Math.max(0, page - 1))}>上一页</button><span>第 {sourcePage * sourcePageSize + 1}–{Math.min(sourceEpisodeRows.length, (sourcePage + 1) * sourcePageSize)} 集 / 共 {sourceEpisodeRows.length} 集</span><button className="ghost" disabled={(sourcePage + 1) * sourcePageSize >= sourceEpisodeRows.length} onClick={() => setSourcePage((page) => page + 1)}>下一页</button></div>}
           {effectiveUploadState === "uploaded" && (
             <section className="analysis-choice source-analysis-choice">
