@@ -1356,6 +1356,31 @@ body[data-screen="segments"] .storyboard-ref-chips.is-empty { display: none; }
 .voice-preview-row { display: flex; align-items: center; gap: 12px; }
 .voice-preview-row button { flex: 0 0 auto; min-width: 84px; }
 .voice-preview-row span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.voice-model-switch { display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: #f0f0f5; width: fit-content; }
+.voice-model-option { padding: 6px 16px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+.voice-model-option.active { border-color: var(--line); background: #fff; color: var(--text); font-weight: 600; }
+.voice-model-hint { margin: -8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.voice-config-section { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.voice-ref-status { font-style: normal; font-size: 10px; padding: 2px 8px; border-radius: 99px; background: #e8f5e9; color: #2e7d32; }
+.voice-ref-upload { display: grid; gap: 6px; justify-items: center; padding: 20px 14px; border: 1px dashed #b9b6c9; border-radius: 10px; background: #fafafc; text-align: center; cursor: pointer; }
+.voice-ref-upload:hover { border-color: #8f70dc; }
+.voice-ref-upload.uploading { opacity: 0.6; cursor: wait; }
+.voice-ref-upload b { font-size: 12px; color: var(--text); }
+.voice-ref-upload span { color: var(--muted); font-size: 11px; }
+.voice-ref-upload em { font-style: normal; color: var(--muted); font-size: 10px; }
+.voice-ref-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.voice-ref-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.voice-ref-play { flex: 0 0 auto; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; background: #f4efff; color: #5b42a7; font-size: 11px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.voice-ref-wave { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; height: 24px; }
+.voice-ref-wave i { width: 3px; border-radius: 1px; background: #8f70dc; }
+.voice-ref-meta { min-width: 0; display: grid; gap: 2px; }
+.voice-ref-meta b { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.voice-ref-meta span { color: var(--muted); font-size: 10px; }
+.voice-ref-actions { display: flex; align-items: center; gap: 8px; }
+.voice-ref-action { font-size: 11px; padding: 4px 12px; cursor: pointer; }
+.voice-ref-action.danger { color: #c6424d; }
+.voice-ref-actions span { margin-left: auto; color: var(--muted); font-size: 10px; }
+.voice-parameter-grid.clone { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .image-view-dialog { display: flex; flex-direction: column; max-height: calc(100dvh - 24px); }
 .image-view-dialog .modal-titlebar { flex: 0 0 auto; }
 .image-view-body { flex: 1 1 auto; min-height: 0; height: auto; max-height: calc(100dvh - 120px); overflow: auto; }
@@ -3076,6 +3101,17 @@ body[data-screen] .voice-parameter-grid { background: #101014; }
 body[data-screen] .voice-parameter-grid label { color: #9692a0; }
 body[data-screen] .voice-parameter-grid label b { color: #e3e0ea; }
 body[data-screen] .voice-sample { color: #e0dde7; }
+body[data-screen] .voice-model-switch { background: #101014; }
+body[data-screen] .voice-model-option { color: #9692a0; }
+body[data-screen] .voice-model-option.active { border-color: #34333d; background: #1a1a20; color: #e3e0ea; }
+body[data-screen] .voice-ref-status { background: #14301a; color: #7ec98a; }
+body[data-screen] .voice-ref-upload { border-color: #3a3946; background: #101014; }
+body[data-screen] .voice-ref-upload:hover { border-color: #7e67e7; }
+body[data-screen] .voice-ref-upload b { color: #e3e0ea; }
+body[data-screen] .voice-ref-card { border-color: #34333d; background: #1a1a20; }
+body[data-screen] .voice-ref-play { border-color: #34333d; background: #262035; color: #c1b3ff; }
+body[data-screen] .voice-ref-meta b { color: #e3e0ea; }
+body[data-screen] .voice-ref-action.danger { color: #e07a83; }
 body[data-screen] .storyboard-delete-dialog .shot-delete-confirm { background: #c6424d; border-color: #c6424d; }
 
 /* Feedback and utility surfaces */

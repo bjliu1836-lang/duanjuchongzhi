@@ -28,6 +28,29 @@ from backend.app.composition import make_router
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_dotenv(path: Path) -> None:
+    """轻量加载 .env；已存在的环境变量优先，不被覆盖。"""
+    if not path.exists():
+        return
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(ROOT / ".env")
+
 DATA_DIR = ROOT / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 DB_PATH = DATA_DIR / "workshop.sqlite3"
@@ -3448,6 +3471,36 @@ async def upload_asset_image(project_id: str, asset_id: str, file: UploadFile = 
         asset["payload_json"] = json.dumps(current, ensure_ascii=False)
         mark_storyboards_asset_stale(conn, project_id, asset, "目标资产图已上传并采用")
         return get_asset_response(conn, project_id, asset_id)
+
+
+@app.post("/api/projects/{project_id}/assets/{asset_id}/upload-voice-reference")
+async def upload_asset_voice_reference(project_id: str, asset_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    extension = Path(file.filename or "").suffix.lower()
+    if extension not in {".wav", ".mp3", ".m4a"}:
+        raise HTTPException(status_code=415, detail="仅支持 wav、mp3、m4a 格式的参考音频")
+    content = await file.read(20 * 1024 * 1024 + 1)
+    if not content or len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="参考音频不能为空且不能超过 20 MB")
+    is_wav = content.startswith(b"RIFF") and content[8:12] == b"WAVE"
+    is_mp3 = content.startswith(b"ID3") or (content[0] == 0xFF and (content[1] & 0xE0) == 0xE0)
+    is_m4a = len(content) > 8 and content[4:8] == b"ftyp"
+    if (extension == ".wav" and not is_wav) or (extension == ".mp3" and not is_mp3) or (extension == ".m4a" and not is_m4a):
+        raise HTTPException(status_code=415, detail="音频文件内容与格式不匹配，请重新选择有效的音频文件")
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        asset = conn.execute("SELECT id FROM assets WHERE id=? AND project_id=?", (asset_id, project_id)).fetchone()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+    audio_dir = PROJECTS_DIR / project_id / "voice_references"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / f"{new_id('voice_ref')}{extension}"
+    audio_path.write_bytes(content)
+    return {
+        "file_url": data_file_url(str(audio_path)),
+        "file_name": Path(file.filename or f"reference{extension}").name,
+        "size": len(content),
+        "mime_type": (file.content_type or "").lower(),
+    }
 
 
 @app.post("/api/projects/{project_id}/assets/{asset_id}/select-image")
