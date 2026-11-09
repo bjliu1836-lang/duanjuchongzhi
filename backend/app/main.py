@@ -5710,6 +5710,7 @@ def merge_localized_profiles(
     target_country: str = "",
     target_era: str = "",
     target_language: str = "",
+    cached_final_profiles: bool = False,
 ) -> list[str]:
     # Localization responses must use the stable internal variable exactly.
     # Display names and source aliases are intentionally not accepted here.
@@ -5735,11 +5736,14 @@ def merge_localized_profiles(
         child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
         localized_structure = profile.get("structuredDescription") if isinstance(profile.get("structuredDescription"), dict) else {}
         profile_errors: list[str] = []
-        if asset.get("asset_type") == "角色":
+        if asset.get("asset_type") == "角色" and not cached_final_profiles:
             localized_structure, profile_errors = build_localized_role_structure(
                 payload.get("sourceSnapshot", {}), localized_structure, target_country, target_era,
                 payload.get("legacyPreservedDesignConstraints"),
             )
+        # 缓存回放的是已完成合并的最终结构（首次发布时已通过 patch 白名单校验），
+        # 不能再次按模型原始 patch 白名单校验——合并产物里的继承字段
+        # （基础设定.性别/视觉年龄/身份定位、身材体态、服装）会被误判为禁止字段。
         profile = {
             "schemaVersion": ASSET_LOCALIZATION_SCHEMA_VERSION,
             "status": "invalid" if profile_errors else "complete",
@@ -6047,9 +6051,12 @@ def run_target_localization(
         localized_assets = parsed.get("localizedAssets") if isinstance(parsed.get("localizedAssets"), list) else []
         attempts.append({"source": "model", "raw": raw, "auditPath": audit_path, "localizedAssets": localized_assets})
 
-    def validate_candidate(candidate: list[dict[str, Any]]) -> list[str]:
+    def validate_candidate(candidate: list[dict[str, Any]], *, from_cache: bool = False) -> list[str]:
         assets[:] = json.loads(json.dumps(base_assets, ensure_ascii=False))
-        candidate_errors = merge_localized_profiles(assets, {"localizedAssets": candidate}, target_country, target_era, str(project.get("target_language") or ""))
+        candidate_errors = merge_localized_profiles(
+            assets, {"localizedAssets": candidate}, target_country, target_era,
+            str(project.get("target_language") or ""), cached_final_profiles=from_cache,
+        )
         candidate_errors.extend(
             f"{asset.get('variable')}: {error}"
             for asset in assets if not is_group_portrait_asset(asset)
@@ -6075,7 +6082,7 @@ def run_target_localization(
                 asset["payload"] = payload
         return candidate_errors
 
-    errors = validate_candidate(localized_assets)
+    errors = validate_candidate(localized_assets, from_cache=bool(cached))
     if errors:
         correction_input = {
             **local_input,
