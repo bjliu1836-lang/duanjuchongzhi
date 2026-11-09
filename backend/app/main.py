@@ -2839,6 +2839,19 @@ async def upload_episodes(project_id: str, files: list[UploadFile] = File(...)) 
         raise HTTPException(status_code=400, detail="No files uploaded")
     with connect() as conn:
         get_project_or_404(conn, project_id)
+        locked_task = conn.execute(
+            """
+            SELECT id FROM tasks
+            WHERE project_id = ? AND task_type IN ('series_analysis', 'asset_extraction') AND status IN ('成功', '运行中')
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+        if locked_task:
+            raise HTTPException(
+                status_code=409,
+                detail="项目整剧分析进行中或已完成，剧集已锁定，不能再上传或调整剧集；如需更换素材请新建项目",
+            )
         project_dir = PROJECTS_DIR / project_id / "source"
         project_dir.mkdir(parents=True, exist_ok=True)
         saved: list[dict[str, Any]] = []

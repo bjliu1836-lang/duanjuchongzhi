@@ -3728,6 +3728,56 @@ def test_series_analysis_counts_failed_or_empty_storyboard_episode_as_failure(cl
     assert json.loads(parent_row["result_json"])["失败集数"] == 2
 
 
+def upload_episode_file(client: TestClient, project_id: str, filename: str = "ep01.mp4"):
+    return client.post(
+        f"/api/projects/{project_id}/episodes/upload",
+        files=[("files", (filename, io.BytesIO(b"fake video bytes"), "video/mp4"))],
+    )
+
+
+def test_episode_upload_locked_after_series_analysis(client: TestClient):
+    project = create_project(client, title="series-upload-lock")
+
+    first = upload_episode_file(client, project["id"])
+    assert first.status_code == 200, first.text
+
+    # 未提交分析前可以继续上传
+    second = upload_episode_file(client, project["id"], filename="ep02.mp4")
+    assert second.status_code == 200, second.text
+
+    with main.connect() as conn:
+        main.create_task_with_status(conn, project["id"], None, "series_analysis", "成功", "整剧分析完成", {})
+        conn.commit()
+
+    locked = upload_episode_file(client, project["id"], filename="ep03.mp4")
+    assert locked.status_code == 409
+    assert "锁定" in locked.json()["detail"]
+
+
+def test_episode_upload_locked_while_series_analysis_running(client: TestClient):
+    project = create_project(client, title="series-upload-lock-running")
+    assert upload_episode_file(client, project["id"]).status_code == 200
+
+    with main.connect() as conn:
+        main.create_task_with_status(conn, project["id"], None, "series_analysis", "运行中", "整剧分析中", {})
+        conn.commit()
+
+    locked = upload_episode_file(client, project["id"], filename="ep02.mp4")
+    assert locked.status_code == 409
+
+
+def test_episode_upload_not_locked_by_failed_analysis(client: TestClient):
+    project = create_project(client, title="series-upload-failed-analysis")
+    assert upload_episode_file(client, project["id"]).status_code == 200
+
+    with main.connect() as conn:
+        main.create_task_with_status(conn, project["id"], None, "series_analysis", "失败", "整剧分析失败", {})
+        conn.commit()
+
+    retry = upload_episode_file(client, project["id"], filename="ep02.mp4")
+    assert retry.status_code == 200, retry.text
+
+
 def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="cg3d-overseas-context")
     episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "cg3d-context.mp4")

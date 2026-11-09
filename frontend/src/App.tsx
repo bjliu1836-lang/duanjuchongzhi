@@ -1187,6 +1187,12 @@ export function App() {
   const effectiveUploadState = hasUploadedEpisodes ? "uploaded" : uploadState;
   const failedEpisodeCount = effectiveUploadState === "failed" ? Math.max(1, (selectedFiles?.length ?? 0) - uploadedEpisodeCount) : 0;
   const uploadingEpisodeCount = effectiveUploadState === "uploading" ? Math.max(sourceEpisodeCount - uploadedEpisodeCount, 0) : 0;
+  const uploadInProgress = uploadState === "uploading";
+  const allEpisodesUploaded = episodes.length > 0 && episodes.every((episode) => Boolean(episode.ark_file_id || episode.status.includes("已上传")));
+  const analysisLocked = tasks.some((task) =>
+    (task.task_type === "series_analysis" || task.task_type === "asset_extraction")
+    && (task.status === "成功" || task.status === "运行中"));
+  const canStartSeriesAnalysis = !analysisLocked && !uploadInProgress && allEpisodesUploaded;
   const sourceEpisodeRows = useMemo(() => episodes.length ? episodes : Array.from({ length: Math.min(sourceEpisodeCount, 7) }).map((_, index) => ({
     id: "pending-" + index, episode_index: index + 1, filename: selectedFiles?.[index]?.name ?? String(index + 1).padStart(3, "0") + ".mp4",
     size_bytes: selectedFiles?.[index]?.size ?? 0, status: effectiveUploadState, source_url: "", ark_file_id: "", ark_file_status: "", ark_file_error: "", created_at: "",
@@ -1782,23 +1788,11 @@ export function App() {
       const project = currentProject && (options.reuseCurrentProject || !episodes.length)
         ? currentProject
         : await createProjectForUpload(selectedSource?.title ?? "未命名本地视频项目");
-      // Demo-friendly path: when deployed on workers.dev (public demo), send only
-      // file metadata as JSON. The Worker intercepts and returns a mock episode
-      // immediately without consuming the actual bytes — so the demo never hangs
-      // on slow tunnel uploads. Local dev still uploads real files via multipart.
-      const isPublicDemo = typeof location !== "undefined" && location.hostname.endsWith(".workers.dev");
-      if (isPublicDemo) {
-        const meta = Array.from(files ?? []).map((f) => ({ name: f.name, size: f.size, type: f.type }));
-        await request(`/api/projects/${project.id}/episodes/upload`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ files: meta }),
-        });
-      } else {
-        const body = new FormData();
-        Array.from(files ?? []).forEach((file) => body.append("files", file));
-        await request(`/api/projects/${project.id}/episodes/upload`, { method: "POST", body });
-      }
+      // 始终真实上传视频字节：文件落在我们自己的服务器（后端 data/projects），
+      // 方舟仅在分析环节作为模型解析的临时句柄，不是上传目的地。
+      const body = new FormData();
+      Array.from(files ?? []).forEach((file) => body.append("files", file));
+      await request(`/api/projects/${project.id}/episodes/upload`, { method: "POST", body });
       setMessage("视频已保存并上传完成");
       await selectProject(project.id);
       setUploadState("uploaded");
@@ -2936,7 +2930,15 @@ export function App() {
 
         <section className={screen === "source" ? "screen active page-screen" : "screen page-screen"} id="source">
           <div className="info-bar">
-            {effectiveUploadState === "uploading" ? `正在上传《${selectedSource?.title ?? currentProject?.title ?? "当前项目"}》原片视频。上传完成后，再选择分析方式。` : effectiveUploadState === "failed" ? "上传失败，请在下方失败剧集的操作列点击「重新上传」。" : "原片视频已上传完成，现在可以选择分析方式。"}
+            {analysisLocked
+              ? "本项目整剧分析进行中或已完成，剧集已锁定，不能再上传或调整。"
+              : uploadInProgress
+                ? `正在上传《${selectedSource?.title ?? currentProject?.title ?? "当前项目"}》原片视频。上传完成后，可继续上传或开始整剧分析。`
+                : effectiveUploadState === "failed"
+                  ? "上传失败，请在下方失败剧集的操作列点击「重新上传」，或点击「继续上传」重新选择文件。"
+                  : allEpisodesUploaded
+                    ? "全部剧集已上传成功，可以开始整剧分析；也可以在分析前继续上传更多剧集。"
+                    : "尚未开始上传，点击「继续上传」选择本地视频文件。"}
           </div>
           <div className="page-head">
             <h1>原片剧集</h1>
@@ -2954,7 +2956,7 @@ export function App() {
                     <td>--:--</td>
                     <td>{formatBytes(episode.size_bytes)}</td>
                     <td><span className="episode-status"><i className={`dot ${uploaded ? "green" : failed ? "red" : "blue"}`}></i>{uploaded ? "上传成功" : effectiveUploadState === "uploading" ? "上传中" : failed ? "上传失败" : "等待上传"}</span></td>
-                    <td><button type="button" className="episode-reupload" disabled={busy || !failed} onClick={(event) => { event.stopPropagation(); retryUploadInputRef.current?.click(); }}>重新上传</button></td>
+                    <td><button type="button" className="episode-reupload" disabled={busy || !failed || analysisLocked || uploadInProgress} onClick={(event) => { event.stopPropagation(); retryUploadInputRef.current?.click(); }}>重新上传</button></td>
                   </tr>;
                 })}
               </tbody>
@@ -2962,15 +2964,27 @@ export function App() {
           </div>
           <input hidden multiple type="file" accept="video/*" ref={retryUploadInputRef} onChange={(event: ChangeEvent<HTMLInputElement>) => { void handleReuploadSelection(event); }} />
           {sourceEpisodeRows.length > sourcePageSize && <div className="list-pagination"><button className="ghost" disabled={sourcePage === 0} onClick={() => setSourcePage((page) => Math.max(0, page - 1))}>上一页</button><span>第 {sourcePage * sourcePageSize + 1}–{Math.min(sourceEpisodeRows.length, (sourcePage + 1) * sourcePageSize)} 集 / 共 {sourceEpisodeRows.length} 集</span><button className="ghost" disabled={(sourcePage + 1) * sourcePageSize >= sourceEpisodeRows.length} onClick={() => setSourcePage((page) => page + 1)}>下一页</button></div>}
-          {effectiveUploadState === "uploaded" && (
+          {analysisLocked ? (
             <section className="analysis-choice source-analysis-choice">
               <div>
-                <b>选择分析方式</b>
-                <span>本地视频将通过抽帧与视觉理解进行普通分析。</span>
+                <b>剧集已锁定</b>
+                <span>本项目整剧分析进行中或已完成，不能再上传或调整剧集；如需更换素材，请新建项目。</span>
               </div>
               <div className="analysis-actions">
-                <button className="primary" disabled={!selectedEpisodeId} onClick={() => selectedEpisodeId ? startAnalysis("normal") : setMessage("请先选择要分析的剧集")}>{selectedEpisode ? "分析第 " + selectedEpisode.episode_index + " 集" : "分析当前集"}</button>
-                <button className="ghost" disabled={!episodes.length} onClick={() => startSeriesAnalysis("normal")}>分析全部剧集</button>
+                <button className="primary" onClick={() => setScreen("assets")}>查看资产</button>
+              </div>
+            </section>
+          ) : (
+            <section className="analysis-choice source-analysis-choice">
+              <div>
+                <b>整剧分析</b>
+                <span>{allEpisodesUploaded
+                  ? "全部剧集已上传成功，可以开始整剧分析；分析完成后剧集将锁定，不能再上传调整。"
+                  : `已上传成功 ${uploadedEpisodeCount}/${episodes.length || sourceEpisodeCount} 集，全部剧集上传成功后才能开始分析。`}</span>
+              </div>
+              <div className="analysis-actions">
+                <button className="ghost" disabled={busy || uploadInProgress} onClick={() => retryUploadInputRef.current?.click()}>继续上传</button>
+                <button className="primary" disabled={!canStartSeriesAnalysis} title={canStartSeriesAnalysis ? undefined : "全部剧集上传成功后才能开始分析"} onClick={() => startSeriesAnalysis("normal")}>开始分析全部剧集</button>
               </div>
             </section>
           )}
