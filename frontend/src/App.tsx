@@ -921,6 +921,11 @@ export function App() {
   const [projectPage, setProjectPage] = useState(0);
   const [sourcePage, setSourcePage] = useState(0);
   const [assetStatusFilter, setAssetStatusFilter] = useState<"all" | "pending" | "confirmed">("all");
+  const [assetSearchQuery, setAssetSearchQuery] = useState("");
+  const [assetStatusMenuOpen, setAssetStatusMenuOpen] = useState(false);
+  const [assetBatchAction, setAssetBatchAction] = useState<"review" | "generate" | "delete" | "group" | null>(null);
+  const [assetDeleteConfirmOpen, setAssetDeleteConfirmOpen] = useState(false);
+  const [assetDeletePreview, setAssetDeletePreview] = useState<string[]>([]);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -1049,12 +1054,24 @@ export function App() {
     });
     return Array.from(map.values());
   }, [assets]);
+  const normalizedAssetQuery = assetSearchQuery.trim().toLowerCase();
   const filteredGroups = useMemo(
     () => assetGroups.filter((group) => (assetTab === "资产进度" || group.type === assetTab)
       && !customAssetGroups.some((customGroup) => customGroup.members.some((member) => member.assetKey === group.key))
-      && (assetStatusFilter === "all" || group.items.some((item) => assetStatusFilter === "confirmed" ? item.status === "已确认" : item.status !== "已确认"))),
-    [assetGroups, assetTab, assetStatusFilter, customAssetGroups]
+      && (assetStatusFilter === "all" || group.items.some((item) => assetStatusFilter === "confirmed" ? item.status === "已确认" : item.status !== "已确认"))
+      && (!normalizedAssetQuery || `${group.name} ${group.localizedName} ${group.items.map((item) => `${item.name} ${item.localized_name} ${item.variable ?? ""} ${item.display_variable ?? ""}`).join(" ")}`.toLowerCase().includes(normalizedAssetQuery))),
+    [assetGroups, assetTab, assetStatusFilter, customAssetGroups, normalizedAssetQuery]
   );
+  const assetOverviewBaseGroups = useMemo(
+    () => assetGroups.filter((group) => (assetTab === "资产进度" || group.type === assetTab)
+      && !customAssetGroups.some((customGroup) => customGroup.members.some((member) => member.assetKey === group.key))),
+    [assetGroups, assetTab, customAssetGroups]
+  );
+  const assetStatusCounts = useMemo(() => {
+    const pending = assetOverviewBaseGroups.filter((group) => group.items.some((item) => item.status !== "已确认")).length;
+    return { all: assetOverviewBaseGroups.length, pending, confirmed: assetOverviewBaseGroups.length - pending };
+  }, [assetOverviewBaseGroups]);
+  const allVisibleAssetsSelected = filteredGroups.length > 0 && filteredGroups.every((group) => selectedAssetGroupKeys.has(group.key));
   const searchedProjects = useMemo(() => projects.filter((project) => (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase().includes(projectSearch.trim().toLowerCase())), [projects, projectSearch]);
   const projectPageSize = 8;
   const pagedProjects = searchedProjects.slice(projectPage * projectPageSize, (projectPage + 1) * projectPageSize);
@@ -1344,7 +1361,7 @@ export function App() {
       const firstKey = [...next][0];
       const firstGroup = assetGroups.find((item) => item.key === firstKey);
       if (!next.has(group.key) && firstGroup && firstGroup.type !== group.type) {
-        setMessage("批量分组只能选择同类资产");
+        setMessage("批量操作只能选择同类资产");
         return current;
       }
       if (next.has(group.key)) next.delete(group.key);
@@ -1360,15 +1377,151 @@ export function App() {
       .filter((id): id is string => Boolean(id));
   }
 
-  function startAssetSelectionMode() {
+  function startAssetSelectionMode(action: "review" | "generate" | "delete" | "group" = "group") {
     setAssetSelectionMode(true);
+    setAssetBatchAction(action);
     setSelectedAssetGroupKeys(new Set());
   }
 
   function cancelAssetSelectionMode() {
     setAssetSelectionMode(false);
+    setAssetBatchAction(null);
     setSelectedAssetGroupKeys(new Set());
     setAssetGroupModal(null);
+    setAssetDeleteConfirmOpen(false);
+  }
+
+  function selectedGroupsForBatch() {
+    return assetGroups.filter((group) => selectedAssetGroupKeys.has(group.key));
+  }
+
+  function toggleSelectAllAssetGroups() {
+    const visibleKeys = filteredGroups.map((group) => group.key);
+    const allSelected = visibleKeys.length > 0 && visibleKeys.every((key) => selectedAssetGroupKeys.has(key));
+    setSelectedAssetGroupKeys((current) => {
+      const next = new Set(current);
+      if (allSelected) {
+        visibleKeys.forEach((key) => next.delete(key));
+      } else {
+        const firstKey = [...current][0];
+        const firstGroup = assetGroups.find((item) => item.key === firstKey);
+        visibleKeys.forEach((key) => {
+          const group = assetGroups.find((item) => item.key === key);
+          if (!firstGroup || !group || group.type === firstGroup.type) next.add(key);
+        });
+      }
+      return next;
+    });
+  }
+
+  function batchSubmitAssetReview() {
+    const count = selectedAssetGroupKeys.size;
+    if (!count) {
+      setMessage("请先选择要送审的资产");
+      return;
+    }
+    setMessage(`已提交 ${count} 个资产送审（模拟操作，未同步审核系统）`);
+    cancelAssetSelectionMode();
+  }
+
+  async function batchGenerateAssetImages() {
+    if (!currentProject) return;
+    const groups = selectedGroupsForBatch();
+    if (!groups.length) {
+      setMessage("请先选择要生成图片的资产");
+      return;
+    }
+    const targets: Array<{ asset: Asset; prompt: string }> = [];
+    const skipped: string[] = [];
+    groups.forEach((group) => {
+      const asset = group.items[0];
+      if (!asset) return;
+      if (generatingAssetIdsRef.current.has(asset.id) || asset.payload?.generationInProgress === true) {
+        skipped.push(`${group.name}（生成中）`);
+        return;
+      }
+      const prompt = assetPrompt(asset);
+      if (!prompt.trim()) {
+        skipped.push(`${group.name}（缺少提示词）`);
+        return;
+      }
+      targets.push({ asset, prompt });
+    });
+    if (!targets.length) {
+      setMessage(skipped.length ? `没有可生成的资产：${skipped.join("、")}` : "没有可生成的资产");
+      return;
+    }
+    setBusy(true);
+    const failed: string[] = [];
+    let done = 0;
+    try {
+      for (const target of targets) {
+        done += 1;
+        setMessage(`正在批量生图 ${done}/${targets.length}：${target.asset.name}`);
+        try {
+          const canonicalPrompt = await saveAssetPrompt(target.asset, target.prompt);
+          await request(`/api/projects/${currentProject.id}/assets/${target.asset.id}/generate-image`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              finalPrompt: canonicalPrompt || target.prompt,
+              model: assetImageModel,
+              count: assetImageCount,
+              aspectRatio: assetImageAspectRatio,
+            }),
+          });
+        } catch (error) {
+          failed.push(`${target.asset.name}（${error instanceof Error ? error.message : "生成失败"}）`);
+        }
+      }
+      await loadAssets(currentProject.id);
+      const parts = [`批量生图完成：成功 ${targets.length - failed.length} 个`];
+      if (failed.length) parts.push(`失败 ${failed.length} 个：${failed.join("、")}`);
+      if (skipped.length) parts.push(`跳过 ${skipped.length} 个：${skipped.join("、")}`);
+      setMessage(parts.join("；"));
+      cancelAssetSelectionMode();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openBatchDeleteConfirm() {
+    const groups = selectedGroupsForBatch();
+    if (!groups.length) {
+      setMessage("请先选择要删除的资产");
+      return;
+    }
+    setAssetDeletePreview(groups.map((group) => `${group.type} · ${group.name} → ${group.localizedName}`));
+    setAssetDeleteConfirmOpen(true);
+  }
+
+  async function confirmBatchDelete() {
+    if (!currentProject) return;
+    const assetIds = selectedGroupsForBatch()
+      .map((group) => group.items[0]?.id)
+      .filter((id): id is string => Boolean(id));
+    if (!assetIds.length) {
+      setAssetDeleteConfirmOpen(false);
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await request<{ deleted: string[]; skipped: Array<{ assetId: string; reason: string }> }>(
+        `/api/projects/${currentProject.id}/assets/batch-delete`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assetIds }) },
+      );
+      await loadAssets(currentProject.id);
+      await loadCustomAssetGroups(currentProject.id);
+      setAssetDeleteConfirmOpen(false);
+      cancelAssetSelectionMode();
+      const parts = [`已删除 ${data.deleted.length} 个资产`];
+      if (data.skipped.length) parts.push(`${data.skipped.length} 个未删除：${data.skipped.map((item) => item.reason).join("、")}`);
+      setMessage(parts.join("；"));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "批量删除失败");
+    } finally {
+      setBusy(false);
+    }
   }
 
   function openCreateAssetGroupModal() {
@@ -3066,14 +3219,59 @@ export function App() {
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
                 <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
-                <div className="overview-actions"><div className="asset-status-filters" role="group" aria-label="资产状态筛选">{([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => <button type="button" className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => setAssetStatusFilter(value)}>{label}</button>)}</div><button className="ghost" onClick={() => assetSelectionMode ? cancelAssetSelectionMode() : startAssetSelectionMode()} disabled={busy}>{assetSelectionMode ? "退出批量" : "批量分组"}</button></div>
+                <div className="overview-actions">
+                  {assetTab !== "资产进度" && (
+                    <label className="asset-search-field">
+                      <svg width="13" height="13" viewBox="0 0 12 12" fill="none" aria-hidden="true"><circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.2" /><path d="M7.8 7.8L10.5 10.5" stroke="currentColor" strokeWidth="1.2" /></svg>
+                      <input value={assetSearchQuery} onChange={(event) => setAssetSearchQuery(event.target.value)} placeholder={`搜索${assetTab}名称 / 变量`} aria-label="搜索资产" />
+                      {assetSearchQuery && <button type="button" className="asset-search-clear" aria-label="清空搜索" onClick={() => setAssetSearchQuery("")}>×</button>}
+                    </label>
+                  )}
+                  <div className="asset-status-filter">
+                    <button type="button" className={assetStatusMenuOpen ? "asset-status-trigger open" : "asset-status-trigger"} aria-haspopup="listbox" aria-expanded={assetStatusMenuOpen} onClick={() => setAssetStatusMenuOpen((open) => !open)}>
+                      状态：{assetStatusFilter === "all" ? "全部" : assetStatusFilter === "pending" ? "待确认" : "已确认"}
+                      <svg width="8" height="6" viewBox="0 0 8 6" fill="none" aria-hidden="true"><path d="M1 1l3 3 3-3" stroke="currentColor" strokeWidth="1.2" /></svg>
+                    </button>
+                    {assetStatusMenuOpen && (
+                      <div className="asset-status-menu" role="listbox" aria-label="按状态筛选资产">
+                        {([["all", "全部", assetStatusCounts.all], ["pending", "待确认", assetStatusCounts.pending], ["confirmed", "已确认", assetStatusCounts.confirmed]] as const).map(([value, label, count]) => (
+                          <button type="button" role="option" aria-selected={assetStatusFilter === value} className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => { setAssetStatusFilter(value); setAssetStatusMenuOpen(false); }}>
+                            <span>{label}</span><em>{count}</em>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {assetTab !== "资产进度" && (assetSelectionMode ? (
+                    <button className="ghost" onClick={cancelAssetSelectionMode} disabled={busy}>退出批量</button>
+                  ) : (
+                    <>
+                      <button className="ghost" onClick={() => startAssetSelectionMode("review")} disabled={busy}>批量送审</button>
+                      <button className="ghost" onClick={() => startAssetSelectionMode("generate")} disabled={busy}>批量生图</button>
+                      <button className="ghost" onClick={() => startAssetSelectionMode("group")} disabled={busy}>批量分组</button>
+                      <button className="ghost asset-danger" onClick={() => startAssetSelectionMode("delete")} disabled={busy}>删除</button>
+                    </>
+                  ))}
+                </div>
               </div>
               {assetSelectionMode && (
                 <div className="asset-batch-bar">
-                  <span>已选择 {selectedAssetGroupKeys.size} 个同类资产</span>
-                  <div>
-                    <button className="primary small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openCreateAssetGroupModal}>新建分组</button>
-                    <button className="ghost small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openMoveAssetGroupModal}>加入已有分组</button>
+                  <label className="asset-batch-select-all">
+                    <input type="checkbox" checked={allVisibleAssetsSelected} onChange={toggleSelectAllAssetGroups} disabled={!filteredGroups.length} />
+                    全选（{filteredGroups.length}）
+                  </label>
+                  <span className="asset-batch-count">已选 {selectedAssetGroupKeys.size} 项</span>
+                  <div className="asset-batch-actions">
+                    <button className={assetBatchAction === "review" ? "primary small" : "ghost small"} disabled={!selectedAssetGroupKeys.size || busy} onClick={batchSubmitAssetReview}>批量送审</button>
+                    <button className={assetBatchAction === "generate" ? "primary small" : "ghost small"} disabled={!selectedAssetGroupKeys.size || busy} onClick={() => void batchGenerateAssetImages()}>批量生图</button>
+                    <details className="asset-batch-group-menu">
+                      <summary className={assetBatchAction === "group" ? "batch-action-active" : ""}>分组</summary>
+                      <div>
+                        <button className="ghost small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openCreateAssetGroupModal}>新建分组</button>
+                        <button className="ghost small" disabled={!selectedAssetGroupKeys.size || busy} onClick={openMoveAssetGroupModal}>加入已有分组</button>
+                      </div>
+                    </details>
+                    <button className={assetBatchAction === "delete" ? "asset-danger solid small" : "ghost small asset-danger"} disabled={!selectedAssetGroupKeys.size || busy} onClick={openBatchDeleteConfirm}>删除</button>
                     <button className="ghost small" onClick={cancelAssetSelectionMode}>取消</button>
                   </div>
                 </div>
@@ -3318,6 +3516,23 @@ export function App() {
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {assetDeleteConfirmOpen && (
+            <div className="asset-group-modal-backdrop" role="presentation">
+              <div className="asset-group-modal asset-delete-modal" role="dialog" aria-modal="true" aria-label="确认批量删除资产">
+                <h3>确认删除 {assetDeletePreview.length} 个资产？</h3>
+                <p>删除后资产记录与生成图版本会从项目中移除，引用这些资产的分镜将被标记为待更新。此操作不可撤销。</p>
+                <ul className="asset-delete-list">
+                  {assetDeletePreview.slice(0, 8).map((label) => <li key={label}>{label}</li>)}
+                  {assetDeletePreview.length > 8 && <li>…等共 {assetDeletePreview.length} 项</li>}
+                </ul>
+                <div className="asset-group-modal-actions">
+                  <button className="ghost" onClick={() => setAssetDeleteConfirmOpen(false)} disabled={busy}>取消</button>
+                  <button className="asset-danger solid" onClick={() => void confirmBatchDelete()} disabled={busy}>确认删除</button>
+                </div>
               </div>
             </div>
           )}

@@ -15,6 +15,10 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend backend
 COPY config config
 COPY cloudflare cloudflare
+# Note: no data/ is bundled (git-ignored, and the full local copy is ~2GB).
+# The service starts with an empty database; the demo presenter creates the
+# first project live during the demo.
 
+ENV PORT=8003
 EXPOSE 8003
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT}"]

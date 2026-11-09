@@ -9,6 +9,12 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "948468800cc249169fcab8ff2c2d11f7"
+    }
+  ],
   "vars": {
     "ACCESS_USER": "owner"
   }

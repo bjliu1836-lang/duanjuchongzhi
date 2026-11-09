@@ -1297,6 +1297,143 @@ body[data-screen="compare"] .media-item > em { color: var(--green); }
 .asset-status-filters { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #f8f8fb; }
 .asset-status-filters button { border: 0; border-radius: 6px; padding: 6px 9px; background: transparent; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .asset-status-filters button.active { background: #eee8ff; color: var(--purple); font-weight: 700; }
+
+.asset-search-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 180px;
+  padding: 5px 9px;
+  border: 1px solid var(--line, #e2e0e8);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  color: var(--muted, #8b8896);
+}
+.asset-search-field input {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text, #23202c);
+}
+.asset-search-field .asset-search-clear {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #8b8896);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.asset-status-filter { position: relative; }
+.overview-head .asset-status-menu { display: block; }
+.asset-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line, #e2e0e8);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  font-size: 12px;
+  color: var(--text, #23202c);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.asset-status-trigger.open { border-color: #b9a9ff; }
+.asset-status-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 178px;
+  padding: 4px;
+  border: 1px solid var(--line, #e2e0e8);
+  border-radius: 10px;
+  background: var(--panel, #fff);
+  box-shadow: 0 8px 20px rgba(24, 20, 40, 0.08);
+}
+.asset-status-menu button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text, #23202c);
+  text-align: left;
+  cursor: pointer;
+}
+.asset-status-menu button em { font-style: normal; font-size: 11px; color: var(--muted, #8b8896); }
+.asset-status-menu button:hover { background: #f5f3fb; }
+.asset-status-menu button.active { background: #eee8ff; color: var(--purple, #6d5dfc); font-weight: 700; }
+.asset-status-menu button.active em { color: var(--purple, #6d5dfc); }
+
+.asset-danger { color: #c6424d; }
+.asset-danger.solid {
+  padding: 6px 12px;
+  border: 1px solid #c6424d;
+  border-radius: 8px;
+  background: #c6424d;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.asset-danger.solid:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.asset-batch-bar { justify-content: flex-start; }
+.asset-batch-select-all { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text, #23202c); white-space: nowrap; }
+.asset-batch-select-all input { margin: 0; }
+.asset-batch-count { font-size: 12px; color: var(--muted, #8b8896); white-space: nowrap; }
+.asset-batch-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.asset-batch-group-menu { position: relative; }
+.asset-batch-group-menu summary {
+  padding: 5px 10px;
+  border: 1px solid var(--line, #e2e0e8);
+  border-radius: 7px;
+  font-size: 12px;
+  list-style: none;
+  cursor: pointer;
+}
+.asset-batch-group-menu summary::-webkit-details-marker { display: none; }
+.asset-batch-group-menu summary.batch-action-active { border-color: #b9a9ff; color: var(--purple, #6d5dfc); }
+.asset-batch-group-menu > div {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 4px;
+  min-width: 168px;
+  padding: 6px;
+  border: 1px solid var(--line, #e2e0e8);
+  border-radius: 10px;
+  background: var(--panel, #fff);
+  box-shadow: 0 8px 20px rgba(24, 20, 40, 0.08);
+  white-space: nowrap;
+}
+
+.asset-delete-modal { max-width: 420px; }
+.asset-delete-list {
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #eceaf0);
+  border-radius: 8px;
+  list-style: none;
+  font-size: 12px;
+  color: var(--muted, #6f6b7a);
+}
 .progress-action-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-top: 14px; }
 .progress-action-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: #fff; color: var(--text); text-align: left; }
 .progress-action-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2714,6 +2851,30 @@ body[data-screen] .asset-status-filters {
 }
 body[data-screen] .asset-status-filters button { color: #908e9c; }
 body[data-screen] .asset-status-filters button.active { background: #292238; color: #b5a7ff; }
+body[data-screen] .asset-search-field,
+body[data-screen] .asset-status-trigger {
+  border-color: #34343d;
+  background: #17171c;
+  color: #ddd9e9;
+}
+body[data-screen] .asset-search-field input { color: #ddd9e9; }
+body[data-screen] .asset-search-field .asset-search-clear { color: #8f8d9a; }
+body[data-screen] .asset-status-menu,
+body[data-screen] .asset-batch-group-menu > div {
+  border-color: #34343d;
+  background: #1b1b21;
+  box-shadow: none;
+}
+body[data-screen] .asset-status-menu button { color: #ddd9e9; }
+body[data-screen] .asset-status-menu button em { color: #8f8d9a; }
+body[data-screen] .asset-status-menu button:hover { background: #24222c; }
+body[data-screen] .asset-status-menu button.active { background: #292238; color: #b5a7ff; }
+body[data-screen] .asset-status-menu button.active em { color: #b5a7ff; }
+body[data-screen] .asset-batch-count { color: #8f8d9a; }
+body[data-screen] .asset-batch-group-menu summary { border-color: #34343d; color: #ddd9e9; }
+body[data-screen] .asset-danger { color: #e07a83; }
+body[data-screen] .asset-danger.solid { border-color: #b8494f; background: #b8494f; color: #fff; }
+body[data-screen] .asset-delete-list { border-color: #2d2d35; color: #9a98a6; }
 
 /* Asset overview and detail */
 body[data-screen] .asset-workspace-nav { color: var(--text); }

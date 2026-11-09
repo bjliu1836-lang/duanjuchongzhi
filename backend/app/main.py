@@ -2561,6 +2561,10 @@ class AssetUpdate(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class AssetBatchDeleteRequest(BaseModel):
+    assetIds: list[str]
+
+
 class AssetGroupCreate(BaseModel):
     name: str
     memberAssetIds: list[str]
@@ -3146,6 +3150,94 @@ def delete_asset_group(project_id: str, group_id: str) -> dict[str, Any]:
         conn.execute("DELETE FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id))
         conn.commit()
         return {"deleted": True, "group": asset_group_response(conn, row_to_dict(row))}
+
+
+def asset_has_running_generation(conn: sqlite3.Connection, project_id: str, asset_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM asset_generation_jobs WHERE project_id=? AND asset_id=? AND status='running' LIMIT 1",
+        (project_id, asset_id),
+    ).fetchone() is not None
+
+
+def remove_asset_records(conn: sqlite3.Connection, project_id: str, asset: dict[str, Any]) -> list[str]:
+    """删除资产及其关联记录，返回因此变空而被清理的资产组 id。
+
+    只清理数据库记录，磁盘上的生成图片保留，避免误删不可恢复的文件。
+    """
+    asset_id = str(asset["id"])
+    try:
+        asset_key = asset_group_identity_key(asset)
+    except Exception:
+        asset_key = ""
+    member_rows = conn.execute(
+        "SELECT DISTINCT group_id FROM asset_group_members WHERE project_id=? AND (asset_id=? OR (?<>'' AND asset_key=?))",
+        (project_id, asset_id, asset_key, asset_key),
+    ).fetchall()
+    group_ids = [str(row["group_id"]) for row in member_rows]
+    conn.execute(
+        "DELETE FROM asset_group_members WHERE project_id=? AND (asset_id=? OR (?<>'' AND asset_key=?))",
+        (project_id, asset_id, asset_key, asset_key),
+    )
+    conn.execute(
+        "DELETE FROM asset_parent_links WHERE project_id=? AND (parent_asset_id=? OR child_asset_id=?)",
+        (project_id, asset_id, asset_id),
+    )
+    conn.execute("DELETE FROM asset_images WHERE project_id=? AND asset_id=?", (project_id, asset_id))
+    conn.execute("DELETE FROM asset_generation_jobs WHERE project_id=? AND asset_id=?", (project_id, asset_id))
+    try:
+        mark_storyboards_asset_stale(conn, project_id, asset, "引用的资产已删除")
+    except Exception:
+        pass
+    conn.execute("DELETE FROM assets WHERE id=? AND project_id=?", (asset_id, project_id))
+    emptied: list[str] = []
+    for group_id in group_ids:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM asset_group_members WHERE project_id=? AND group_id=?",
+            (project_id, group_id),
+        ).fetchone()
+        if not remaining or int(remaining["n"] or 0) == 0:
+            conn.execute("DELETE FROM asset_groups WHERE id=? AND project_id=?", (group_id, project_id))
+            emptied.append(group_id)
+    return emptied
+
+
+@app.delete("/api/projects/{project_id}/assets/{asset_id}")
+def delete_asset(project_id: str, asset_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        asset = row_to_dict(
+            conn.execute("SELECT * FROM assets WHERE id=? AND project_id=?", (asset_id, project_id)).fetchone()
+        )
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        if asset_has_running_generation(conn, project_id, asset_id):
+            raise HTTPException(status_code=409, detail="该资产仍在生成中，请完成后再删除。")
+        removed_groups = remove_asset_records(conn, project_id, asset)
+        conn.commit()
+        return {"deleted": True, "assetId": asset_id, "removedGroups": removed_groups}
+
+
+@app.post("/api/projects/{project_id}/assets/batch-delete")
+def batch_delete_assets(project_id: str, payload: AssetBatchDeleteRequest) -> dict[str, Any]:
+    deleted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    removed_groups: set[str] = set()
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        for asset_id in dict.fromkeys(str(item).strip() for item in payload.assetIds if str(item).strip()):
+            asset = row_to_dict(
+                conn.execute("SELECT * FROM assets WHERE id=? AND project_id=?", (asset_id, project_id)).fetchone()
+            )
+            if not asset:
+                skipped.append({"assetId": asset_id, "reason": "资产不存在或已被删除"})
+                continue
+            if asset_has_running_generation(conn, project_id, asset_id):
+                skipped.append({"assetId": asset_id, "reason": "仍在生成中"})
+                continue
+            removed_groups.update(remove_asset_records(conn, project_id, asset))
+            deleted.append(asset_id)
+        conn.commit()
+    return {"deleted": deleted, "skipped": skipped, "removedGroups": sorted(removed_groups)}
 
 
 @app.get("/api/projects/{project_id}/assets")
