@@ -899,12 +899,17 @@ def upload_episode_to_ark(conn: sqlite3.Connection, episode: dict[str, Any]) -> 
     try:
         config = load_models_config()
         provider = get_model_provider(config)
-        upload_result = provider.upload_file(episode["file_path"], purpose="user_data", video_fps=1)
+        expire_days = int(config.get("volcengine", {}).get("fileExpireDays") or 30)
+        expire_days = max(1, min(30, expire_days))
+        expire_at = int(time.time()) + expire_days * 86400
+        upload_result = provider.upload_file(
+            episode["file_path"], purpose="user_data", video_fps=1, expire_at=expire_at
+        )
         file_id = str(upload_result.get("id") or "")
         status = str(upload_result.get("status") or "processing")
         if file_id:
             for _ in range(3):
-                if status in {"processed", "completed", "success"}:
+                if status in {"processed", "completed", "success", "active"}:
                     break
                 time.sleep(2)
                 try:
@@ -932,6 +937,55 @@ def upload_episode_to_ark(conn: sqlite3.Connection, episode: dict[str, Any]) -> 
             ("upload_failed", error, episode["id"]),
         )
         return {"file_id": "", "status": "upload_failed", "error": error}
+
+
+def ensure_episode_ark_file(conn: sqlite3.Connection, episode: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Validate the stored Ark file id and re-upload the local video when the
+    remote file has expired or been deleted (Ark files expire after fileExpireDays).
+
+    Returns (episode, error). On success the episode carries a usable
+    ark_file_id; on failure error describes why no usable file is available.
+    """
+    ark_id = str(episode.get("ark_file_id") or "").strip()
+    if ark_id:
+        provider = get_model_provider(load_models_config())
+        if not hasattr(provider, "retrieve_file"):
+            # Provider cannot validate remote files: keep trusting the stored id.
+            return episode, ""
+        remote_invalid = False
+        try:
+            status = str(provider.retrieve_file(ark_id).get("status") or "").lower()
+            for _ in range(4):
+                if status != "processing":
+                    break
+                time.sleep(2)
+                status = str(provider.retrieve_file(ark_id).get("status") or status).lower()
+            if status == "failed":
+                remote_invalid = True
+        except ProviderError as exc:
+            # Only a definitive "file is gone" answer (HTTP 404) triggers a
+            # re-upload; transient network errors keep the stored id so the
+            # model call itself surfaces any real problem.
+            if "404" in str(exc) or "NotFound" in str(exc):
+                remote_invalid = True
+        if not remote_invalid:
+            return episode, ""
+        conn.execute(
+            "UPDATE episodes SET ark_file_id = '', ark_file_status = ?, ark_file_error = ? WHERE id = ?",
+            ("expired", "方舟侧文件已过期或失效，触发重新上传", episode["id"]),
+        )
+        conn.commit()
+        episode = get_episode_or_first(conn, episode["project_id"], episode["id"])
+        if not Path(str(episode.get("file_path") or "")).exists():
+            return episode, "方舟侧文件已过期或失效，且本地视频文件不存在，无法重新上传。"
+    if not Path(str(episode.get("file_path") or "")).exists():
+        return episode, ""
+    ark_result = upload_episode_to_ark(conn, episode)
+    conn.commit()
+    episode = get_episode_or_first(conn, episode["project_id"], episode["id"])
+    if not ark_result["file_id"]:
+        return episode, ark_result.get("error") or "Ark 文件上传失败"
+    return episode, ""
 
 
 def project_valid_target_profile_for_asset_view(asset: dict[str, Any], project: dict[str, Any]) -> None:
@@ -7086,13 +7140,7 @@ def run_asset_extraction(
     task_id: str | None = None,
 ) -> dict[str, Any]:
     episode = get_episode_or_first(conn, project["id"], episode_id)
-    ark_upload_error = ""
-    if not str(episode.get("ark_file_id") or "").strip() and Path(episode["file_path"]).exists():
-        ark_result = upload_episode_to_ark(conn, episode)
-        conn.commit()
-        episode = get_episode_or_first(conn, project["id"], episode_id)
-        if not ark_result["file_id"]:
-            ark_upload_error = ark_result.get("error") or "Ark 文件上传失败"
+    episode, ark_upload_error = ensure_episode_ark_file(conn, episode)
     try:
         agent = prepare_agent("assetExtractionLocalization")
     except ProviderError as exc:
@@ -7413,13 +7461,7 @@ def run_storyboard_generation(
     task_id: str | None = None,
 ) -> dict[str, Any]:
     episode = get_episode_or_first(conn, project["id"], episode_id)
-    ark_upload_error = ""
-    if not str(episode.get("ark_file_id") or "").strip() and Path(episode["file_path"]).exists():
-        ark_result = upload_episode_to_ark(conn, episode)
-        conn.commit()
-        episode = get_episode_or_first(conn, project["id"], episode_id)
-        if not ark_result["file_id"]:
-            ark_upload_error = ark_result.get("error") or "Ark 文件上传失败"
+    episode, ark_upload_error = ensure_episode_ark_file(conn, episode)
     storyboard_target_language = str(project.get("target_language") or "").strip()
     keep_source_language = storyboard_target_language in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
     target_country = str(project.get("target_country") or "").strip()

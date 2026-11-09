@@ -18,6 +18,7 @@
     "videoGenerationModel": "doubao-seedance-2.0",
     "responseTimeoutSeconds": 900,
     "maxOutputTokens": 131072,
+    "fileExpireDays": 30,
     "agentExtraTimeoutSeconds": 60,
     "imageSize": "2848x1600",
     "imageWatermark": true,
@@ -41,7 +42,7 @@
       "outputFormat": "json"
     },
     "assetImageGeneration": {
-      "enabled": true,
+      "enabled": false,
       "model": "imageModel",
       "promptFile": "config/agents/asset_image_generation.md",
       "outputFormat": "file"

@@ -97,7 +97,14 @@ class BaseModelProvider:
     ) -> str:
         raise NotImplementedError
 
-    def upload_file(self, file_path: str, *, purpose: str = "user_data", video_fps: float | None = 1) -> dict[str, Any]:
+    def upload_file(
+        self,
+        file_path: str,
+        *,
+        purpose: str = "user_data",
+        video_fps: float | None = 1,
+        expire_at: int | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     def retrieve_file(self, file_id: str) -> dict[str, Any]:
@@ -156,7 +163,14 @@ class MockModelProvider(BaseModelProvider):
     ) -> str:
         return ""
 
-    def upload_file(self, file_path: str, *, purpose: str = "user_data", video_fps: float | None = 1) -> dict[str, Any]:
+    def upload_file(
+        self,
+        file_path: str,
+        *,
+        purpose: str = "user_data",
+        video_fps: float | None = 1,
+        expire_at: int | None = None,
+    ) -> dict[str, Any]:
         return {
             "id": f"mock-file-{uuid.uuid4().hex[:8]}",
             "status": "processed",
@@ -525,7 +539,14 @@ class VolcengineModelProvider(BaseModelProvider):
                 return message["content"]
         return ""
 
-    def upload_file(self, file_path: str, *, purpose: str = "user_data", video_fps: float | None = 1) -> dict[str, Any]:
+    def upload_file(
+        self,
+        file_path: str,
+        *,
+        purpose: str = "user_data",
+        video_fps: float | None = 1,
+        expire_at: int | None = None,
+    ) -> dict[str, Any]:
         api_key = self._api_key()
         base_url = self._base_url()
         if not api_key:
@@ -539,6 +560,8 @@ class VolcengineModelProvider(BaseModelProvider):
         fields: list[tuple[str, str]] = [("purpose", purpose)]
         if video_fps is not None and mime_type.startswith("video/"):
             fields.append(("preprocess_configs[video][fps]", str(video_fps)))
+        if expire_at is not None:
+            fields.append(("expire_at", str(int(expire_at))))
 
         body_parts: list[bytes] = []
         for name, value in fields:
