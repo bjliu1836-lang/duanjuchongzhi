@@ -14,21 +14,8 @@ const VIDEO_MODELS = [
   { id: "doubao-seedance-1-0-lite-t2v-250428", label: "Seedance 1.0 Lite" },
 ];
 const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
-const VOICE_PRESETS = [
-  { id: "calm-male", name: "沉稳男声", description: "成熟 · 稳定 · 叙事" },
-  { id: "bright-male", name: "清亮男声", description: "青年 · 清亮 · 直接" },
-  { id: "gentle-female", name: "温和女声", description: "柔和 · 亲切 · 舒缓" },
-  { id: "bright-female", name: "清亮女声", description: "明快 · 清晰 · 活泼" },
-  { id: "young-neutral", name: "少年声", description: "年轻 · 自然 · 轻快" },
-  { id: "narrator", name: "纪录旁白", description: "低沉 · 克制 · 客观" },
-];
-const VOICE_MODELS = [
-  { id: "standard", label: "标准合成", hint: "使用预置音色，浏览器内即可试听；切换模型不会清空另一种模式的配置" },
-  { id: "clone", label: "声音克隆", hint: "上传一段角色参考音频，克隆专属音色；切换模型不会清空另一种模式的配置" },
-] as const;
-type VoiceModelId = (typeof VOICE_MODELS)[number]["id"];
 type VoiceReferenceAudio = { fileUrl: string; fileName: string; size?: number; mimeType?: string; status?: string };
-const DEFAULT_VOICE_CONFIG = { model: "standard" as VoiceModelId, voiceId: VOICE_PRESETS[0].id, voiceName: VOICE_PRESETS[0].name, rate: 1, pitch: 1, volume: 1, referenceAudio: undefined as VoiceReferenceAudio | undefined };
+const DEFAULT_VOICE_CONFIG = { model: "clone", referenceAudio: undefined as VoiceReferenceAudio | undefined };
 const ROLE_FIXED_CONSTRAINT = `【固定约束】
 风格：真人写实风格 画质：模拟真实拍摄效果，8K超高清
 光线：明亮柔和
@@ -96,7 +83,6 @@ type VoiceConfiguration = typeof DEFAULT_VOICE_CONFIG & { updatedAt?: string };
 type VoiceEditorState = {
   assetId: string;
   roleName: string;
-  sample: string;
   config: VoiceConfiguration;
 };
 
@@ -971,7 +957,6 @@ export function App() {
   const [shotMenu, setShotMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [deletingStoryboard, setDeletingStoryboard] = useState<Storyboard | null>(null);
   const [voiceEditor, setVoiceEditor] = useState<VoiceEditorState | null>(null);
-  const [voiceSpeaking, setVoiceSpeaking] = useState(false);
   const [voiceUploading, setVoiceUploading] = useState(false);
   const [voiceRefPlaying, setVoiceRefPlaying] = useState(false);
   const voiceRefAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -1700,28 +1685,17 @@ export function App() {
     const asset = group.items[0];
     if (!asset) return;
     const saved = asset.payload?.["音色配置"];
-    const config = {
+    const config: VoiceConfiguration = {
       ...DEFAULT_VOICE_CONFIG,
-      ...(saved && typeof saved === "object" ? saved : {}),
-      model: (saved?.model === "clone" ? "clone" : "standard") as VoiceModelId,
       referenceAudio: saved?.referenceAudio && typeof saved.referenceAudio === "object" && typeof saved.referenceAudio.fileUrl === "string" ? saved.referenceAudio as VoiceReferenceAudio : undefined,
-      rate: Number(saved?.rate ?? DEFAULT_VOICE_CONFIG.rate),
-      pitch: Number(saved?.pitch ?? DEFAULT_VOICE_CONFIG.pitch),
-      volume: Number(saved?.volume ?? DEFAULT_VOICE_CONFIG.volume),
     };
-    setVoiceEditor({ assetId: asset.id, roleName: group.localizedName || group.name, sample: `你好，我是${group.localizedName || group.name}。`, config });
+    setVoiceEditor({ assetId: asset.id, roleName: group.localizedName || group.name, config });
   }
 
   function closeVoiceConfiguration() {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
     if (voiceRefAudioRef.current) { voiceRefAudioRef.current.pause(); voiceRefAudioRef.current = null; }
     setVoiceRefPlaying(false);
-    setVoiceSpeaking(false);
     setVoiceEditor(null);
-  }
-
-  function setVoiceModel(model: VoiceModelId) {
-    setVoiceEditor((current) => current ? { ...current, config: { ...current.config, model } } : current);
   }
 
   async function uploadVoiceReference(file: File) {
@@ -1748,13 +1722,7 @@ export function App() {
     }
   }
 
-  function removeVoiceReference() {
-    if (voiceRefAudioRef.current) { voiceRefAudioRef.current.pause(); voiceRefAudioRef.current = null; }
-    setVoiceRefPlaying(false);
-    setVoiceEditor((current) => current ? { ...current, config: { ...current.config, referenceAudio: undefined } } : current);
-  }
-
-  function toggleVoiceReferencePlayback() {
+  function toggleVoicePreview() {
     const reference = voiceEditor?.config.referenceAudio;
     const url = apiAssetUrl(reference?.fileUrl);
     if (!url) return;
@@ -1770,34 +1738,6 @@ export function App() {
     audio.onerror = () => { setVoiceRefPlaying(false); voiceRefAudioRef.current = null; setMessage("参考音频播放失败，请检查文件是否可访问"); };
     setVoiceRefPlaying(true);
     void audio.play().catch(() => { setVoiceRefPlaying(false); voiceRefAudioRef.current = null; setMessage("参考音频播放失败，请检查文件是否可访问"); });
-  }
-
-  function toggleVoicePreview() {
-    if (!voiceEditor) return;
-    if (voiceEditor.config.model === "clone") {
-      setMessage("克隆试听将在配音服务接入后开放；可先播放参考音频检查素材质量");
-      return;
-    }
-    if (!("speechSynthesis" in window)) {
-      setMessage("当前浏览器不支持语音试听；音色配置仍可保存");
-      return;
-    }
-    if (voiceSpeaking) {
-      window.speechSynthesis.cancel();
-      setVoiceSpeaking(false);
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(voiceEditor.sample.trim() || voiceEditor.roleName);
-    utterance.lang = "zh-CN";
-    utterance.rate = voiceEditor.config.rate;
-    utterance.pitch = voiceEditor.config.pitch;
-    utterance.volume = voiceEditor.config.volume;
-    utterance.voice = window.speechSynthesis.getVoices().find((voice) => voice.lang.toLowerCase().startsWith("zh")) ?? null;
-    utterance.onend = () => setVoiceSpeaking(false);
-    utterance.onerror = () => setVoiceSpeaking(false);
-    setVoiceSpeaking(true);
-    window.speechSynthesis.speak(utterance);
   }
 
   async function saveVoiceConfiguration() {
@@ -1866,8 +1806,8 @@ export function App() {
         <b>{group.name} → {group.localizedName}</b>
         <span>{group.items.length} 个子资产 · {assetDisplayMeta(group.items[0])}</span>
         {group.type === "角色" && <div className="asset-voice-action">
-          <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}>配置音色</button>
-          <small>{voiceConfig?.model === "clone" ? (voiceConfig.referenceAudio ? `声音克隆 · ${Number(voiceConfig.rate ?? 1).toFixed(1)}×` : "声音克隆 · 待上传参考音频") : voiceConfig?.voiceName ? `${voiceConfig.voiceName} · ${Number(voiceConfig.rate ?? 1).toFixed(1)}×` : "未配置 · 点击选择声音并试听"}</small>
+          <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}>音色配置</button>
+          <small>{voiceConfig?.referenceAudio ? "音色克隆 · 参考音频已上传" : "未配置 · 点击上传参考音频"}</small>
         </div>}
         {onRemove && <button className="ghost small asset-card-remove" disabled={busy} onClick={(event) => { event.stopPropagation(); onRemove(); }}>移出组</button>}
       </article>
@@ -2816,8 +2756,8 @@ export function App() {
     if (!voiceEditor) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || busy) return;
-      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-      setVoiceSpeaking(false);
+      if (voiceRefAudioRef.current) { voiceRefAudioRef.current.pause(); voiceRefAudioRef.current = null; }
+      setVoiceRefPlaying(false);
       setVoiceEditor(null);
     };
     window.addEventListener("keydown", closeOnEscape);
@@ -3783,68 +3723,32 @@ export function App() {
           if (event.currentTarget === event.target && !busy) closeVoiceConfiguration();
         }}>
           <section className="upload-confirm-dialog voice-config-dialog" role="dialog" aria-modal="true" aria-labelledby="voice-config-title">
-            <div className="modal-titlebar light"><h3 id="voice-config-title">配置音色 · {voiceEditor.roleName}</h3><button type="button" aria-label="关闭音色配置" disabled={busy} onClick={closeVoiceConfiguration}>×</button></div>
+            <div className="modal-titlebar light"><h3 id="voice-config-title">音色配置 · {voiceEditor.roleName}</h3><button type="button" aria-label="关闭音色配置" disabled={busy} onClick={closeVoiceConfiguration}>×</button></div>
             <div className="confirm-body voice-config-body">
-              <div className="voice-config-section"><b>配音模型</b></div>
-              <div className="voice-model-switch" role="tablist" aria-label="配音模型">
-                {VOICE_MODELS.map((model) => <button type="button" role="tab" aria-selected={voiceEditor.config.model === model.id} key={model.id} className={voiceEditor.config.model === model.id ? "voice-model-option active" : "voice-model-option"} onClick={() => setVoiceModel(model.id)}>{model.label}</button>)}
+              <div className="voice-config-section">
+                <b>参考音频</b>
+                {voiceEditor.config.referenceAudio && <i className="voice-ref-status">参考音频已就绪</i>}
               </div>
-              <p className="voice-model-hint">{VOICE_MODELS.find((model) => model.id === voiceEditor.config.model)?.hint}。</p>
-              {voiceEditor.config.model === "standard" ? (
-                <>
-                  <div className="voice-config-section"><b>选择音色</b><span>配置属于角色本身，不绑定某个图片版本。</span></div>
-                  <div className="voice-preset-grid">
-                    {VOICE_PRESETS.map((preset) => <button type="button" key={preset.id} className={voiceEditor.config.voiceId === preset.id ? "voice-preset active" : "voice-preset"} onClick={() => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, voiceId: preset.id, voiceName: preset.name } } : current)}>
-                      <b>{preset.name}</b><span>{preset.description}</span>
-                    </button>)}
-                  </div>
-                  <div className="voice-parameter-grid">
-                    <label><span>语速 <b>{voiceEditor.config.rate.toFixed(1)}×</b></span><input type="range" min="0.5" max="2" step="0.1" value={voiceEditor.config.rate} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, rate: Number(event.target.value) } } : current)} /></label>
-                    <label><span>音调 <b>{voiceEditor.config.pitch.toFixed(1)}</b></span><input type="range" min="0.5" max="1.5" step="0.1" value={voiceEditor.config.pitch} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, pitch: Number(event.target.value) } } : current)} /></label>
-                    <label><span>音量 <b>{Math.round(voiceEditor.config.volume * 100)}%</b></span><input type="range" min="0" max="1" step="0.1" value={voiceEditor.config.volume} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, volume: Number(event.target.value) } } : current)} /></label>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="voice-config-section">
-                    <b>参考音频</b>
-                    {voiceEditor.config.referenceAudio && <i className="voice-ref-status">参考音频已就绪</i>}
-                  </div>
-                  {voiceEditor.config.referenceAudio ? (
-                    <div className="voice-ref-card">
-                      <div className="voice-ref-main">
-                        <button type="button" className="voice-ref-play" aria-label={voiceRefPlaying ? "停止播放参考音频" : "播放参考音频"} onClick={toggleVoiceReferencePlayback}>{voiceRefPlaying ? "■" : "▶"}</button>
-                        <div className="voice-ref-wave" aria-hidden="true">{[8, 16, 10, 20, 12, 6, 18, 10, 14, 6, 16, 8, 20, 10, 14, 6, 12, 18, 8, 4].map((height, index) => <i key={index} style={{ height: `${height}px` }} />)}</div>
-                        <div className="voice-ref-meta">
-                          <b>{voiceEditor.config.referenceAudio.fileName}</b>
-                          <span>{voiceEditor.config.referenceAudio.size ? `${(voiceEditor.config.referenceAudio.size / 1024 / 1024).toFixed(1)} MB` : "已上传"}</span>
-                        </div>
-                      </div>
-                      <div className="voice-ref-actions">
-                        <label className="ghost voice-ref-action">{voiceUploading ? "上传中…" : "替换"}<input type="file" accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4" hidden disabled={voiceUploading} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadVoiceReference(file); }} /></label>
-                        <button type="button" className="ghost voice-ref-action danger" disabled={voiceUploading} onClick={removeVoiceReference}>删除</button>
-                        <span>删除后回到未上传状态</span>
-                      </div>
+              {voiceEditor.config.referenceAudio && (
+                <div className="voice-ref-card">
+                  <div className="voice-ref-main">
+                    <div className="voice-ref-wave" aria-hidden="true">{[8, 16, 10, 20, 12, 6, 18, 10, 14, 6, 16, 8, 20, 10, 14, 6, 12, 18, 8, 4].map((height, index) => <i key={index} style={{ height: `${height}px` }} />)}</div>
+                    <div className="voice-ref-meta">
+                      <b>{voiceEditor.config.referenceAudio.fileName}</b>
+                      <span>{voiceEditor.config.referenceAudio.size ? `${(voiceEditor.config.referenceAudio.size / 1024 / 1024).toFixed(1)} MB` : "已上传"}</span>
                     </div>
-                  ) : (
-                    <label className={voiceUploading ? "voice-ref-upload uploading" : "voice-ref-upload"}>
-                      <input type="file" accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4" hidden disabled={voiceUploading} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadVoiceReference(file); }} />
-                      <b>{voiceUploading ? "上传中…" : "点击选择参考音频"}</b>
-                      <span>wav / mp3 / m4a · 建议 3–30 秒 · 单人清晰人声，无背景音乐</span>
-                      <em>建议直接截取原剧角色台词片段，克隆效果最稳定。</em>
-                    </label>
-                  )}
-                  <div className="voice-parameter-grid clone">
-                    <label><span>语速 <b>{voiceEditor.config.rate.toFixed(1)}×</b></span><input type="range" min="0.5" max="2" step="0.1" value={voiceEditor.config.rate} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, rate: Number(event.target.value) } } : current)} /></label>
-                    <label><span>音量 <b>{Math.round(voiceEditor.config.volume * 100)}%</b></span><input type="range" min="0" max="1" step="0.1" value={voiceEditor.config.volume} onChange={(event) => setVoiceEditor((current) => current ? { ...current, config: { ...current.config, volume: Number(event.target.value) } } : current)} /></label>
                   </div>
-                  <p className="voice-model-hint">克隆模式不支持音调偏移，该项已隐藏。</p>
-                </>
+                </div>
               )}
-              <label className="voice-sample"><span>试听文本</span><textarea rows={3} value={voiceEditor.sample} onChange={(event) => setVoiceEditor((current) => current ? { ...current, sample: event.target.value } : current)} /></label>
+              <label className={voiceUploading ? "voice-ref-upload uploading" : "voice-ref-upload"}>
+                <input type="file" accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4" hidden disabled={voiceUploading} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadVoiceReference(file); }} />
+                <b>{voiceUploading ? "上传中…" : voiceEditor.config.referenceAudio ? "重新上传参考音频" : "点击选择参考音频"}</b>
+                <span>wav / mp3 / m4a · 建议 3–30 秒 · 单人清晰人声，无背景音乐</span>
+                <em>建议直接截取原剧角色台词片段，克隆效果最稳定。</em>
+              </label>
               <div className="voice-preview-row">
-                <button type="button" className="ghost" disabled={voiceEditor.config.model === "clone" && !voiceEditor.config.referenceAudio} onClick={toggleVoicePreview}>{voiceSpeaking ? "停止试听" : voiceEditor.config.model === "clone" ? "试听克隆音色" : "试听"}</button>
-                <span>{voiceEditor.config.model === "clone" ? (voiceEditor.config.referenceAudio ? "克隆试听将在配音服务接入后开放，当前为原型占位。" : "上传参考音频后可试听克隆效果。") : "试听使用浏览器语音做参数原型；正式配音接入后沿用此配置。"}</span>
+                <button type="button" className="ghost" disabled={!voiceEditor.config.referenceAudio} onClick={toggleVoicePreview}>{voiceRefPlaying ? "停止试听" : "试听"}</button>
+                <span>克隆试听将在配音服务接入后开放；当前试听播放参考音频，用于检查素材质量。</span>
               </div>
             </div>
             <div className="confirm-actions"><button type="button" className="ghost" disabled={busy} onClick={closeVoiceConfiguration}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => void saveVoiceConfiguration()}>{busy ? "保存中…" : "保存音色配置"}</button></div>
