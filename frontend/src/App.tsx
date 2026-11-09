@@ -911,6 +911,8 @@ export function App() {
   const [assetSearchOpen, setAssetSearchOpen] = useState(false);
   const [assetBatchAction, setAssetBatchAction] = useState<"review" | "generate" | "delete" | "group" | null>(null);
   const [assetDeleteTarget, setAssetDeleteTarget] = useState<{ ids: string[]; labels: string[] } | null>(null);
+  const [assetRenameTarget, setAssetRenameTarget] = useState<{ id: string; name: string } | null>(null);
+  const [assetRenameDraft, setAssetRenameDraft] = useState("");
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -1352,6 +1354,58 @@ export function App() {
       .filter((id): id is string => Boolean(id));
   }
 
+  function openAssetRename(asset: Asset) {
+    setAssetRenameTarget({ id: asset.id, name: asset.name });
+    setAssetRenameDraft(asset.name);
+  }
+
+  async function submitAssetRename() {
+    if (!currentProject || !assetRenameTarget) return;
+    const name = assetRenameDraft.trim();
+    if (!name) {
+      setMessage("资产名称不能为空");
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets/${assetRenameTarget.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, localizedName: name }),
+      });
+      setAssets((items) => items.map((item) => (item.id === data.asset.id ? data.asset : item)));
+      setAssetRenameTarget(null);
+      setMessage("资产名称已更新");
+      await loadAssets(currentProject.id);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "重命名失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createBlankAsset() {
+    if (!currentProject) return;
+    const assetType = (assetTab === "资产进度" ? "角色" : assetTab) as "角色" | "场景" | "道具";
+    setBusy(true);
+    try {
+      const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetType }),
+      });
+      await loadAssets(currentProject.id);
+      setAssetStatusFilter("all");
+      setAssetSearchQuery("");
+      setAssetSearchOpen(false);
+      setMessage(`已新建空白${assetType}「${data.asset.name}」，点击卡片填写描述后可生成`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "新建资产失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function startAssetSelectionMode(action: "review" | "generate" | "delete" | "group" = "group") {
     setAssetSelectionMode(true);
     setAssetBatchAction(action);
@@ -1768,6 +1822,7 @@ export function App() {
       ? "生成中"
       : group.items.some((item) => (item.images?.length ?? 0) > 0) ? "已生成" : "待生成";
     const voiceConfig = group.type === "角色" ? group.items[0]?.payload?.["音色配置"] as VoiceConfiguration | undefined : undefined;
+    const isBlankAsset = !originalUrl && !generatedUrl && group.items.every((item) => item.payload?.["手动新建"] === true);
     return (
       <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
         <div className="asset-card-statuses">
@@ -1784,6 +1839,8 @@ export function App() {
                 event.stopPropagation();
                 openImage(originalUrl, `${group.name} 原资产图`);
               }} />
+            ) : isBlankAsset ? (
+              <div className="asset-placeholder compact">待填写</div>
             ) : (
               <div className={`thumb ${assetThumbClass(group.items[0])}`}></div>
             )}
@@ -1797,14 +1854,14 @@ export function App() {
                 openImage(generatedUrl, `${group.localizedName} 目标资产图`);
               }} />
             ) : (
-              <div className="asset-placeholder compact">待生成</div>
+              <div className="asset-placeholder compact">{isBlankAsset ? "待填写" : "待生成"}</div>
             )}
             <em>新</em>
             <figcaption>{group.localizedName}</figcaption>
           </figure>
         </div>
-        <b>{group.name} → {group.localizedName}</b>
-        <span>{group.items.length} 个子资产 · {assetDisplayMeta(group.items[0])}</span>
+        <b>{isBlankAsset ? group.name : `${group.name} → ${group.localizedName}`}</b>
+        <span>{isBlankAsset ? "空白资产 · 待填写描述与提示词" : `${group.items.length} 个子资产 · ${assetDisplayMeta(group.items[0])}`}</span>
         {group.type === "角色" && <div className="asset-voice-action">
           <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}>音色配置</button>
           <small>{voiceConfig?.referenceAudio ? "音色克隆 · 参考音频已上传" : "未配置 · 点击上传参考音频"}</small>
@@ -3177,9 +3234,9 @@ export function App() {
                           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.5 3.8h9M5.4 3.8V2.6h3.2v1.2M3.6 3.8l.6 7.3h5.6l.6-7.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                         </button>
                         <span className="asset-toolbar-divider" aria-hidden="true" />
-                        <button type="button" className="asset-toolbar-action" onClick={() => setMessage(`新建${assetTab}功能待接入`)} disabled={busy}>
+                        <button type="button" className="asset-toolbar-action" onClick={() => void createBlankAsset()} disabled={busy}>
                           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
-                          新建{assetTab}
+                          新建资产
                         </button>
                         <span className="asset-toolbar-divider" aria-hidden="true" />
                         <button type="button" className="asset-toolbar-action" onClick={() => startAssetSelectionMode("generate")} disabled={busy}>
@@ -3307,6 +3364,7 @@ export function App() {
                   <div className="asset-source-head">
                     <h2 className="asset-source-name">{variantName(selectedAsset)}</h2>
                     <span className="asset-source-meta">{assetDisplayVariable(selectedAsset)} · {Array.isArray(selectedAsset.payload?.出现集数) && selectedAsset.payload.出现集数.length ? `第 ${selectedAsset.payload.出现集数.join("、")} 集` : "当前集"}{selectedAssetCustomGroup ? ` · ${selectedAssetCustomGroup.name}` : ""}</span>
+                    <button type="button" className="ghost small asset-rename-btn" disabled={busy} onClick={() => openAssetRename(selectedAsset)}>重命名</button>
                   </div>
                   <figure className="asset-source-figure">
                     <div className="asset-figure-frame">
@@ -3459,6 +3517,28 @@ export function App() {
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {assetRenameTarget && (
+            <div className="asset-group-modal-backdrop" role="presentation">
+              <div className="asset-group-modal" role="dialog" aria-modal="true" aria-label="重命名资产">
+                <h3>重命名资产</h3>
+                <label>资产名称
+                  <input
+                    autoFocus
+                    value={assetRenameDraft}
+                    onChange={(event) => setAssetRenameDraft(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter" && assetRenameDraft.trim() && !busy) void submitAssetRename(); }}
+                    placeholder="例如：啦啦队前排队员"
+                  />
+                </label>
+                <p>名称会同步作为资产变量与卡片标题；原片描述和提示词不受影响。</p>
+                <div className="asset-group-modal-actions">
+                  <button className="ghost" onClick={() => setAssetRenameTarget(null)} disabled={busy}>取消</button>
+                  <button className="primary" onClick={() => void submitAssetRename()} disabled={busy || !assetRenameDraft.trim()}>保存</button>
+                </div>
               </div>
             </div>
           )}

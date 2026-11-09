@@ -2565,6 +2565,12 @@ class AssetBatchDeleteRequest(BaseModel):
     assetIds: list[str]
 
 
+class AssetCreateRequest(BaseModel):
+    assetType: str
+    name: str | None = None
+    localizedName: str | None = None
+
+
 class AssetGroupCreate(BaseModel):
     name: str
     memberAssetIds: list[str]
@@ -3240,6 +3246,69 @@ def batch_delete_assets(project_id: str, payload: AssetBatchDeleteRequest) -> di
     return {"deleted": deleted, "skipped": skipped, "removedGroups": sorted(removed_groups)}
 
 
+@app.post("/api/projects/{project_id}/assets")
+def create_asset(project_id: str, payload: AssetCreateRequest) -> dict[str, Any]:
+    asset_type = str(payload.assetType or "").strip()
+    if asset_type not in ("角色", "场景", "道具"):
+        raise HTTPException(status_code=400, detail="资产类型只能是角色、场景或道具")
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        name_prefix = {"角色": "未命名角色", "场景": "未命名场景", "道具": "未命名道具"}[asset_type]
+        existing_names = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM assets WHERE project_id=? AND asset_type=?",
+                (project_id, asset_type),
+            ).fetchall()
+        }
+        requested_name = (payload.name or "").strip()
+        if requested_name and requested_name in existing_names:
+            raise HTTPException(status_code=400, detail="同名资产已存在，请换一个名称")
+        asset_name = requested_name
+        if not asset_name:
+            index = 1
+            while f"{name_prefix}{index}" in existing_names:
+                index += 1
+            asset_name = f"{name_prefix}{index}"
+        localized_name = (payload.localizedName or "").strip() or asset_name
+        asset_id = new_id("asset")
+        asset_payload: dict[str, Any] = {
+            "手动新建": True,
+            "原片资产描述": "手动新建的空白资产，等待填写原片与目标描述。",
+            "目标生成描述": "",
+            "用户编辑资产图生成提示词": "",
+            "目标资产来源": "手动新建",
+            "生成状态": "待补齐",
+        }
+        draft = {
+            "id": asset_id,
+            "asset_type": asset_type,
+            "name": asset_name,
+            "localized_name": localized_name,
+            "variable": f"@{asset_name}",
+            "payload": asset_payload,
+        }
+        annotate_project_asset_keys(draft)
+        attach_display_variable(draft)
+        conn.execute(
+            "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                asset_id,
+                project_id,
+                None,
+                asset_type,
+                asset_name,
+                localized_name,
+                f"@{asset_name}",
+                "待确认",
+                json.dumps(asset_payload, ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+        conn.commit()
+        return get_asset_response(conn, project_id, asset_id)
+
+
 @app.get("/api/projects/{project_id}/assets")
 def list_assets(project_id: str) -> dict[str, Any]:
     with connect() as conn:
@@ -3330,6 +3399,21 @@ def update_asset(project_id: str, asset_id: str, payload: AssetUpdate) -> dict[s
         if payload.localizedName:
             current_payload["用户指定目标角色名称"] = payload.localizedName
             current_payload["targetNameProvenance"] = "user_override"
+        # 手动新建的空白资产名称为用户随手输入的占位名，重命名时让展示变量跟随名称重算，
+        # 否则卡片叫「啦啦队队长」而提示词里仍是「@未命名角色1」。真实分析出的资产保持
+        # 变量稳定（分镜已引用旧变量），故仅对空白资产生效。
+        if payload.name and payload.name != asset["name"]:
+            if asset["asset_type"] == "角色":
+                current_payload["用户指定目标角色名称"] = payload.name
+            if current_payload.get("手动新建"):
+                current_payload.pop("展示资产变量", None)
+                current_payload.pop("旧展示资产变量", None)
+            # 归并主键随名称重算，避免 payload 里留存旧名称的键值。
+            renamed = dict(asset)
+            renamed["name"] = payload.name
+            renamed["localized_name"] = payload.localizedName or asset["localized_name"]
+            renamed["payload"] = current_payload
+            current_payload = annotate_project_asset_keys(renamed)["payload"]
         conn.execute(
             """
             UPDATE assets
