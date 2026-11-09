@@ -3411,7 +3411,7 @@ def test_provider_incomplete_read_keeps_partial_response_and_rejects_length_fini
         (bodies[1], "resp_length", False),
         (bodies[2], "resp_incomplete", False),
     ):
-        monkeypatch.setattr(provider_module.urllib.request, "urlopen", lambda *_args, _body=body, **_kwargs: PartialResponse(_body))
+        monkeypatch.setattr(provider_module._NO_PROXY_OPENER, "open", lambda *_args, _body=body, **_kwargs: PartialResponse(_body))
         with pytest.raises(ProviderIncompleteRead) as caught:
             provider.chat_completion(model_name="test-model", system_prompt="", user_content="{}")
         assert caught.value.partial_body == body
@@ -3443,7 +3443,7 @@ def test_provider_incomplete_read_keeps_partial_response_and_rejects_length_fini
     )
     for envelope in incomplete_envelopes:
         body = json.dumps(envelope).encode("utf-8")
-        monkeypatch.setattr(provider_module.urllib.request, "urlopen", lambda *_args, _body=body, **_kwargs: CompleteResponse(_body))
+        monkeypatch.setattr(provider_module._NO_PROXY_OPENER, "open", lambda *_args, _body=body, **_kwargs: CompleteResponse(_body))
         with pytest.raises(ProviderIncompleteResponse) as caught:
             provider.chat_completion(model_name="test-model", system_prompt="", user_content="{}")
         assert caught.value.raw_response == body.decode("utf-8")

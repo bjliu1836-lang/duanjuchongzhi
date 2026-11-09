@@ -16,6 +16,12 @@ class ProviderError(RuntimeError):
     pass
 
 
+# 方舟是国内服务，必须直连：Python urllib 默认会读 Windows 注册表里的系统代理
+# （如 Clash 的 127.0.0.1:7897），长 SSE 流经过不稳定代理链路会被掐断
+# （SSL: UNEXPECTED_EOF_WHILE_READING / Remote end closed connection）。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 class ProviderIncompleteRead(ProviderError):
     def __init__(
         self,
@@ -326,7 +332,7 @@ class VolcengineModelProvider(BaseModelProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._response_timeout()) as response:
+            with _NO_PROXY_OPENER.open(request, timeout=self._response_timeout()) as response:
                 raw = response.read().decode("utf-8")
         except http.client.IncompleteRead as exc:
             partial_body = bytes(exc.partial or b"")
@@ -479,7 +485,7 @@ class VolcengineModelProvider(BaseModelProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._response_timeout()) as resp:
+            with _NO_PROXY_OPENER.open(request, timeout=self._response_timeout()) as resp:
                 for line_bytes in resp:
                     line = line_bytes.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data: "):
@@ -594,7 +600,7 @@ class VolcengineModelProvider(BaseModelProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with _NO_PROXY_OPENER.open(request, timeout=300) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
@@ -616,7 +622,7 @@ class VolcengineModelProvider(BaseModelProvider):
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with _NO_PROXY_OPENER.open(request, timeout=60) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
@@ -665,7 +671,7 @@ class VolcengineModelProvider(BaseModelProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._response_timeout()) as response:
+            with _NO_PROXY_OPENER.open(request, timeout=self._response_timeout()) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -705,7 +711,7 @@ class VolcengineModelProvider(BaseModelProvider):
     def _download_image(self, image_url: str) -> tuple[bytes, str]:
         request = urllib.request.Request(image_url, headers={"User-Agent": "video-remake-workshop/0.1"})
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with _NO_PROXY_OPENER.open(request, timeout=300) as response:
                 mime_type = response.headers.get_content_type() or "image/png"
                 return response.read(), mime_type
         except urllib.error.HTTPError as exc:
