@@ -922,10 +922,9 @@ export function App() {
   const [sourcePage, setSourcePage] = useState(0);
   const [assetStatusFilter, setAssetStatusFilter] = useState<"all" | "pending" | "confirmed">("all");
   const [assetSearchQuery, setAssetSearchQuery] = useState("");
-  const [assetStatusMenuOpen, setAssetStatusMenuOpen] = useState(false);
+  const [assetSearchOpen, setAssetSearchOpen] = useState(false);
   const [assetBatchAction, setAssetBatchAction] = useState<"review" | "generate" | "delete" | "group" | null>(null);
-  const [assetDeleteConfirmOpen, setAssetDeleteConfirmOpen] = useState(false);
-  const [assetDeletePreview, setAssetDeletePreview] = useState<string[]>([]);
+  const [assetDeleteTarget, setAssetDeleteTarget] = useState<{ ids: string[]; labels: string[] } | null>(null);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -1062,15 +1061,6 @@ export function App() {
       && (!normalizedAssetQuery || `${group.name} ${group.localizedName} ${group.items.map((item) => `${item.name} ${item.localized_name} ${item.variable ?? ""} ${item.display_variable ?? ""}`).join(" ")}`.toLowerCase().includes(normalizedAssetQuery))),
     [assetGroups, assetTab, assetStatusFilter, customAssetGroups, normalizedAssetQuery]
   );
-  const assetOverviewBaseGroups = useMemo(
-    () => assetGroups.filter((group) => (assetTab === "资产进度" || group.type === assetTab)
-      && !customAssetGroups.some((customGroup) => customGroup.members.some((member) => member.assetKey === group.key))),
-    [assetGroups, assetTab, customAssetGroups]
-  );
-  const assetStatusCounts = useMemo(() => {
-    const pending = assetOverviewBaseGroups.filter((group) => group.items.some((item) => item.status !== "已确认")).length;
-    return { all: assetOverviewBaseGroups.length, pending, confirmed: assetOverviewBaseGroups.length - pending };
-  }, [assetOverviewBaseGroups]);
   const allVisibleAssetsSelected = filteredGroups.length > 0 && filteredGroups.every((group) => selectedAssetGroupKeys.has(group.key));
   const searchedProjects = useMemo(() => projects.filter((project) => (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase().includes(projectSearch.trim().toLowerCase())), [projects, projectSearch]);
   const projectPageSize = 8;
@@ -1388,7 +1378,6 @@ export function App() {
     setAssetBatchAction(null);
     setSelectedAssetGroupKeys(new Set());
     setAssetGroupModal(null);
-    setAssetDeleteConfirmOpen(false);
   }
 
   function selectedGroupsForBatch() {
@@ -1485,25 +1474,26 @@ export function App() {
     }
   }
 
+  function requestDeleteAssetGroups(groups: AssetGroup[]) {
+    const targets = groups
+      .map((group) => ({ id: group.items[0]?.id, label: `${group.type} · ${group.name} → ${group.localizedName}` }))
+      .filter((item): item is { id: string; label: string } => Boolean(item.id));
+    if (!targets.length) return;
+    setAssetDeleteTarget({ ids: targets.map((item) => item.id), labels: targets.map((item) => item.label) });
+  }
+
   function openBatchDeleteConfirm() {
     const groups = selectedGroupsForBatch();
     if (!groups.length) {
       setMessage("请先选择要删除的资产");
       return;
     }
-    setAssetDeletePreview(groups.map((group) => `${group.type} · ${group.name} → ${group.localizedName}`));
-    setAssetDeleteConfirmOpen(true);
+    requestDeleteAssetGroups(groups);
   }
 
   async function confirmBatchDelete() {
-    if (!currentProject) return;
-    const assetIds = selectedGroupsForBatch()
-      .map((group) => group.items[0]?.id)
-      .filter((id): id is string => Boolean(id));
-    if (!assetIds.length) {
-      setAssetDeleteConfirmOpen(false);
-      return;
-    }
+    if (!currentProject || !assetDeleteTarget) return;
+    const assetIds = assetDeleteTarget.ids;
     setBusy(true);
     try {
       const data = await request<{ deleted: string[]; skipped: Array<{ assetId: string; reason: string }> }>(
@@ -1512,13 +1502,13 @@ export function App() {
       );
       await loadAssets(currentProject.id);
       await loadCustomAssetGroups(currentProject.id);
-      setAssetDeleteConfirmOpen(false);
+      setAssetDeleteTarget(null);
       cancelAssetSelectionMode();
       const parts = [`已删除 ${data.deleted.length} 个资产`];
       if (data.skipped.length) parts.push(`${data.skipped.length} 个未删除：${data.skipped.map((item) => item.reason).join("、")}`);
       setMessage(parts.join("；"));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "批量删除失败");
+      setMessage(error instanceof Error ? error.message : "删除资产失败");
     } finally {
       setBusy(false);
     }
@@ -1842,7 +1832,10 @@ export function App() {
       <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
         <div className="asset-card-statuses">
           <i className={`asset-generation-status ${generationStatus === "生成中" ? "generating" : generationStatus === "已生成" ? "generated" : ""}`}>{generationStatus}</i>
-          <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+          <span className="asset-card-status-end">
+            <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+            <button type="button" className="asset-card-delete" disabled={busy} onClick={(event) => { event.stopPropagation(); requestDeleteAssetGroups([group]); }}>删除</button>
+          </span>
         </div>
         <div className="asset-card-visuals">
           <figure>
@@ -3218,38 +3211,48 @@ export function App() {
           {assetView === "overview" && (
             <div className="asset-overview sub-panel active">
               <div className="overview-head">
-                <h2>{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
+                <h2 className="sr-only">{assetTab === "资产进度" ? "资产进度" : `${assetTab}资产`}</h2>
+                <div className="asset-status-tabs" role="group" aria-label="资产状态筛选">
+                  {([["all", "全部"], ["pending", "待确认"], ["confirmed", "已确认"]] as const).map(([value, label]) => (
+                    <button type="button" key={value} className={assetStatusFilter === value ? "active" : ""} aria-pressed={assetStatusFilter === value} onClick={() => setAssetStatusFilter(value)}>{label}</button>
+                  ))}
+                </div>
                 <div className="overview-actions">
-                  {assetTab !== "资产进度" && (
-                    <label className="asset-search-field">
-                      <svg width="13" height="13" viewBox="0 0 12 12" fill="none" aria-hidden="true"><circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.2" /><path d="M7.8 7.8L10.5 10.5" stroke="currentColor" strokeWidth="1.2" /></svg>
-                      <input value={assetSearchQuery} onChange={(event) => setAssetSearchQuery(event.target.value)} placeholder={`搜索${assetTab}名称 / 变量`} aria-label="搜索资产" />
-                      {assetSearchQuery && <button type="button" className="asset-search-clear" aria-label="清空搜索" onClick={() => setAssetSearchQuery("")}>×</button>}
-                    </label>
-                  )}
-                  <div className="asset-status-filter">
-                    <button type="button" className={assetStatusMenuOpen ? "asset-status-trigger open" : "asset-status-trigger"} aria-haspopup="listbox" aria-expanded={assetStatusMenuOpen} onClick={() => setAssetStatusMenuOpen((open) => !open)}>
-                      状态：{assetStatusFilter === "all" ? "全部" : assetStatusFilter === "pending" ? "待确认" : "已确认"}
-                      <svg width="8" height="6" viewBox="0 0 8 6" fill="none" aria-hidden="true"><path d="M1 1l3 3 3-3" stroke="currentColor" strokeWidth="1.2" /></svg>
-                    </button>
-                    {assetStatusMenuOpen && (
-                      <div className="asset-status-menu" role="listbox" aria-label="按状态筛选资产">
-                        {([["all", "全部", assetStatusCounts.all], ["pending", "待确认", assetStatusCounts.pending], ["confirmed", "已确认", assetStatusCounts.confirmed]] as const).map(([value, label, count]) => (
-                          <button type="button" role="option" aria-selected={assetStatusFilter === value} className={assetStatusFilter === value ? "active" : ""} key={value} onClick={() => { setAssetStatusFilter(value); setAssetStatusMenuOpen(false); }}>
-                            <span>{label}</span><em>{count}</em>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
                   {assetTab !== "资产进度" && (assetSelectionMode ? (
                     <button className="ghost" onClick={cancelAssetSelectionMode} disabled={busy}>退出批量</button>
                   ) : (
                     <>
-                      <button className="ghost" onClick={() => startAssetSelectionMode("review")} disabled={busy}>批量送审</button>
-                      <button className="ghost" onClick={() => startAssetSelectionMode("generate")} disabled={busy}>批量生图</button>
-                      <button className="ghost" onClick={() => startAssetSelectionMode("group")} disabled={busy}>批量分组</button>
-                      <button className="ghost asset-danger" onClick={() => startAssetSelectionMode("delete")} disabled={busy}>删除</button>
+                      <div className="asset-toolbar">
+                        <button type="button" className={assetSearchOpen ? "asset-toolbar-icon active" : "asset-toolbar-icon"} aria-label="搜索资产" aria-expanded={assetSearchOpen} onClick={() => setAssetSearchOpen((open) => !open)}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><circle cx="6" cy="6" r="4.2" stroke="currentColor" strokeWidth="1.3" /><path d="M9.2 9.2L12.2 12.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
+                        </button>
+                        {assetSearchOpen && (
+                          <span className="asset-toolbar-search">
+                            <input autoFocus value={assetSearchQuery} onChange={(event) => setAssetSearchQuery(event.target.value)} placeholder={`搜索${assetTab}名称 / 变量`} aria-label="搜索资产" />
+                            {assetSearchQuery && <button type="button" aria-label="清空搜索" onClick={() => setAssetSearchQuery("")}>×</button>}
+                          </span>
+                        )}
+                        <span className="asset-toolbar-divider" aria-hidden="true" />
+                        <button type="button" className="asset-toolbar-icon" aria-label="批量删除资产" onClick={() => startAssetSelectionMode("delete")} disabled={busy}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.5 3.8h9M5.4 3.8V2.6h3.2v1.2M3.6 3.8l.6 7.3h5.6l.6-7.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                        </button>
+                        <span className="asset-toolbar-divider" aria-hidden="true" />
+                        <button type="button" className="asset-toolbar-action" onClick={() => setMessage(`新建${assetTab}功能待接入`)} disabled={busy}>
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
+                          新建{assetTab}
+                        </button>
+                        <span className="asset-toolbar-divider" aria-hidden="true" />
+                        <button type="button" className="asset-toolbar-action" onClick={() => startAssetSelectionMode("generate")} disabled={busy}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="1.8" y="2.8" width="10.4" height="8.4" rx="1.6" stroke="currentColor" strokeWidth="1.2" /><circle cx="4.9" cy="5.9" r="1" fill="currentColor" /><path d="M2.2 10.4l3.1-2.7 2.2 1.8 1.9-1.5 2.4 2.4" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+                          一键生图
+                        </button>
+                        <span className="asset-toolbar-divider" aria-hidden="true" />
+                        <button type="button" className="asset-toolbar-action" onClick={() => startAssetSelectionMode("review")} disabled={busy}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><circle cx="7" cy="4.6" r="2.3" stroke="currentColor" strokeWidth="1.2" /><path d="M2.8 12c.4-2.3 2.1-3.5 4.2-3.5s3.8 1.2 4.2 3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>
+                          一键送审
+                        </button>
+                      </div>
+                      <button type="button" className="asset-group-btn" onClick={() => startAssetSelectionMode("group")} disabled={busy}>批量分组</button>
                     </>
                   ))}
                 </div>
@@ -3520,17 +3523,17 @@ export function App() {
             </div>
           )}
 
-          {assetDeleteConfirmOpen && (
+          {assetDeleteTarget && (
             <div className="asset-group-modal-backdrop" role="presentation">
-              <div className="asset-group-modal asset-delete-modal" role="dialog" aria-modal="true" aria-label="确认批量删除资产">
-                <h3>确认删除 {assetDeletePreview.length} 个资产？</h3>
+              <div className="asset-group-modal asset-delete-modal" role="dialog" aria-modal="true" aria-label="确认删除资产">
+                <h3>确认删除 {assetDeleteTarget.labels.length} 个资产？</h3>
                 <p>删除后资产记录与生成图版本会从项目中移除，引用这些资产的分镜将被标记为待更新。此操作不可撤销。</p>
                 <ul className="asset-delete-list">
-                  {assetDeletePreview.slice(0, 8).map((label) => <li key={label}>{label}</li>)}
-                  {assetDeletePreview.length > 8 && <li>…等共 {assetDeletePreview.length} 项</li>}
+                  {assetDeleteTarget.labels.slice(0, 8).map((label) => <li key={label}>{label}</li>)}
+                  {assetDeleteTarget.labels.length > 8 && <li>…等共 {assetDeleteTarget.labels.length} 项</li>}
                 </ul>
                 <div className="asset-group-modal-actions">
-                  <button className="ghost" onClick={() => setAssetDeleteConfirmOpen(false)} disabled={busy}>取消</button>
+                  <button className="ghost" onClick={() => setAssetDeleteTarget(null)} disabled={busy}>取消</button>
                   <button className="asset-danger solid" onClick={() => void confirmBatchDelete()} disabled={busy}>确认删除</button>
                 </div>
               </div>
