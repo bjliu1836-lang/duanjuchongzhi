@@ -3829,3 +3829,85 @@ body[data-screen] .insert-shot:focus-visible {
   background: #2a2438;
   color: #d5c8ff;
 }
+
+/* 空间参考帧（视频帧栏目） */
+.spatial-frame-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 4px;
+  width: 100%;
+}
+.spatial-frame-card {
+  position: relative;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+}
+.spatial-frame-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+.spatial-frame-pair img {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  display: block;
+}
+.spatial-frame-pair img + img { border-left: 1px solid rgba(255, 255, 255, 0.1); }
+.spatial-frame-depth-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  font-size: 11px;
+  color: #8b8798;
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+.spatial-frame-card figcaption {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px 9px;
+}
+.spatial-frame-meta {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  color: #a9a6b8;
+}
+.spatial-frame-meta b { color: #e8e6f0; font-weight: 500; }
+.spatial-frame-reason {
+  font-size: 11px;
+  color: #8b8798;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spatial-frame-refs {
+  font-size: 10px;
+  color: #6f6c80;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spatial-frame-delete {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(16, 16, 20, 0.72);
+  color: #d7d5df;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.spatial-frame-card:hover .spatial-frame-delete { opacity: 1; }

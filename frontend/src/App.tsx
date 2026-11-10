@@ -113,6 +113,21 @@ type Storyboard = {
   payload?: Record<string, any>;
 };
 
+type SpatialFrame = {
+  id: string;
+  storyboard_id: string;
+  storyboard_title: string;
+  shot_label: string;
+  timepoint: string;
+  timepoint_seconds: number;
+  reason: string;
+  ref_assets: string[];
+  frame_url: string;
+  depth_url: string;
+  status: string;
+  created_at: string;
+};
+
 type PromptVariablePart =
   | { kind: "text"; value: string }
   | { kind: "variable"; token: string; asset?: Asset };
@@ -984,6 +999,7 @@ export function App() {
   const [storyboardAssetSearch, setStoryboardAssetSearch] = useState("");
   const [storyboardAssetLayout, setStoryboardAssetLayout] = useState<"list" | "grid">("grid");
   const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具" | "视频帧" | "本地素材">("角色");
+  const [spatialFrames, setSpatialFrames] = useState<SpatialFrame[]>([]);
   // 首尾帧参考图选择器：点击提示词区的首帧/尾帧槽位时弹出缩小版资产列表
   const [framePicker, setFramePicker] = useState<{ kind: "首帧" | "尾帧" } | null>(null);
   const [framePickerTab, setFramePickerTab] = useState<"角色" | "场景" | "道具">("角色");
@@ -1711,6 +1727,34 @@ export function App() {
       storyboardSavedBodies.current.set(storyboard.id, body);
     });
   }
+
+  async function loadSpatialFrames(projectId = currentProject?.id, episodeId?: string | null) {
+    if (!projectId || !(episodeId ?? selectedEpisodeId)) { setSpatialFrames([]); return; }
+    const epId = episodeId ?? selectedEpisodeId;
+    try {
+      const data = await request<{ frames: SpatialFrame[] }>(`/api/projects/${projectId}/episodes/${epId}/spatial-frames`);
+      setSpatialFrames(data.frames);
+    } catch {
+      setSpatialFrames([]);
+    }
+  }
+
+  async function deleteSpatialFrame(frame: SpatialFrame) {
+    try {
+      await request(`/api/spatial-frames/${frame.id}`, { method: "DELETE" });
+      setSpatialFrames((items) => items.filter((item) => item.id !== frame.id));
+      setMessage(`已删除误标帧（${frame.timepoint}）`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
+  // 视频帧栏目：切到该标签或集/分镜变化时拉取空间参考帧（深度图异步生成，分镜列表更新时再刷新一次以拿到最新状态）
+  useEffect(() => {
+    if (storyboardAssetTab !== "视频帧") return;
+    void loadSpatialFrames();
+  }, [storyboardAssetTab, currentProject?.id, selectedEpisodeId, storyboards]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 
   async function loadGenerations(projectId = currentProject?.id): Promise<VideoGeneration[]> {
     if (!projectId) return [];
@@ -3726,7 +3770,32 @@ export function App() {
             </div>
             <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
               {(storyboardAssetTab === "视频帧" || storyboardAssetTab === "本地素材") ? (
-                <p className="empty-shot-assets">{storyboardAssetTab === "视频帧" ? "暂无视频帧；原片解析后这里会展示可引用的关键帧。" : "暂无本地素材；可在素材上传区导入图片素材。"}</p>
+                storyboardAssetTab === "视频帧" ? (
+                  spatialFrames.length ? (
+                    <div className="spatial-frame-grid">
+                      {spatialFrames.map((frame) => (
+                        <figure className="spatial-frame-card" key={frame.id}>
+                          <div className="spatial-frame-pair">
+                            <img src={frame.frame_url} alt={`${frame.timepoint} 原帧`} />
+                            {frame.depth_url
+                              ? <img src={frame.depth_url} alt={`${frame.timepoint} 深度图`} />
+                              : <span className="spatial-frame-depth-pending">{frame.status === "深度图失败" ? "深度图失败" : "深度图生成中…"}</span>}
+                          </div>
+                          <figcaption>
+                            <span className="spatial-frame-meta"><b>{frame.timepoint}</b>{frame.storyboard_title} · {frame.shot_label}</span>
+                            <span className="spatial-frame-reason" title={frame.reason}>{frame.reason}</span>
+                            {frame.ref_assets.length > 0 && <span className="spatial-frame-refs">{frame.ref_assets.join("、")}</span>}
+                          </figcaption>
+                          <button type="button" className="spatial-frame-delete" title="删除该误标帧" onClick={() => void deleteSpatialFrame(frame)}>×</button>
+                        </figure>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-shot-assets">暂无空间参考帧；分镜分析时若遇到空间占位难以描述的画面，会自动截帧并生成深度图展示在这里。</p>
+                  )
+                ) : (
+                  <p className="empty-shot-assets">暂无本地素材；可在素材上传区导入图片素材。</p>
+                )
               ) : (
                 <>
                   {storyboardFilteredAssets.map((asset) => {
