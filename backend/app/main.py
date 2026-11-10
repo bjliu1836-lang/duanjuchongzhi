@@ -7894,7 +7894,7 @@ def run_storyboard_generation(
         "当前集剧本或剧情事实": episode_script_facts or "未提供独立剧本字段；请基于当前集视频及已有分析事实，不假设存在完整剧本。",
         "白模参考素材": whitebox_reference or "未提供独立白模参考素材；当前剧情视频仅用于观察，不推定为白模。",
         "参考素材分工": "当前集视频用于观察真实切镜、画面、动作、站位和可听声音；资产摘要/资产出现片段索引用于资产外观与时间归属；独立白模素材仅在明确提供时约束机位、构图、站位、路径和动作。",
-        "资产片段索引用途": "该索引是资产出现时间和剧情功能的粗粒度上下文，不代表真实切镜、镜头数量或镜头边界；必须直接观察当前集视频，按真实连续镜头切点独立确定分镜，不得按索引段数机械生成镜头。",
+        "资产片段索引用途": "该索引是资产出现时间和剧情功能的粗粒度上下文，不代表真实切镜、镜头数量或镜头边界；必须直接观察当前集视频，先按真实切镜点确定镜头，再把相邻且属于同一叙事单元的镜头合并为时长 10 秒左右的分镜，不得按索引段数机械生成镜头，也不得把每个切镜各自升级为一个分镜。",
         "目标国家": target_country if country_requires_localization else "不适用（国内模式）",
         "目标语言": storyboard_target_language if language_requires_localization or country_requires_localization and not keep_source_language else "保留原片语言，不翻译",
         "重制模式": project.get("remake_mode", "overseas_localization"),

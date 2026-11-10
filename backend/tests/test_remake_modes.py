@@ -2597,7 +2597,8 @@ def test_derive_shares_source_file_paths_without_project_delete_endpoint(client:
 
 def test_storyboard_structured_contract_preserves_root_summary_and_mixed_legacy_shots():
     config_prompt = main.load_agent_config("storyboardPromptGeneration")["prompt"]
-    assert "一个分镜”以视频里实际连续镜头为单位" in config_prompt
+    assert "分镜时长目标为 10 秒左右" in config_prompt
+    assert "不得把每个切镜单独作为一个分镜输出" in config_prompt
     assert "机位与构图" in config_prompt and "人物站位" in config_prompt and "台词与声音" in config_prompt
     assert "仅在输入明确提供白模素材时启用" in config_prompt
     assert "以下样例仅展示字段排列与格式" in config_prompt
