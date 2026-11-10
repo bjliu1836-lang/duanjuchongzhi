@@ -4240,6 +4240,12 @@ def update_storyboard(project_id: str, storyboard_id: str, payload: StoryboardUp
             raise HTTPException(status_code=404, detail="Storyboard not found")
         current_payload = json.loads(current["payload_json"])
         if payload.payload:
+            # None 表示显式删除该字段（deep_merge_dict 会跳过 None，需要单独处理），
+            # 用于清除首帧/尾帧参考等可移除的可选配置。
+            removals = [key for key, value in payload.payload.items() if value is None]
+            for key in removals:
+                payload.payload.pop(key)
+                current_payload.pop(key, None)
             deep_merge_dict(current_payload, payload.payload)
         if payload.generatedBody is not None:
             current_payload["分镜生成正文"] = payload.generatedBody
@@ -4343,6 +4349,34 @@ def list_video_generations(project_id: str) -> dict[str, Any]:
             item["payload"] = json.loads(item.pop("payload_json"))
             item["output_url"] = data_file_url(str(item.get("output_path") or ""))
         return {"videoGenerations": generations}
+
+
+@app.post("/api/projects/{project_id}/video-generations/{generation_id}/select")
+def select_video_generation(project_id: str, generation_id: str) -> dict[str, Any]:
+    """把某个视频版本标记为当前采用（is_selected=1），同一分镜的其他版本取消采用。"""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        get_project_or_404(conn, project_id)
+        generation = row_to_dict(
+            conn.execute(
+                "SELECT * FROM video_generations WHERE id = ? AND project_id = ?",
+                (generation_id, project_id),
+            ).fetchone()
+        )
+        if not generation:
+            raise HTTPException(status_code=404, detail="Video generation not found")
+        conn.execute(
+            "UPDATE video_generations SET is_selected = 0 WHERE project_id = ? AND storyboard_id = ?",
+            (project_id, generation["storyboard_id"]),
+        )
+        conn.execute(
+            "UPDATE video_generations SET is_selected = 1 WHERE id = ? AND project_id = ?",
+            (generation_id, project_id),
+        )
+        generation["is_selected"] = 1
+        generation["payload"] = json.loads(generation.pop("payload_json"))
+        generation["output_url"] = data_file_url(str(generation.get("output_path") or ""))
+        return {"generation": generation}
 
 
 def get_video_generation_storyboard(

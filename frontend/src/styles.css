@@ -585,6 +585,7 @@ body[data-screen="segments"] .storyboard-gen-preview .asset-empty-thumb {
 }
 
 .shot-thumb-wrap {
+  position: relative;
   display: flex;
   align-items: stretch;
   gap: 8px;
@@ -1110,6 +1111,214 @@ body[data-screen="segments"] .storyboard-heading { display: grid; min-width: 0; 
 .episode-blank-guide b { color: var(--text); font-size: 13px; font-weight: 650; }
 .episode-blank-guide span { max-width: 400px; font-size: 11.5px; line-height: 1.7; }
 .episode-blank-guide .episode-blank-actions { display: flex; gap: 10px; }
+
+/* ===== 分镜页图1复刻新增 ===== */
+/* 顶栏：分集切换器（顶栏位置）、原剧本视频记录、积分示意 */
+.topbar-episode-switch { margin-left: 4px; }
+.topbar-episode-switch .episode-switch-btn { padding: 5px 10px; }
+.credit-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--purple, #6d5dfc);
+  background: rgba(124, 108, 255, 0.12);
+  white-space: nowrap;
+}
+/* 资产库标题行 */
+.storyboard-library-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 6px; }
+.storyboard-library-head b { font-size: 13px; font-weight: 650; color: var(--text); }
+.storyboard-library-actions { display: flex; gap: 4px; }
+.storyboard-library-actions button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.storyboard-library-actions button:hover { color: var(--text); border-color: var(--border, #cfcfd8); }
+/* 片段标题下的 @ 提示 */
+.storyboard-heading .shot-hint { margin: 0; color: var(--muted); font-size: 11px; }
+/* 首尾帧参考位 */
+.storyboard-frame-slots { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.frame-slot-wrap { position: relative; }
+.frame-slot {
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 56px;
+  padding: 0;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.frame-slot:hover { border-color: var(--purple, #6d5dfc); color: var(--purple, #6d5dfc); }
+.frame-slot.filled { border-style: solid; border-color: var(--purple, #6d5dfc); }
+.frame-slot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frame-slot-clear {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #e24b4a;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.frame-slot-arrow { color: var(--muted); font-size: 13px; }
+/* 首尾帧选择器（缩小版资产列表） */
+.frame-picker { width: min(430px, calc(100vw - 32px)); }
+.frame-picker-tabs { margin-bottom: 8px; }
+.frame-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.frame-picker-item { display: grid; gap: 4px; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; text-align: center; }
+.frame-picker-item:hover { border-color: var(--purple, #6d5dfc); }
+.frame-picker-item img, .frame-picker-item .asset-empty-thumb { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: #f0eef6; }
+.frame-picker-item small { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 生成按钮上的积分标记 */
+.credit-mark { font-style: normal; font-weight: 650; opacity: 0.85; margin-right: 2px; }
+/* 预览卡片角标 */
+.storyboard-gen-preview { position: relative; }
+.preview-res-badge {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(16, 16, 20, 0.72);
+  color: #e8e7ed;
+  font-size: 11px;
+  font-weight: 650;
+}
+.preview-corner-actions { position: absolute; right: 10px; top: 10px; display: flex; gap: 6px; }
+.preview-corner-actions button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(16, 16, 20, 0.72);
+  color: #e8e7ed;
+  font-size: 12px;
+  cursor: pointer;
+}
+/* 底部片段条：状态标签、元信息、翻页箭头 */
+/* 原型里 segments 的 .shot-strip 是 column 方向，这里显式改回横向：左箭头 | 卡片流 | 右箭头 */
+body[data-screen="segments"] .shot-strip {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 4px;
+}
+.shot-strip .thumb-row { flex: 1; min-width: 0; }
+.shot-strip-nav {
+  flex: 0 0 auto;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.shot-strip-nav:hover { color: var(--text); border-color: var(--border, #cfcfd8); }
+/* 片段卡视觉化：图1 形态——大图铺底 + 叠加序号/状态/元信息，隐藏卡下文字区 */
+body[data-screen="segments"] .shot-strip .shot-thumb { display: block; height: 128px; padding: 0; overflow: hidden; }
+body[data-screen="segments"] .shot-strip .shot-frame-visual { display: block; width: 100%; height: 100%; flex: none; }
+body[data-screen="segments"] .shot-strip .shot-frame-visual img { width: 100%; height: 100%; object-fit: cover; }
+body[data-screen="segments"] .shot-strip .shot-frame-copy { display: none; }
+/* 资产库网格卡片：图1 形态——上图下文，引用状态收为右上角小徽标 */
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row img,
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row > .asset-empty-thumb {
+  width: 100%;
+  height: 84px;
+  min-height: 84px;
+  flex: none;
+  border-radius: 0;
+  object-fit: cover;
+}
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row > span:nth-child(2) { display: grid; min-width: 0; gap: 2px; padding: 6px 8px 8px; }
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row i {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  margin: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(16, 16, 20, 0.72);
+  color: #d7d5df;
+  font-size: 10px;
+}
+body[data-screen="segments"] .storyboard-asset-list.grid .storyboard-asset-row.referenced i { background: rgba(95, 76, 145, 0.92); color: #e2d9ff; }
+.shot-card-state {
+  position: absolute;
+  top: 6px;
+  left: 32px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+}
+.shot-card-state.pending { background: rgba(226, 75, 74, 0.92); color: #fff; }
+.shot-card-state.done { background: rgba(15, 110, 86, 0.92); color: #fff; }
+.shot-card-meta {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  color: #e8e7ed;
+  font-size: 10px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+/* 视频合成页：时间线头部处理入口（基础 flex 布局沿用既有 .timeline-head 规则） */
+.timeline-head > span { flex: 1; }
+.timeline-tools { display: inline-flex; gap: 6px; }
+.timeline-head .timeline-tools button { margin-left: 0; font-size: 10.5px; padding: 3px 9px; border-radius: 6px; }
+
 body[data-screen="segments"] .storyboard-stepper { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 body[data-screen="segments"] .storyboard-stepper span { min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
 body[data-screen="segments"] .storyboard-stepper button { flex: 0 0 68px; width: 68px; min-width: 68px; padding: 6px 5px; white-space: nowrap; }
@@ -1831,6 +2040,14 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
 .asset-card .asset-generation-status { background: #f3f4f6; color: #77737f; }
 .asset-card .asset-generation-status.generated { background: #eaf7f1; color: #238264; }
 .asset-card .asset-generation-status.generating { background: #f0ebff; color: #6d5dfc; }
+/* 卡片左上审核徽标（图2 语义） */
+.asset-card .asset-review-status { font-style: normal; }
+.asset-card .asset-review-status.approved { background: #0d3328; color: #5DCAA5; }
+.asset-card .asset-review-status.pending { background: #f3f4f6; color: #77737f; }
+.asset-card .asset-review-status.rejected { background: #3d1d24; color: #F09595; }
+.asset-review-banner { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding: 6px 10px; border-radius: 7px; background: rgba(226, 75, 74, 0.1); }
+.asset-review-banner i { font-style: normal; color: #e24b4a; font-size: 11px; font-weight: 650; }
+.asset-review-banner span { color: var(--muted); font-size: 10.5px; }
 
 .asset-group-overview {
   margin-bottom: 14px;
@@ -1859,6 +2076,10 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
 }
 .asset-voice-action { display: grid; gap: 5px; margin-top: 11px; }
 .asset-voice-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   width: 100%;
   min-height: 33px;
   padding: 6px 12px;
@@ -1870,6 +2091,7 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
   font-weight: 600;
   cursor: pointer;
 }
+.asset-voice-button .voice-dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; opacity: 0.8; }
 .asset-voice-button:hover { border-color: #9a78e8; background: #f0eaff; }
 .asset-voice-action small { color: var(--muted); font-size: 10px; text-align: center; }
 
@@ -2194,9 +2416,10 @@ body[data-screen="assets"] #assets.page-screen {
 }
 .asset-workspace-nav .module-tabs button:hover { background: #eef0f6; color: var(--text); }
 .asset-workspace-nav .module-tabs button.active { border-color: #ddd5fb; background: #f0ebff; }
-.asset-count-summary { display: flex; align-items: center; gap: 18px; color: var(--muted); font-size: 12px; }
+.asset-count-summary { display: flex; align-items: center; gap: 18px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: visible; flex: 0 0 auto; }
 .asset-count-summary span { white-space: nowrap; }
 .asset-count-summary b { margin-left: 3px; color: #4d5368; font-weight: 600; }
+body[data-screen] .asset-count-summary b { color: #c4c2cd; }
 
 body[data-screen="assets"] .asset-detail {
   border-radius: 12px;
@@ -3203,27 +3426,48 @@ body[data-screen="segments"] .storyboard-asset-tabs button {
   background: transparent;
   color: #9793a2;
 }
-body[data-screen="segments"] .episode-switch-btn {
+body[data-screen] .episode-switch-btn {
   border-color: #35353e;
   background: #1c1c22;
   color: #e8e7ed;
 }
-body[data-screen="segments"] .episode-switch-btn:hover { border-color: #474752; }
-body[data-screen="segments"] .episode-switch-btn span { color: #8d8a97; }
-body[data-screen="segments"] .episode-switch-btn i { border-top-color: #8d8a97; }
-body[data-screen="segments"] .episode-switch-menu {
+body[data-screen] .episode-switch-btn:hover { border-color: #474752; }
+body[data-screen] .episode-switch-btn span { color: #8d8a97; }
+body[data-screen] .episode-switch-btn i { border-top-color: #8d8a97; }
+body[data-screen] .episode-switch-menu {
   border-color: #34343d;
   background: #151519;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
 }
-body[data-screen="segments"] .episode-switch-menu > button { color: #e8e7ed; }
-body[data-screen="segments"] .episode-switch-menu > button:hover { background: #22222a; }
-body[data-screen="segments"] .episode-switch-menu > button.active { background: #252031; }
-body[data-screen="segments"] .episode-switch-menu > button span { color: #8d8a97; }
+body[data-screen] .episode-switch-menu > button { color: #e8e7ed; }
+body[data-screen] .episode-switch-menu > button:hover { background: #22222a; }
+body[data-screen] .episode-switch-menu > button.active { background: #252031; }
+body[data-screen] .episode-switch-menu > button span { color: #8d8a97; }
 body[data-screen="segments"] .episode-tag.pending { border-color: #ba7517; color: #ef9f27; }
-body[data-screen="segments"] .episode-switch-new { border-top-color: #2c2c35; color: #b4a5ff !important; }
+body[data-screen] .episode-switch-new { border-top-color: #2c2c35; color: #b4a5ff !important; }
 body[data-screen="segments"] .episode-blank-guide { border-color: #35353e; background: #151519; }
 body[data-screen="segments"] .episode-blank-guide b { color: #e8e7ed; }
+body[data-screen] .credit-pill { background: rgba(128, 105, 238, 0.16); color: #b4a5ff; }
+body[data-screen] .script-record-btn { border-color: #35353e; color: #c4c2cd; }
+body[data-screen] .storyboard-library-head b { color: #e8e7ed; }
+body[data-screen] .storyboard-library-actions button { border-color: #35353e; color: #8d8a97; }
+body[data-screen] .storyboard-library-actions button:hover { color: #e8e7ed; border-color: #474752; }
+body[data-screen="segments"] .frame-slot { border-color: #35353e; color: #8d8a97; }
+body[data-screen="segments"] .frame-slot:hover { border-color: #8069ee; color: #b4a5ff; }
+body[data-screen="segments"] .frame-slot.filled { border-color: #8069ee; }
+body[data-screen="segments"] .frame-slot-arrow { color: #6f6b7a; }
+body[data-screen="segments"] .frame-picker .storyboard-asset-tabs button { color: #9793a2; }
+body[data-screen="segments"] .frame-picker-item img, body[data-screen="segments"] .frame-picker-item .asset-empty-thumb { background: #26262e; }
+body[data-screen] .shot-strip-nav { border-color: #35353e; color: #8d8a97; }
+body[data-screen] .shot-strip-nav:hover { color: #e8e7ed; border-color: #474752; }
+body[data-screen] .timeline-tools button { border-color: #35353e; background: #1c1c22; color: #c4c2cd; }
+body[data-screen] .timeline-tools button:hover:not(:disabled) { border-color: #8069ee; color: #b4a5ff; }
+body[data-screen] .asset-voice-button { border-color: #35353e; background: #26262e; color: #e8e7ed; }
+body[data-screen] .asset-voice-button:hover { border-color: #8069ee; background: #221f33; }
+body[data-screen] .asset-voice-button .voice-dot { color: #b4a5ff; }
+body[data-screen] .asset-card .asset-review-status.pending { background: #23232a; color: #9e9ca9; }
+body[data-screen] .asset-review-banner { background: rgba(226, 75, 74, 0.12); }
+body[data-screen] .asset-review-banner i { color: #f09595; }
 body[data-screen="segments"] .storyboard-asset-tabs button.active {
   border-color: #574778;
   background: #252031;

@@ -1,4 +1,4 @@
-import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, CSSProperties, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { VideoComposition } from "./VideoComposition";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
@@ -982,8 +982,13 @@ export function App() {
   const [mentionMenuPosition, setMentionMenuPosition] = useState({ left: 12, top: 12 });
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [storyboardAssetSearch, setStoryboardAssetSearch] = useState("");
-  const [storyboardAssetLayout, setStoryboardAssetLayout] = useState<"list" | "grid">("list");
-  const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具">("角色");
+  const [storyboardAssetLayout, setStoryboardAssetLayout] = useState<"list" | "grid">("grid");
+  const [storyboardAssetTab, setStoryboardAssetTab] = useState<"角色" | "场景" | "道具" | "视频帧" | "本地素材">("角色");
+  // 首尾帧参考图选择器：点击提示词区的首帧/尾帧槽位时弹出缩小版资产列表
+  const [framePicker, setFramePicker] = useState<{ kind: "首帧" | "尾帧" } | null>(null);
+  const [framePickerTab, setFramePickerTab] = useState<"角色" | "场景" | "道具">("角色");
+  // 生成模式（全能参考/仅首帧/首尾帧）——前端状态，控制生成前的首尾帧校验提示
+  const [videoGenMode, setVideoGenMode] = useState("全能参考");
   const [busy, setBusy] = useState(false);
   const [storyboardLoading, setStoryboardLoading] = useState(false);
   const [generatingAssetIds, setGeneratingAssetIds] = useState<Set<string>>(() => new Set());
@@ -1386,9 +1391,9 @@ export function App() {
     }
   }
 
-  async function createBlankAsset() {
+  async function createBlankAsset(overrideType?: "角色" | "场景" | "道具") {
     if (!currentProject) return;
-    const assetType = (assetTab === "资产进度" ? "角色" : assetTab) as "角色" | "场景" | "道具";
+    const assetType = overrideType ?? (assetTab === "资产进度" ? "角色" : assetTab) as "角色" | "场景" | "道具";
     setBusy(true);
     try {
       const data = await request<{ asset: Asset }>(`/api/projects/${currentProject.id}/assets`, {
@@ -1823,14 +1828,21 @@ export function App() {
     const generationStatus = group.items.some((item) => generatingAssetIds.has(item.id) || item.payload?.generationInProgress === true)
       ? "生成中"
       : group.items.some((item) => (item.images?.length ?? 0) > 0) ? "已生成" : "待生成";
+    // 左上徽标 = 送审状态（图2 语义）：全部子资产已确认 → 已过审；有失败标记 → 审核失败；否则待送审。
+    // 生成状态不再占用卡角，由「新」图占位的「待生成」文案承担。
+    const reviewStatus = group.items.some((item) => item.payload?.["审核状态"] === "失败")
+      ? { label: "审核失败", cls: "rejected" }
+      : group.items.every((item) => item.status === "已确认")
+        ? { label: "已过审", cls: "approved" }
+        : { label: "待送审", cls: "pending" };
     const voiceConfig = group.type === "角色" ? group.items[0]?.payload?.["音色配置"] as VoiceConfiguration | undefined : undefined;
     const isBlankAsset = !originalUrl && !generatedUrl && group.items.every((item) => item.payload?.["手动新建"] === true);
     return (
       <article className={selectedAssetGroupKeys.has(group.key) ? "asset-card selected" : "asset-card"} key={group.key} onClick={onClick ?? (() => assetSelectionMode ? toggleAssetGroupSelection(group) : selectAssetCard(group.items[0]))}>
         <div className="asset-card-statuses">
-          <i className={`asset-generation-status ${generationStatus === "生成中" ? "generating" : generationStatus === "已生成" ? "generated" : ""}`}>{generationStatus}</i>
+          <i className={`asset-review-status ${reviewStatus.cls}`}>{generationStatus === "生成中" ? "生成中" : reviewStatus.label}</i>
           <span className="asset-card-status-end">
-            <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "审核通过" : "待确认"}</i>
+            <i>{selectedAssetGroupKeys.has(group.key) ? "已选择" : group.items.every((item) => item.status === "已确认") ? "已确认" : "待确认"}</i>
             <button type="button" className="asset-card-delete" disabled={busy} onClick={(event) => { event.stopPropagation(); requestDeleteAssetGroups([group]); }}>删除</button>
           </span>
         </div>
@@ -1865,9 +1877,10 @@ export function App() {
         <b>{isBlankAsset ? group.name : `${group.name} → ${group.localizedName}`}</b>
         <span>{isBlankAsset ? "空白资产 · 待填写描述与提示词" : `${group.items.length} 个子资产 · ${assetDisplayMeta(group.items[0])}`}</span>
         {group.type === "角色" && <div className="asset-voice-action">
-          <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}>音色配置</button>
+          <button type="button" className="asset-voice-button" onClick={(event) => { event.stopPropagation(); openVoiceConfiguration(group); }}><i className="voice-dot" aria-hidden="true" />配置音色</button>
           <small>{voiceConfig?.referenceAudio ? "音色克隆 · 参考音频已上传" : "未配置 · 点击上传参考音频"}</small>
         </div>}
+        {reviewStatus.cls === "rejected" && <div className="asset-review-banner"><i>审核失败</i><span>{group.items.every((item) => item.status === "已确认") ? "已确认" : "待确认"}</span></div>}
         {onRemove && <button className="ghost small asset-card-remove" disabled={busy} onClick={(event) => { event.stopPropagation(); onRemove(); }}>移出组</button>}
       </article>
     );
@@ -2621,6 +2634,55 @@ export function App() {
     setMessage(`已移除引用 ${asset ? assetDisplayName(asset) : token}`);
   }
 
+  // 首帧/尾帧参考图：存入分镜 payload，删除时传 null（后端会把 None 解释为删除字段）。
+  async function saveFrameReference(kind: "首帧" | "尾帧", asset: Asset | null) {
+    if (!currentProject || !selectedStoryboard) return;
+    const key = kind === "首帧" ? "首帧参考" : "尾帧参考";
+    const value = asset
+      ? { assetId: asset.id, name: assetDisplayName(asset), variable: assetDisplayVariable(asset), image: selectedAssetImageUrl(asset) || originalAssetImageUrl(asset) }
+      : null;
+    setBusy(true);
+    try {
+      const data = await request<{ storyboard: Storyboard }>(`/api/projects/${currentProject.id}/storyboards/${selectedStoryboard.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: { [key]: value } }),
+      });
+      setStoryboards((items) => items.map((item) => (item.id === data.storyboard.id ? data.storyboard : item)));
+      setFramePicker(null);
+      setMessage(asset ? `已将「${assetDisplayName(asset)}」设为${kind}参考` : `已移除${kind}参考`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `${kind}参考保存失败`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 历史版本点击：本地切换预览 + 持久化"当前采用"
+  async function selectGenerationVersion(gen: VideoGeneration) {
+    if (!currentProject) return;
+    setSelectedGenerationId(gen.id);
+    try {
+      await request(`/api/projects/${currentProject.id}/video-generations/${gen.id}/select`, { method: "POST" });
+      setGenerations((items) => items.map((item) => (item.storyboard_id === gen.storyboard_id ? { ...item, is_selected: item.id === gen.id ? 1 : 0 } : item)));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "版本采用状态保存失败");
+    }
+  }
+
+  function frameReferenceOf(storyboard: Storyboard | null, kind: "首帧" | "尾帧") {
+    const value = storyboard?.payload?.[kind === "首帧" ? "首帧参考" : "尾帧参考"];
+    return value && typeof value === "object" ? value as { assetId?: string; name?: string; image?: string } : null;
+  }
+
+  function storyboardDurationSeconds(storyboard: Storyboard) {
+    const match = /(\d+):(\d+):(\d+)\s*-\s*(\d+):(\d+):(\d+)/.exec(storyboard.time_range ?? "");
+    if (!match) return null;
+    const start = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+    const end = Number(match[4]) * 3600 + Number(match[5]) * 60 + Number(match[6]);
+    return Math.max(0, end - start);
+  }
+
   async function createBlankEpisode() {
     if (!currentProject) return;
     setBusy(true);
@@ -2993,13 +3055,34 @@ export function App() {
     <>
       <header className="app-top">
         <div className="project">
-          <button className="back-btn" onClick={() => setScreen("home")}>‹</button>
+          <button className="back-btn" onClick={() => {
+            // 资产生成（详情/分组）页点返回 → 先回资产列表，而不是直接退出项目
+            if (screen === "assets" && assetView !== "overview") { setAssetView("overview"); return; }
+            setScreen("home");
+          }}>‹</button>
           <div className="home-brand">视频重制工坊</div>
           <div className="project-copy">
           <div className="project-title" onClick={async () => { if (!currentProject) return; const title = window.prompt("项目名称", currentProject.title); if (title === null || !title.trim()) return; const data = await request<{ project: Project }>(`/api/projects/${currentProject.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: title.trim() }) }); setCurrentProject(data.project); await loadProjects(); }}>{currentProject?.title ?? "未命名项目"} <span>✎</span></div>
           <div className="project-meta">{frameRatio}　｜　{resolution}</div>
           </div>
         </div>
+        {(screen === "assets" || screen === "segments" || screen === "compare") && (
+          <div className="episode-switch topbar-episode-switch">
+            <button type="button" className="episode-switch-btn" aria-expanded={episodeMenuOpen} onClick={() => setEpisodeMenuOpen((value) => !value)}>
+              <b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择分集"}</b><i aria-hidden="true" />
+            </button>
+            {episodeMenuOpen && (
+              <div className="episode-switch-menu" role="menu" aria-label="切换分集">
+                {episodes.map((episode) => (
+                  <button type="button" role="menuitem" className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => { setSelectedEpisodeId(episode.id); setEpisodeMenuOpen(false); }}>
+                    <b>第 {episode.episode_index} 集</b><span title={episode.filename}>{episode.filename}</span>{!episode.file_url && <i className="episode-tag pending">待上传原片</i>}
+                  </button>
+                ))}
+                <button type="button" className="episode-switch-new" disabled={busy} onClick={() => void createBlankEpisode()}>＋ 新建分集</button>
+              </div>
+            )}
+          </div>
+        )}
         <nav className="steps">
           {[
             ["home", "▻", "原片"],
@@ -3012,11 +3095,15 @@ export function App() {
             </button>
           ))}
         </nav>
-        {screen === "assets" && (
-          <div className="top-actions asset-top-actions">
+        <div className="top-actions">
+          {screen === "segments" && (
+            <button type="button" className="ghost small script-record-btn" title="查看原剧本与原片对照（规划中）" onClick={() => setMessage("「原剧本视频记录」功能规划中，将展示原剧本与原片片段的对照关系")}>原剧本视频记录</button>
+          )}
+          {(screen === "assets" || screen === "segments" || screen === "compare") && <span className="credit-pill" title="积分余额（示意）">⚡ 100.0</span>}
+          {screen === "assets" && (
             <button className="primary enter-storyboards" disabled={busy || !assets.length} onClick={() => void enterStoryboards()}>进入分镜&nbsp; →</button>
-          </div>
-        )}
+          )}
+        </div>
       </header>
 
       {message && message !== "准备就绪" && !modal && <div className={messageIsError ? "global-message error" : "global-message"} role={messageIsError ? "alert" : "status"} aria-live="polite"><span>{message}</span><button type="button" aria-label="关闭提示" onClick={() => setMessage("")}>×</button></div>}
@@ -3601,36 +3688,57 @@ export function App() {
           {previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(false)}>展开原片</button>}
           <section className={`asset-sidebar${assetSidebarCollapsed ? " folded" : ""}`}>
             <div className="storyboard-asset-controls">
+              <div className="storyboard-library-head">
+                <b>项目资产库</b>
+                <div className="storyboard-library-actions">
+                  <button type="button" aria-label="刷新资产库" title="刷新资产库" disabled={busy} onClick={() => { if (currentProject) { void loadAssets(currentProject.id); void loadCustomAssetGroups(currentProject.id); } }}>↻</button>
+                  <button type="button" aria-label="搜索资产" title="搜索资产" onClick={() => document.querySelector<HTMLInputElement>(".storyboard-asset-search")?.focus()}>⌕</button>
+                  <button type="button" aria-label="新建资产" title="新建空白资产" disabled={busy} onClick={() => {
+                    if (storyboardAssetTab === "视频帧" || storyboardAssetTab === "本地素材") { setMessage("当前标签页暂不支持新建资产"); return; }
+                    void createBlankAsset(storyboardAssetTab);
+                  }}>＋</button>
+                </div>
+              </div>
               <div className="storyboard-asset-tabs" role="tablist" aria-label="分镜资产类别">
-                {(["角色", "场景", "道具"] as const).map((type) => (
+                {(["角色", "场景", "道具", "视频帧", "本地素材"] as const).map((type) => (
                   <button type="button" role="tab" aria-selected={storyboardAssetTab === type} className={storyboardAssetTab === type ? "active" : ""} key={type} onClick={() => setStoryboardAssetTab(type)}>
-                    {type}<span>{assets.filter((asset) => asset.asset_type === type).length}</span>
+                    {type}
                   </button>
                 ))}
               </div>
               <input className="storyboard-asset-search" placeholder={`搜索${storyboardAssetTab}`} value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
-              <select className="storyboard-group-filter" aria-label="按资产组筛选" value={storyboardAssetGroupId} onChange={(event) => setStoryboardAssetGroupId(event.target.value)}>
-                <option value="all">全部资产</option>
-                <option value="ungrouped">未分组</option>
-                {storyboardCustomGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
-              </select>
-              {storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
-                <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
-                  const group = customGroupById.get(storyboardAssetGroupId);
-                  if (group) void bindStoryboardCustomGroup(group);
-                }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
+              {(storyboardAssetTab === "角色" || storyboardAssetTab === "场景" || storyboardAssetTab === "道具") && (
+                <>
+                  <select className="storyboard-group-filter" aria-label="按资产组筛选" value={storyboardAssetGroupId} onChange={(event) => setStoryboardAssetGroupId(event.target.value)}>
+                    <option value="all">全部资产</option>
+                    <option value="ungrouped">未分组</option>
+                    {storyboardCustomGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
+                  </select>
+                  {storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
+                    <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
+                      const group = customGroupById.get(storyboardAssetGroupId);
+                      if (group) void bindStoryboardCustomGroup(group);
+                    }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
+                  )}
+                </>
               )}
               <div className="storyboard-asset-view-controls"><span>资产库</span><div><button className={storyboardAssetLayout === "list" ? "active" : ""} aria-pressed={storyboardAssetLayout === "list"} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} aria-pressed={storyboardAssetLayout === "grid"} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div></div>
             </div>
             <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
-              {storyboardFilteredAssets.map((asset) => {
-                const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
-                const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
-                return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
-                  {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
-                </button>;
-              })}
-              {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
+              {(storyboardAssetTab === "视频帧" || storyboardAssetTab === "本地素材") ? (
+                <p className="empty-shot-assets">{storyboardAssetTab === "视频帧" ? "暂无视频帧；原片解析后这里会展示可引用的关键帧。" : "暂无本地素材；可在素材上传区导入图片素材。"}</p>
+              ) : (
+                <>
+                  {storyboardFilteredAssets.map((asset) => {
+                    const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
+                    const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
+                    return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
+                      {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
+                    </button>;
+                  })}
+                  {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
+                </>
+              )}
             </div>
           </section>
           <button type="button" className="workbench-splitter asset-pane-splitter" role="separator" aria-label="调整资产栏宽度" aria-orientation="vertical" aria-valuemin={230} aria-valuemax={getWorkbenchPaneMaxWidth("assets")} aria-valuenow={assetPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("assets", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("assets", event)} />
@@ -3638,22 +3746,10 @@ export function App() {
             {!assetSidebarCollapsed && <button type="button" className="pane-edge-toggle asset-edge-toggle" onClick={() => setAssetSidebarCollapsed(true)}>‹ 收起资产库</button>}
             {!previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(true)}>收起原片 ›</button>}
             <div className="shot-head">
-              <div className="episode-switch">
-                <button type="button" className="episode-switch-btn" aria-expanded={episodeMenuOpen} onClick={() => setEpisodeMenuOpen((value) => !value)}>
-                  <b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择分集"}</b><span>共 {episodes.length} 集</span><i aria-hidden="true" />
-                </button>
-                {episodeMenuOpen && (
-                  <div className="episode-switch-menu" role="menu" aria-label="切换分集">
-                    {episodes.map((episode) => (
-                      <button type="button" role="menuitem" className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => { setSelectedEpisodeId(episode.id); setEpisodeMenuOpen(false); }}>
-                        <b>第 {episode.episode_index} 集</b><span title={episode.filename}>{episode.filename}</span>{!episode.file_url && <i className="episode-tag pending">待上传原片</i>}
-                      </button>
-                    ))}
-                    <button type="button" className="episode-switch-new" disabled={busy} onClick={() => void createBlankEpisode()}>＋ 新建分集</button>
-                  </div>
-                )}
+              <div className="storyboard-heading">
+                <h2>{selectedStoryboard ? `片段 ${storyboards.findIndex((item) => item.id === selectedStoryboard.id) + 1} · ${selectedStoryboard.title}` : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2>
+                <p className="shot-hint">输入"@"可快速调整相关内容、引用角色、场景、素材</p>
               </div>
-              <div className="storyboard-heading"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2></div>
             </div>
             {segmentPanel === "shot-prompt" && !selectedStoryboard && (
               selectedEpisode && !selectedEpisode.file_url ? (
@@ -3681,6 +3777,24 @@ export function App() {
             )}
             {segmentPanel === "shot-prompt" && selectedStoryboard && (
               <div className="shot-text sub-panel active">
+                <div className="storyboard-frame-slots" aria-label="首尾帧参考图">
+                  {(["首帧", "尾帧"] as const).map((kind, index) => {
+                    const ref = frameReferenceOf(selectedStoryboard, kind);
+                    return (
+                      <Fragment key={kind}>
+                        {index === 1 && <span className="frame-slot-arrow" aria-hidden="true">⇄</span>}
+                        <div className="frame-slot-wrap">
+                          <button type="button" className={ref?.image ? "frame-slot filled" : "frame-slot"} disabled={busy} title={`${kind}参考图 · 点击选择资产`} onClick={() => setFramePicker({ kind })}>
+                            {ref?.image ? <img src={ref.image} alt={`${kind}参考图`} /> : <span className="frame-slot-empty">＋ {kind}</span>}
+                          </button>
+                          {ref && (
+                            <button type="button" className="frame-slot-clear" aria-label={`移除${kind}参考`} disabled={busy} onClick={(event) => { event.stopPropagation(); void saveFrameReference(kind, null); }}>×</button>
+                          )}
+                        </div>
+                      </Fragment>
+                    );
+                  })}
+                </div>
                 <div className="prompt-body">
                   {selectedStoryboard.payload?.["使用回退占位"] === true && <div className={`storyboard-analysis-state ${selectedStoryboard.analysis_state === "分析失败" ? "failed" : "pending"}`} role="status">
                     <div><strong>{selectedStoryboard.analysis_state ?? "待分析"}</strong><span>{selectedStoryboard.analysis_message ?? "当前分镜没有真实逐镜分析结果；占位内容不会作为提示词或视频生成输入。"}</span></div>
@@ -3737,31 +3851,46 @@ export function App() {
                 <div className="video-generate-bar">
                   <div className="video-generate-options">
                     <label>
-                      <span>视频模型</span>
-                      <select value={videoModel} onChange={(event) => setVideoModel(event.target.value)} disabled={busy}>
+                      <span className="sr-only">视频模型</span>
+                      <select value={videoModel} onChange={(event) => setVideoModel(event.target.value)} disabled={busy} aria-label="视频模型">
                         {VIDEO_MODELS.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
                       </select>
                     </label>
                     <label>
-                      <span>画幅</span>
-                      <select value={frameRatio} onChange={(event) => setFrameRatio(event.target.value)} disabled={busy}>
+                      <span className="sr-only">参考模式</span>
+                      <select value={videoGenMode} onChange={(event) => setVideoGenMode(event.target.value)} disabled={busy} aria-label="参考模式">
+                        {["全能参考", "仅首帧参考", "首尾帧参考"].map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="sr-only">画幅</span>
+                      <select value={frameRatio} onChange={(event) => setFrameRatio(event.target.value)} disabled={busy} aria-label="画幅">
                         {["9:16", "16:9"].map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}
                       </select>
                     </label>
                     <label>
-                      <span>清晰度</span>
-                      <select value={resolution} onChange={(event) => setResolution(event.target.value)} disabled={busy}>
+                      <span className="sr-only">清晰度</span>
+                      <select value={resolution} onChange={(event) => setResolution(event.target.value)} disabled={busy} aria-label="清晰度">
                         {["720p", "1080p"].map((item) => <option key={item} value={item}>{item}</option>)}
                       </select>
                     </label>
                     <label>
-                      <span>时长</span>
-                      <select value={videoDuration} onChange={(event) => setVideoDuration(Number(event.target.value))} disabled={busy}>
+                      <span className="sr-only">时长</span>
+                      <select value={videoDuration} onChange={(event) => setVideoDuration(Number(event.target.value))} disabled={busy} aria-label="时长">
                         {[4, 6, 8].map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
                       </select>
                     </label>
                   </div>
-                  <button className="primary video-generate-submit" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true || storyboardHasUnresolvedReferences} title={storyboardHasUnresolvedReferences ? "请先完成资产引用核对" : undefined} onClick={runVideoGeneration}>生成</button>
+                  <button className="primary video-generate-submit" disabled={busy || !selectedStoryboard || selectedStoryboard.payload?.["使用回退占位"] === true || storyboardHasUnresolvedReferences} title={storyboardHasUnresolvedReferences ? "请先完成资产引用核对" : undefined} onClick={() => {
+                    // 首尾帧模式的前置校验：缺帧图时提示但仍允许按全能参考生成
+                    if (videoGenMode !== "全能参考" && selectedStoryboard) {
+                      const missing: string[] = [];
+                      if ((videoGenMode === "仅首帧参考" || videoGenMode === "首尾帧参考") && !frameReferenceOf(selectedStoryboard, "首帧")?.image) missing.push("首帧");
+                      if (videoGenMode === "首尾帧参考" && !frameReferenceOf(selectedStoryboard, "尾帧")?.image) missing.push("尾帧");
+                      if (missing.length) setMessage(`「${videoGenMode}」未配置${missing.join("、")}参考图，本次仍按全能参考生成`);
+                    }
+                    runVideoGeneration();
+                  }}><i className="credit-mark" aria-hidden="true">✦ 2.0</i> 生成视频</button>
                 </div>
               </div>
             )}
@@ -3787,12 +3916,17 @@ export function App() {
                     ) : (
                       <div className="asset-empty-thumb asset-empty-large">尚未生成视频；在分镜正文下方点击「生成」创建第一个版本；原片可切到「原片对比」查看</div>
                     )}
+                    <span className="preview-res-badge">{resolution}</span>
+                    <div className="preview-corner-actions">
+                      <button type="button" aria-label="画面裁切（规划中）" title="画面裁切（规划中）" onClick={() => setMessage("画面裁切功能规划中")}>◱</button>
+                      <button type="button" aria-label="生成参数信息" title="生成参数信息" onClick={() => setMessage(`当前参数：${videoModel} · ${frameRatio} · ${resolution} · ${videoDuration} 秒 · ${videoGenMode}`)}>ⓘ</button>
+                    </div>
                   </div>
                   <div className="storyboard-gen-versions">
                     <span>历史版本</span>
                     <div className="storyboard-gen-version-list">
                       {storyboardGenerations.map((gen, index) => (
-                        <button type="button" className={gen.id === activeGeneration?.id ? "gen-version active" : "gen-version"} key={gen.id} onClick={() => setSelectedGenerationId(gen.id)} title={`切换到版本 v${storyboardGenerations.length - index} · ${gen.created_at}`}>
+                        <button type="button" className={gen.id === activeGeneration?.id ? "gen-version active" : "gen-version"} key={gen.id} onClick={() => void selectGenerationVersion(gen)} title={`采用并预览版本 v${storyboardGenerations.length - index} · ${gen.created_at}`}>
                           {gen.output_url
                             ? <video src={apiAssetUrl(gen.output_url)} preload="metadata" muted playsInline aria-hidden="true" />
                             : <i className="gen-version-thumb-empty"></i>}
@@ -3808,39 +3942,50 @@ export function App() {
           </aside>
           <button type="button" className="workbench-splitter preview-pane-splitter" role="separator" aria-label="调整预览栏宽度" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={getWorkbenchPaneMaxWidth("preview")} aria-valuenow={previewPaneWidth} tabIndex={0} onPointerDown={(event) => startWorkbenchResize("preview", event)} onPointerMove={moveWorkbenchResize} onPointerUp={endWorkbenchResize} onPointerCancel={endWorkbenchResize} onLostPointerCapture={() => endWorkbenchResize()} onKeyDown={(event) => handleWorkbenchResizeKey("preview", event)} />
           <section className="shot-strip">
+            <button type="button" className="shot-strip-nav prev" aria-label="向左翻页" onClick={(event) => { const row = event.currentTarget.parentElement?.querySelector(".thumb-row"); row?.scrollBy({ left: -320, behavior: "smooth" }); }}>‹</button>
             <div className="thumb-row">
-              {storyboards.map((storyboard, index) => (
-                <div className="shot-thumb-wrap" key={storyboard.id}>
-                  <StoryboardFrameThumb storyboard={storyboard} sourceUrl={selectedEpisode?.file_url ? apiAssetUrl(selectedEpisode.file_url) : undefined} selected={storyboard.id === selectedStoryboard?.id} onClick={() => void selectStoryboardWithSave(storyboard)} />
-                  <span className="shot-card-index">{index + 1}</span>
-                  <button
-                    type="button"
-                    className="shot-card-menu-trigger"
-                    aria-label={`${storyboard.title}操作`}
-                    aria-haspopup="menu"
-                    aria-expanded={shotMenu?.id === storyboard.id}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (shotMenu?.id === storyboard.id) {
-                        setShotMenu(null);
-                        return;
-                      }
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setShotMenu({ id: storyboard.id, x: rect.right, y: rect.bottom + 6 });
-                    }}
-                  >⋯</button>
-                  {shotMenu?.id === storyboard.id && (
-                    <div className="shot-card-menu" role="menu" style={{ left: shotMenu.x, top: shotMenu.y }} onClick={(event) => event.stopPropagation()}>
-                      <button type="button" role="menuitem" disabled={index === 0} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "up"); }}>上移</button>
-                      <button type="button" role="menuitem" disabled={index === storyboards.length - 1} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "down"); }}>下移</button>
-                      <button type="button" role="menuitem" className="danger" onClick={() => { setShotMenu(null); setDeletingStoryboard(storyboard); }}>删除</button>
+              {storyboards.map((storyboard, index) => {
+                const versionCount = generations.filter((gen) => gen.storyboard_id === storyboard.id).length;
+                const durationSeconds = storyboardDurationSeconds(storyboard);
+                return (
+                  <div className="shot-thumb-wrap" key={storyboard.id}>
+                    <StoryboardFrameThumb storyboard={storyboard} sourceUrl={selectedEpisode?.file_url ? apiAssetUrl(selectedEpisode.file_url) : undefined} selected={storyboard.id === selectedStoryboard?.id} onClick={() => void selectStoryboardWithSave(storyboard)} />
+                    <span className="shot-card-index">{index + 1}</span>
+                    <span className={versionCount ? "shot-card-state done" : "shot-card-state pending"}>{versionCount ? "已生成" : "未完成"}</span>
+                    <div className="shot-card-meta">
+                      {durationSeconds !== null && <span>{durationSeconds}s</span>}
+                      <span>{versionCount} 个版本</span>
                     </div>
-                  )}
-                  <button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button>
-                </div>
-              ))}
+                    <button
+                      type="button"
+                      className="shot-card-menu-trigger"
+                      aria-label={`${storyboard.title}操作`}
+                      aria-haspopup="menu"
+                      aria-expanded={shotMenu?.id === storyboard.id}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (shotMenu?.id === storyboard.id) {
+                          setShotMenu(null);
+                          return;
+                        }
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setShotMenu({ id: storyboard.id, x: rect.right, y: rect.bottom + 6 });
+                      }}
+                    >⋯</button>
+                    {shotMenu?.id === storyboard.id && (
+                      <div className="shot-card-menu" role="menu" style={{ left: shotMenu.x, top: shotMenu.y }} onClick={(event) => event.stopPropagation()}>
+                        <button type="button" role="menuitem" disabled={index === 0} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "up"); }}>上移</button>
+                        <button type="button" role="menuitem" disabled={index === storyboards.length - 1} onClick={() => { setShotMenu(null); void moveStoryboard(storyboard, "down"); }}>下移</button>
+                        <button type="button" role="menuitem" className="danger" onClick={() => { setShotMenu(null); setDeletingStoryboard(storyboard); }}>删除</button>
+                      </div>
+                    )}
+                    <button className="insert-shot" aria-label={`在${storyboard.title}后新增`} onClick={() => createStoryboard(storyboard)}>+</button>
+                  </div>
+                );
+              })}
               <button className="add-shot-card" onClick={() => createStoryboard()}>+ 新增分镜</button>
             </div>
+            <button type="button" className="shot-strip-nav next" aria-label="向右翻页" onClick={(event) => { const row = event.currentTarget.parentElement?.querySelector(".thumb-row"); row?.scrollBy({ left: 320, behavior: "smooth" }); }}>›</button>
           </section>
         </section>
 
@@ -3848,6 +3993,37 @@ export function App() {
           <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} comparisonItems={videoComparisonItems} active={screen === "compare"} onMessage={setMessage} />
         </section>
       </main>
+
+      {framePicker && (
+        <div className="asset-group-modal-backdrop" role="presentation" onClick={() => setFramePicker(null)}>
+          <div className="asset-group-modal frame-picker" role="dialog" aria-modal="true" aria-label={`选择${framePicker.kind}参考图`} onClick={(event) => event.stopPropagation()}>
+            <h3>选择{framePicker.kind}参考图</h3>
+            <div className="storyboard-asset-tabs frame-picker-tabs" role="tablist">
+              {(["角色", "场景", "道具"] as const).map((type) => (
+                <button type="button" role="tab" aria-selected={framePickerTab === type} className={framePickerTab === type ? "active" : ""} key={type} onClick={() => setFramePickerTab(type)}>
+                  {type}<span>{assets.filter((asset) => asset.asset_type === type).length}</span>
+                </button>
+              ))}
+            </div>
+            <div className="frame-picker-grid">
+              {assets.filter((asset) => asset.asset_type === framePickerTab).map((asset) => {
+                const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
+                return (
+                  <button type="button" className="frame-picker-item" key={asset.id} disabled={busy} onClick={() => void saveFrameReference(framePicker.kind, asset)}>
+                    {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}
+                    <small>{assetDisplayName(asset)}</small>
+                  </button>
+                );
+              })}
+              {!assets.some((asset) => asset.asset_type === framePickerTab) && <p className="empty-shot-assets">当前项目还没有{framePickerTab}资产。</p>}
+            </div>
+            <div className="asset-group-modal-actions">
+              <button className="ghost" onClick={() => setFramePicker(null)} disabled={busy}>取消</button>
+              <button className="ghost asset-danger" onClick={() => void saveFrameReference(framePicker.kind, null)} disabled={busy || !frameReferenceOf(selectedStoryboard, framePicker.kind)}>清除{framePicker.kind}参考</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {voiceEditor && (
         <div className="modal-overlay open" aria-hidden="false" onClick={(event) => {
