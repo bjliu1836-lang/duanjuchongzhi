@@ -907,6 +907,11 @@ def test_source_and_localization_caches_have_independent_inputs(monkeypatch: pyt
     source_history = [{"资产类型": "角色", "原剧资产名称": "源角色", "本地化资产名称": "US target", "localizedProfile": {"face": "target-only"}}]
     changed_target_history = [{**source_history[0], "本地化资产名称": "Canadian target", "localizedProfile": {"face": "different target"}}]
     assert main.asset_source_cache_key("same-source-sha", agent, project, source_history) == main.asset_source_cache_key("same-source-sha", agent, project, changed_target_history)
+    # 项目隔离：同视频同配置、不同项目 id 的两套缓存键必须不同（新项目不受旧项目污染）；
+    # 同项目内 id 不变，键保持稳定可复用。
+    assert main.asset_source_cache_key("same-source-sha", agent, {**project, "id": "project_A"}, []) != main.asset_source_cache_key("same-source-sha", agent, {**project, "id": "project_B"}, [])
+    assert main.asset_source_cache_key("same-source-sha", agent, {**project, "id": "project_A"}, []) == main.asset_source_cache_key("same-source-sha", agent, {**project, "id": "project_A"}, [])
+    assert main.asset_localization_cache_key([], {**project, "id": "project_A"}, agent) != main.asset_localization_cache_key([], {**project, "id": "project_B"}, agent)
 
 
 def test_role_cg_suffix_preserves_exact_template_and_normalizes_legacy_wrappers():

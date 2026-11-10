@@ -5457,6 +5457,9 @@ def asset_source_cache_key(
     model_config = load_models_config()
     provider_config = model_config.get("volcengine", {})
     configuration = {
+        # 项目隔离：同一视频在不同项目不得共享源缓存，新项目必须独立重跑；
+        # 项目内重跑时 id 不变，缓存仍然复用。
+        "project_id": str(project.get("id") or ""),
         "source_sha256": file_sha256,
         "model_mode": agent.get("mode", ""),
         "model": agent.get("model_name") or agent.get("model", ""),
@@ -5836,6 +5839,8 @@ def asset_localization_cache_key(source_assets: list[dict[str, Any]], project: d
     config = load_models_config()
     provider_config = config.get("volcengine", {})
     input_data = {
+        # 项目隔离：本地化缓存同样按项目封闭，跨项目即使同视频同参数也不复用。
+        "project_id": str(project.get("id") or ""),
         "source_schema": ASSET_SOURCE_SCHEMA_VERSION,
         "localization_schema": ASSET_LOCALIZATION_SCHEMA_VERSION,
         "source_assets": [
