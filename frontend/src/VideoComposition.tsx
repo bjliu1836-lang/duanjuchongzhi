@@ -1,7 +1,7 @@
 import { ChangeEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
-type Media = { id: string; episodeId: string; name: string; kind: string; source: string; fileUrl: string; thumbnailUrl?: string; durationMs: number; width: number; height: number; hasAudio: boolean; sizeBytes?: number };
+type Media = { id: string; episodeId: string; name: string; kind: string; source: string; fileUrl: string; thumbnailUrl?: string; durationMs: number; width: number; height: number; hasAudio: boolean; sizeBytes?: number; storyboardId?: string; storyboardTitle?: string; isSelected?: boolean; createdAt?: string };
 type Clip = { id: string; sourceId: string; inMs: number; outMs: number; order: number };
 type Draft = { project_id: string; episode_id: string; title: string; revision: number; updated_at: string; edit: { aspectRatio: string; resolution: string; fps: number; clips: Clip[] } };
 type ExportJob = { id: string; status: string; progress: number; stage: string; error: string; revision: number; downloadUrl?: string; output_duration_ms?: number };
@@ -223,6 +223,9 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, compariso
   const [jobs, setJobs] = useState<ExportJob[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [versionMenu, setVersionMenu] = useState<{ assetId: string; storyboardId: string } | null>(null);
+  // 菜单用 fixed 定位，避开素材列表 overflow 裁切；记录点击按钮位置，靠近底部时向上展开。
+  const [versionMenuPos, setVersionMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState("已保存");
   const [playhead, setPlayhead] = useState(0);
@@ -246,6 +249,32 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, compariso
   const selectedClip = clips.find((clip) => clip.id === selected) ?? null;
   const selectedMedia = assets.find((item) => item.id === selectedClip?.sourceId) ?? null;
   const filteredAssets = useMemo(() => assets.filter((asset) => `${asset.name} ${asset.source}`.toLowerCase().includes(query.toLowerCase())), [assets, query]);
+  // 分镜生成视频按 storyboardId 归组，组内按创建时间升序即为 v1..vN，供「替换」下拉展示。
+  const versionGroups = useMemo(() => {
+    const groups = new Map<string, Media[]>();
+    for (const asset of assets) {
+      if (!asset.storyboardId) continue;
+      const list = groups.get(asset.storyboardId) ?? [];
+      list.push(asset);
+      groups.set(asset.storyboardId, list);
+    }
+    for (const list of groups.values()) list.sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+    return groups;
+  }, [assets]);
+  useEffect(() => {
+    if (!versionMenu) return;
+    const close = () => setVersionMenu(null);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [versionMenu]);
+
+  function formatVersionDate(value?: string) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
 
   async function refresh(): Promise<boolean> {
     if (!projectId || !episodeId) return false;
@@ -311,15 +340,48 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, compariso
   const frameStyle = frameSize ? { width: `${frameSize.width}px`, height: `${frameSize.height}px` } : undefined;
 
   function patchDraft(edit: Draft["edit"]) { setDraft((current) => current ? { ...current, edit } : current); setSaveState("有未保存修改"); }
-  function addAsset(asset: Media, replace = false) {
+  function addAsset(asset: Media) {
     if (!draft) return;
-    const next = replace && selectedClip
-      ? clips.map((clip) => clip.id === selectedClip.id ? { ...clip, sourceId: asset.id, inMs: 0, outMs: asset.durationMs } : clip)
-      : [...clips, { id: `clip_${crypto.randomUUID()}`, sourceId: asset.id, inMs: 0, outMs: asset.durationMs, order: clips.length }];
+    const next = [...clips, { id: `clip_${crypto.randomUUID()}`, sourceId: asset.id, inMs: 0, outMs: asset.durationMs, order: clips.length }];
     patchDraft({ ...draft.edit, clips: next.map((clip, index) => ({ ...clip, order: index })) });
-    const target = replace && selectedClip ? selectedClip : next[next.length - 1];
+    const target = next[next.length - 1];
     setSelected(target.id); setPlayingClipId(target.id); setActiveMediaId(asset.id); setSeekOnLoad(target.inMs);
-    if (!replace) setPlayhead(totalMs);
+    setPlayhead(totalMs);
+  }
+  // 「移出」：移除轨道上所有引用该素材的片段（确认过的交互决策）。
+  function removeAsset(asset: Media) {
+    if (!draft) return;
+    const removed = clips.filter((clip) => clip.sourceId === asset.id);
+    if (!removed.length) return;
+    const next = clips.filter((clip) => clip.sourceId !== asset.id).map((clip, index) => ({ ...clip, order: index }));
+    patchDraft({ ...draft.edit, clips: next });
+    if (selected && removed.some((clip) => clip.id === selected)) setSelected(next[0]?.id ?? null);
+    onMessage(`已从时间线移除 ${removed.length} 个片段`);
+  }
+  // 「替换」：把轨道上引用同一分镜任意历史版本的片段换成所选版本，出入点按新旧时长比例缩放。
+  function replaceWithVersion(group: Media[], version: Media) {
+    if (!draft) return;
+    const versionIds = new Set(group.map((item) => item.id));
+    const targets = clips.filter((clip) => versionIds.has(clip.sourceId));
+    const title = version.storyboardTitle || "该分镜";
+    if (!targets.length) {
+      setVersionMenu(null);
+      onMessage(`轨道上暂无「${title}」的片段，未做改动`);
+      return;
+    }
+    const targetIds = new Set(targets.map((clip) => clip.id));
+    const next = clips.map((clip) => {
+      if (!targetIds.has(clip.id)) return clip;
+      const oldMedia = assets.find((item) => item.id === clip.sourceId);
+      const ratio = oldMedia && oldMedia.durationMs > 0 ? version.durationMs / oldMedia.durationMs : 1;
+      const inMs = Math.min(Math.max(0, Math.round(clip.inMs * ratio)), Math.max(0, version.durationMs - 1));
+      const outMs = Math.max(inMs + 1, Math.min(Math.max(inMs + 1, Math.round(clip.outMs * ratio)), version.durationMs));
+      return { ...clip, sourceId: version.id, inMs, outMs };
+    });
+    patchDraft({ ...draft.edit, clips: next });
+    setSelected(targets[0].id); setPlayingClipId(targets[0].id); setActiveMediaId(version.id);
+    setVersionMenu(null);
+    onMessage(`已将「${title}」的轨道素材替换为所选版本`);
   }
   function reorder(from: number, to: number) {
     if (!draft || from === to || to < 0 || to >= clips.length) return;
@@ -403,7 +465,51 @@ export function VideoComposition({ projectId, episodeId, episodeIndex, compariso
   return <section className={`composition-workspace${libraryCollapsed ? " library-collapsed" : ""}${inspectorCollapsed ? " inspector-collapsed" : ""}`}>
     <header className="composition-toolbar"><div><b>{draft?.title ?? `第${episodeIndex ?? ""}集合成`}</b><span className={saveState === "已保存" ? "save-state saved" : "save-state"}>● {saveState}</span><button onClick={() => setComparisonMode(true)}>和原片对比</button><button onClick={() => setLibraryCollapsed((value) => !value)}>{libraryCollapsed ? "显示素材" : "收起素材"}</button><button onClick={() => setInspectorCollapsed((value) => !value)}>{inspectorCollapsed ? "显示检查器" : "收起检查器"}</button>{saveState === "保存冲突" && <button onClick={() => refresh().then(() => setSaveState("已保存")).catch((error) => onMessage(error.message))}>重新加载服务器版本</button>}</div><div className="composition-settings"><label>画幅<select value={draft?.edit.aspectRatio ?? "9:16"} onChange={(event) => draft && patchDraft({ ...draft.edit, aspectRatio: event.target.value })}><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label>分辨率<select value={draft?.edit.resolution ?? "720p"} onChange={(event) => draft && patchDraft({ ...draft.edit, resolution: event.target.value })}><option>720p</option><option>1080p</option></select></label><button disabled={busy || saveState === "已保存"} onClick={saveDraft}>保存草稿</button><button className="export-action" disabled={busy || !clips.length} onClick={exportSelection}>导出所选片段</button></div></header>
     <div className="composition-body">
-      <aside className={`composition-library${libraryCollapsed ? " folded" : ""}`}><div className="library-head"><b>素材库</b><button onClick={() => uploadRef.current?.click()} disabled={busy}>导入本地视频</button><input ref={uploadRef} hidden type="file" accept="video/*,.mkv,.webm" onChange={uploadVideo} /></div><input className="media-search" placeholder="搜索素材" value={query} onChange={(event) => setQuery(event.target.value)} /><div className="media-list">{filteredAssets.map((asset) => { const added = clips.some((clip) => clip.sourceId === asset.id); return <article className="media-item" key={asset.id}>{asset.thumbnailUrl ? <img className="media-thumbnail" src={`${API_BASE}${asset.thumbnailUrl}`} alt="" /> : <div className="media-icon">▶</div>}<div className="media-copy"><b title={asset.name}>{asset.name}</b><span>{fmt(asset.durationMs)} · {asset.width}×{asset.height}</span><small>{asset.source}{asset.hasAudio ? " · 含音轨" : " · 无音轨"}</small></div><div className="media-actions"><button onClick={() => addAsset(asset)}>加入</button>{selectedClip && <button title="替换当前片段素材" onClick={() => addAsset(asset, true)}>替换</button>}</div>{added && <em>已添加</em>}</article>; })}{!filteredAssets.length && <p className="composition-empty">当前集还没有可用视频。原片仅作参考，点击“加入”后才会进入时间线。</p>}</div></aside>
+      <aside className={`composition-library${libraryCollapsed ? " folded" : ""}`}><div className="library-head"><b>素材库</b><button onClick={() => uploadRef.current?.click()} disabled={busy}>导入本地视频</button><input ref={uploadRef} hidden type="file" accept="video/*,.mkv,.webm" onChange={uploadVideo} /></div><input className="media-search" placeholder="搜索素材" value={query} onChange={(event) => setQuery(event.target.value)} /><div className="media-list">{filteredAssets.map((asset) => {
+        const added = clips.some((clip) => clip.sourceId === asset.id);
+        const group = asset.storyboardId ? versionGroups.get(asset.storyboardId) ?? [] : [];
+        const menuOpen = versionMenu?.assetId === asset.id && group.length > 0;
+        return (
+          <article className="media-item" key={asset.id}>
+            {asset.thumbnailUrl ? <img className="media-thumbnail" src={`${API_BASE}${asset.thumbnailUrl}`} alt="" /> : <div className="media-icon">▶</div>}
+            <div className="media-copy"><b title={asset.name}>{asset.name}</b><span>{fmt(asset.durationMs)} · {asset.width}×{asset.height}</span><small>{asset.storyboardTitle ? `${asset.storyboardTitle} · ` : ""}{asset.source}{asset.hasAudio ? " · 含音轨" : " · 无音轨"}</small></div>
+            <div className="media-actions">
+              {added
+                ? <button className="media-remove" title="从时间线移除该素材的全部片段" onClick={() => removeAsset(asset)}>移出</button>
+                : <button onClick={() => addAsset(asset)}>加入</button>}
+              {asset.kind === "generated_video" && asset.storyboardId && group.length > 0 && (
+                <button className={menuOpen ? "active" : ""} title="选择该分镜的历史版本替换轨道素材" onClick={(event) => {
+                  event.stopPropagation();
+                  if (menuOpen) { setVersionMenu(null); return; }
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setVersionMenuPos({
+                    top: rect.bottom + 272 > window.innerHeight ? Math.max(8, rect.top - 276) : rect.bottom + 6,
+                    left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)),
+                  });
+                  setVersionMenu({ assetId: asset.id, storyboardId: asset.storyboardId as string });
+                }}>替换</button>
+              )}
+            </div>
+            {menuOpen && (
+              <div className="media-version-menu" role="menu" style={{ top: versionMenuPos.top, left: versionMenuPos.left }} onMouseDown={(event) => event.stopPropagation()}>
+                <b>{asset.storyboardTitle || "当前分镜"} · {group.length} 个历史版本</b>
+                {[...group].reverse().map((version) => {
+                  const used = clips.some((clip) => clip.sourceId === version.id);
+                  const versionNo = group.findIndex((item) => item.id === version.id) + 1;
+                  return (
+                    <button type="button" key={version.id} className={used ? "in-use" : ""} onClick={() => replaceWithVersion(group, version)}>
+                      {version.thumbnailUrl ? <img src={`${API_BASE}${version.thumbnailUrl}`} alt="" /> : <span className="media-icon">▶</span>}
+                      <span className="version-copy"><b>v{versionNo} · {fmt(version.durationMs)}</b><small>{formatVersionDate(version.createdAt)}</small></span>
+                      {used && <i className="version-tag use">使用中</i>}
+                      {version.isSelected && <i className="version-tag adopted">当前采用</i>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </article>
+        );
+      })}{!filteredAssets.length && <p className="composition-empty">当前集还没有可用视频。原片仅作参考，点击“加入”后才会进入时间线。</p>}</div></aside>
       <div className="composition-center"><div ref={canvasRef} className={`composition-canvas ratio-${(draft?.edit.aspectRatio ?? "9:16").replace(":", "-")}`}><div className="canvas-inner" style={frameStyle}>{activeSource ? <video ref={videoRef} src={`${API_BASE}${activeSource.fileUrl}`} controls={false} onTimeUpdate={onTimeUpdate} onEnded={() => selected && playNextClip(selected)} onError={() => onMessage("当前素材无法在浏览器播放，请重新导入兼容的视频编码")} /> : <div className="preview-empty">选择时间线片段预览</div>}</div></div><div className="transport"><button onClick={togglePlayback} disabled={!clips.length}>{playing ? "暂停" : "播放"}</button><span>{fmt(playhead)} / {fmt(totalMs)}</span><input aria-label="播放位置" type="range" min="0" max={Math.max(1, totalMs)} value={Math.min(playhead, totalMs)} onChange={(event) => seekTo(Number(event.target.value))} disabled={!clips.length} /><label>音量 <input type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={(event) => { if (videoRef.current) videoRef.current.volume = Number(event.target.value); }} /></label></div></div>
       <aside className={`composition-inspector${inspectorCollapsed ? " folded" : ""}`}><b>片段检查器</b>{selectedClip && selectedMedia ? <><div className="inspector-name">{selectedMedia.name}</div><label>入点（毫秒）<input type="number" min="0" max={selectedMedia.durationMs - 1} value={selectedClip.inMs} onChange={(event) => updateTrim("inMs", Number(event.target.value))} /></label><label>出点（毫秒）<input type="number" min={selectedClip.inMs + 1} max={selectedMedia.durationMs} value={selectedClip.outMs} onChange={(event) => updateTrim("outMs", Number(event.target.value))} /></label><div className="inspector-meta">有效时长 <b>{fmt(selectedClip.outMs - selectedClip.inMs)}</b></div><div className="inspector-meta">源素材 <b>{selectedMedia.source}</b></div><div className="inspector-meta">顺序 <b>{clips.findIndex((clip) => clip.id === selectedClip.id) + 1} / {clips.length}</b></div><div className="inspector-buttons"><button onClick={() => reorder(clips.findIndex((clip) => clip.id === selectedClip.id), -1)}>上移</button><button onClick={() => reorder(clips.findIndex((clip) => clip.id === selectedClip.id), clips.findIndex((clip) => clip.id === selectedClip.id) + 1)}>下移</button><button onClick={() => { if (!draft) return; const next = clips.filter((clip) => clip.id !== selectedClip.id).map((clip, index) => ({ ...clip, order: index })); patchDraft({ ...draft.edit, clips: next }); setSelected(next[0]?.id ?? null); }}>移除</button></div></> : <p className="composition-empty">选择一个时间线片段后，可调整入点、出点和顺序。</p>}<div className="export-jobs"><b>导出任务</b>{jobs.map((job) => <article key={job.id}><span>{job.stage || job.status}</span><progress max="100" value={job.progress} /><small>{job.status === "failed" ? job.error : `${job.progress}% · revision ${job.revision}`}</small>{job.status === "succeeded" && job.downloadUrl && <a href={`${API_BASE}${job.downloadUrl}`} download>下载 MP4</a>}{job.status === "failed" && <button onClick={() => api<{ job: ExportJob }>(`/api/projects/${projectId}/video-export-jobs/${job.id}/retry`, { method: "POST" }).then(({ job: retry }) => setJobs((items) => [retry, ...items])).catch((error) => onMessage(error.message))}>重试</button>}</article>)}</div></aside>
     </div>

@@ -2941,6 +2941,131 @@ def list_episodes(project_id: str) -> dict[str, Any]:
         return {"episodes": enrich_episodes(rows_to_dicts(rows))}
 
 
+EPISODE_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm"}
+
+
+@app.post("/api/projects/{project_id}/episodes")
+def create_blank_episode(project_id: str) -> dict[str, Any]:
+    """新建空白分集：不携带原片，占位第 N+1 集，供分镜页"新建分集"使用。
+
+    与 /episodes/upload 的锁定规则不同，空白分集是纯新增动作，不影响已有剧集
+    的解析结果，因此即使整剧分析已完成也允许创建。
+    """
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        get_project_or_404(conn, project_id)
+        row = conn.execute(
+            "SELECT MAX(episode_index) AS max_index FROM episodes WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        next_index = int((row["max_index"] if row else 0) or 0) + 1
+        episode_id = new_id("episode")
+        timestamp = now_iso()
+        conn.execute(
+            """
+            INSERT INTO episodes
+            (id, project_id, episode_index, filename, file_path, source_url, ark_file_id, ark_file_status, ark_file_error, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (episode_id, project_id, next_index, f"第 {next_index} 集（空白分集）", "", "", "", "", "", "待上传原片", timestamp),
+        )
+        created = row_to_dict(
+            conn.execute(
+                "SELECT * FROM episodes WHERE id = ? AND project_id = ?",
+                (episode_id, project_id),
+            ).fetchone()
+        )
+        return {"episode": enrich_episode(created)}
+
+
+@app.post("/api/projects/{project_id}/episodes/{episode_id}/source-video")
+async def attach_episode_source(project_id: str, episode_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """给空白分集挂原片：仅允许 file_path 为空的分集，避免覆盖已有原片。"""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix and suffix not in EPISODE_VIDEO_SUFFIXES:
+        raise HTTPException(status_code=415, detail="仅支持 MP4、MOV、M4V、MKV、WebM 视频")
+    suffix = suffix or ".mp4"
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        get_project_or_404(conn, project_id)
+        episode = row_to_dict(
+            conn.execute(
+                "SELECT * FROM episodes WHERE id = ? AND project_id = ?",
+                (episode_id, project_id),
+            ).fetchone()
+        )
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        if str(episode.get("file_path") or "").strip():
+            raise HTTPException(status_code=409, detail="该分集已有原片，不能重复挂载")
+        project_dir = PROJECTS_DIR / project_id / "source"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        target_path = project_dir / f"episode_{int(episode['episode_index']):03d}{suffix}"
+        filename = Path(file.filename or target_path.name).name
+        try:
+            with target_path.open("wb") as target:
+                while chunk := await file.read(1024 * 1024):
+                    target.write(chunk)
+        finally:
+            await file.close()
+        timestamp = now_iso()
+        conn.execute(
+            "UPDATE episodes SET filename = ?, file_path = ?, status = ? WHERE id = ?",
+            (filename, str(target_path), "已上传", episode_id),
+        )
+        record = row_to_dict(
+            conn.execute(
+                "SELECT * FROM episodes WHERE id = ? AND project_id = ?",
+                (episode_id, project_id),
+            ).fetchone()
+        )
+        enrich_episode(record)
+        ark_result = upload_episode_to_ark(conn, record)
+        record["ark_file_id"] = ark_result["file_id"]
+        record["ark_file_status"] = ark_result["status"]
+        record["ark_file_error"] = ark_result["error"]
+        record["status"] = "已上传并同步 Ark" if ark_result["file_id"] else "已上传，Ark 同步失败"
+        conn.execute(
+            "UPDATE episodes SET status = ? WHERE id = ?",
+            (record["status"], episode_id),
+        )
+        conn.execute(
+            "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+            ("已上传", now_iso(), project_id),
+        )
+        return {"episode": record}
+
+
+@app.delete("/api/projects/{project_id}/episodes/{episode_id}")
+def delete_blank_episode(project_id: str, episode_id: str) -> dict[str, Any]:
+    """删除空白分集：只允许没有任何产出物的分集（无原片、无分镜、无资产、无视频生成记录）。"""
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        get_project_or_404(conn, project_id)
+        episode = row_to_dict(
+            conn.execute(
+                "SELECT * FROM episodes WHERE id = ? AND project_id = ?",
+                (episode_id, project_id),
+            ).fetchone()
+        )
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        if str(episode.get("file_path") or "").strip():
+            raise HTTPException(status_code=409, detail="该分集已有原片，不能删除；如需更换素材请新建项目")
+        blockers = {
+            "分镜": conn.execute("SELECT COUNT(*) AS c FROM storyboards WHERE project_id=? AND episode_id=?", (project_id, episode_id)).fetchone()["c"],
+            "资产": conn.execute("SELECT COUNT(*) AS c FROM assets WHERE project_id=? AND episode_id=?", (project_id, episode_id)).fetchone()["c"],
+            "视频生成记录": conn.execute("SELECT COUNT(*) AS c FROM video_generations WHERE project_id=? AND episode_id=?", (project_id, episode_id)).fetchone()["c"],
+            "视频素材": conn.execute("SELECT COUNT(*) AS c FROM video_media WHERE project_id=? AND episode_id=?", (project_id, episode_id)).fetchone()["c"],
+            "剪辑草稿": conn.execute("SELECT COUNT(*) AS c FROM video_edit_drafts WHERE project_id=? AND episode_id=?", (project_id, episode_id)).fetchone()["c"],
+        }
+        if any(blockers.values()):
+            detail = "、".join(f"{name} {count} 条" for name, count in blockers.items() if count)
+            raise HTTPException(status_code=409, detail=f"该分集已有关联产出（{detail}），不能删除")
+        conn.execute("DELETE FROM episodes WHERE id = ? AND project_id = ?", (episode_id, project_id))
+        return {"deleted": True, "episodeId": episode_id}
+
+
 @app.patch("/api/projects/{project_id}/episodes/{episode_id}/source-url")
 def update_episode_source_url(project_id: str, episode_id: str, payload: EpisodeSourceUpdate) -> dict[str, Any]:
     with connect() as conn:

@@ -143,6 +143,16 @@ def make_router(
                 meta = json.loads(item["media_json"])
                 items.append({"id": item["id"], "episodeId": episode_id, "name": item["filename"], "kind": "uploaded_video", "source": "本地导入", "fileUrl": data_file_url(str(path)), "thumbnailUrl": make_thumbnail(project_id, episode_id, item["id"], path), **meta})
             gens = conn.execute("SELECT * FROM video_generations WHERE project_id=? AND episode_id=? ORDER BY created_at DESC", (project_id, episode_id)).fetchall()
+            storyboard_titles: dict[str, str] = {}
+            generation_ids = [str(dict(row).get("storyboard_id") or "") for row in gens]
+            generation_ids = [item for item in generation_ids if item]
+            if generation_ids:
+                placeholders = ",".join("?" for _ in generation_ids)
+                for row in conn.execute(
+                    f"SELECT id,title FROM storyboards WHERE project_id=? AND id IN ({placeholders})",
+                    (project_id, *generation_ids),
+                ).fetchall():
+                    storyboard_titles[str(row["id"])] = str(row["title"])
             for row in gens:
                 generation = dict(row)
                 payload = json.loads(generation.get("payload_json") or "{}")
@@ -158,7 +168,8 @@ def make_router(
                         meta = media_probe(path)
                     except HTTPException:
                         continue
-                    items.append({"id": generation["id"], "episodeId": episode_id, "name": path.name, "kind": "generated_video", "source": "演示生成文件" if payload.get("mock") else "真实生成文件", "fileUrl": data_file_url(str(path)), "thumbnailUrl": make_thumbnail(project_id, episode_id, generation["id"], path), **meta})
+                    storyboard_id = str(generation.get("storyboard_id") or "")
+                    items.append({"id": generation["id"], "episodeId": episode_id, "name": path.name, "kind": "generated_video", "source": "演示生成文件" if payload.get("mock") else "真实生成文件", "fileUrl": data_file_url(str(path)), "thumbnailUrl": make_thumbnail(project_id, episode_id, generation["id"], path), "storyboardId": storyboard_id, "storyboardTitle": storyboard_titles.get(storyboard_id, ""), "isSelected": bool(generation.get("is_selected")), "createdAt": str(generation.get("created_at") or ""), **meta})
             return items
 
     def resolve_clips(conn: sqlite3.Connection, project_id: str, episode_id: str, clips: list[ClipInput]) -> list[dict[str, Any]]:

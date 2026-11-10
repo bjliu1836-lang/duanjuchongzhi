@@ -966,6 +966,8 @@ export function App() {
   const [assetTab, setAssetTab] = useState<AssetTab>("角色");
   const [assetView, setAssetView] = useState<AssetView>("overview");
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
+  const [episodeMenuOpen, setEpisodeMenuOpen] = useState(false);
+  const blankEpisodeUploadRef = useRef<HTMLInputElement>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
   const [segmentPanel, setSegmentPanel] = useState<SegmentPanel>("shot-prompt");
@@ -2619,6 +2621,38 @@ export function App() {
     setMessage(`已移除引用 ${asset ? assetDisplayName(asset) : token}`);
   }
 
+  async function createBlankEpisode() {
+    if (!currentProject) return;
+    setBusy(true);
+    try {
+      const data = await request<{ episode: Episode }>(`/api/projects/${currentProject.id}/episodes`, { method: "POST" });
+      setEpisodes((items) => [...items, data.episode].sort((a, b) => a.episode_index - b.episode_index));
+      setSelectedEpisodeId(data.episode.id);
+      setEpisodeMenuOpen(false);
+      setMessage(`已创建空白分集「第 ${data.episode.episode_index} 集」，上传原片后即可解析，也可先手动搭建分镜`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "新建分集失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadEpisodeSource(file: File) {
+    if (!currentProject || !selectedEpisode) return;
+    setBusy(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const data = await request<{ episode: Episode }>(`/api/projects/${currentProject.id}/episodes/${selectedEpisode.id}/source-video`, { method: "POST", body });
+      setEpisodes((items) => items.map((item) => (item.id === data.episode.id ? data.episode : item)));
+      setMessage(`已为「第 ${data.episode.episode_index} 集」挂载原片，可进入分镜解析`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "原片挂载失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createStoryboard(duplicateFrom?: Storyboard) {
     if (!currentProject || !selectedEpisodeId) return;
     const body = duplicateFrom
@@ -3567,14 +3601,6 @@ export function App() {
           {previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(false)}>展开原片</button>}
           <section className={`asset-sidebar${assetSidebarCollapsed ? " folded" : ""}`}>
             <div className="storyboard-asset-controls">
-              <details className="episode-select">
-                <summary><b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择剧集"}</b><span>{episodes.length} 集已解析</span></summary>
-                <div className="episode-menu">
-                  {episodes.map((episode) => (
-                    <button className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => setSelectedEpisodeId(episode.id)}>第 {episode.episode_index} 集 {episode.filename}</button>
-                  ))}
-                </div>
-              </details>
               <div className="storyboard-asset-tabs" role="tablist" aria-label="分镜资产类别">
                 {(["角色", "场景", "道具"] as const).map((type) => (
                   <button type="button" role="tab" aria-selected={storyboardAssetTab === type} className={storyboardAssetTab === type ? "active" : ""} key={type} onClick={() => setStoryboardAssetTab(type)}>
@@ -3612,10 +3638,35 @@ export function App() {
             {!assetSidebarCollapsed && <button type="button" className="pane-edge-toggle asset-edge-toggle" onClick={() => setAssetSidebarCollapsed(true)}>‹ 收起资产库</button>}
             {!previewPanelCollapsed && <button type="button" className="pane-edge-toggle preview-edge-toggle" onClick={() => setPreviewPanelCollapsed(true)}>收起原片 ›</button>}
             <div className="shot-head">
+              <div className="episode-switch">
+                <button type="button" className="episode-switch-btn" aria-expanded={episodeMenuOpen} onClick={() => setEpisodeMenuOpen((value) => !value)}>
+                  <b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择分集"}</b><span>共 {episodes.length} 集</span><i aria-hidden="true" />
+                </button>
+                {episodeMenuOpen && (
+                  <div className="episode-switch-menu" role="menu" aria-label="切换分集">
+                    {episodes.map((episode) => (
+                      <button type="button" role="menuitem" className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => { setSelectedEpisodeId(episode.id); setEpisodeMenuOpen(false); }}>
+                        <b>第 {episode.episode_index} 集</b><span title={episode.filename}>{episode.filename}</span>{!episode.file_url && <i className="episode-tag pending">待上传原片</i>}
+                      </button>
+                    ))}
+                    <button type="button" className="episode-switch-new" disabled={busy} onClick={() => void createBlankEpisode()}>＋ 新建分集</button>
+                  </div>
+                )}
+              </div>
               <div className="storyboard-heading"><h2>{selectedStoryboard ? selectedStoryboard.title : "暂无分镜"} <span>{selectedStoryboard?.time_range ?? "等待自动切分"}</span></h2></div>
             </div>
             {segmentPanel === "shot-prompt" && !selectedStoryboard && (
-              storyboardLoading ? (
+              selectedEpisode && !selectedEpisode.file_url ? (
+                <div className="shot-empty sub-panel active episode-blank-guide">
+                  <b>第 {selectedEpisode.episode_index} 集 · 空白分集</b>
+                  <span>还没有本集原片。上传后系统将自动解析并生成分镜；也可以先在空白集里手动搭建分镜结构。</span>
+                  <div className="episode-blank-actions">
+                    <button className="primary" disabled={busy} onClick={() => blankEpisodeUploadRef.current?.click()}>上传本集原片</button>
+                    <button className="ghost" disabled={busy} onClick={() => void createStoryboard()}>从空白分镜开始</button>
+                  </div>
+                  <input ref={blankEpisodeUploadRef} hidden type="file" accept="video/*,.mkv,.webm" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (file) void uploadEpisodeSource(file); }} />
+                </div>
+              ) : storyboardLoading ? (
                 <div className="shot-empty sub-panel active">
                   <div className="loader-ring"></div>
                   <b>正在生成分镜</b>
