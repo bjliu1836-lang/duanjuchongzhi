@@ -4825,6 +4825,10 @@ def normalize_reused_source_assets(source_assets: list[dict[str, Any]]) -> list[
     for asset in assets:
         if not isinstance(asset, dict):
             continue
+        # source_only_assets_snapshot 按设计剥除了 localized_name；恢复时必须回填原名兜底。
+        # 海外模式随后由 merge_localized_profiles 覆盖为本地化名称；国内模式（中国/
+        # asset_replacement）跳过目标本地化阶段，insert_assets 落库仍要求该键存在。
+        asset["localized_name"] = str(asset.get("localized_name") or asset.get("name") or "")
         payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
         child = payload.get("当前子资产") if isinstance(payload.get("当前子资产"), dict) else {}
         child_id = str(child.get("子资产编号") or payload.get("子资产编号") or "").strip()
