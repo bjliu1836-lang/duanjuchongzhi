@@ -1114,7 +1114,8 @@ body[data-screen="segments"] .storyboard-heading { display: grid; min-width: 0; 
 
 /* ===== 分镜页图1复刻新增 ===== */
 /* 顶栏：分集切换器（顶栏位置）、原剧本视频记录、积分示意 */
-.topbar-episode-switch { margin-left: 4px; }
+.topbar-episode-switch { flex: 0 0 auto; margin-left: 4px; }
+.project-copy { min-width: 0; flex: 0 1 auto; }
 .topbar-episode-switch .episode-switch-btn { padding: 5px 10px; }
 .credit-pill {
   display: inline-flex;

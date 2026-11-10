@@ -3065,24 +3065,24 @@ export function App() {
           <div className="project-title" onClick={async () => { if (!currentProject) return; const title = window.prompt("项目名称", currentProject.title); if (title === null || !title.trim()) return; const data = await request<{ project: Project }>(`/api/projects/${currentProject.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: title.trim() }) }); setCurrentProject(data.project); await loadProjects(); }}>{currentProject?.title ?? "未命名项目"} <span>✎</span></div>
           <div className="project-meta">{frameRatio}　｜　{resolution}</div>
           </div>
+          {(screen === "assets" || screen === "segments" || screen === "compare") && (
+            <div className="episode-switch topbar-episode-switch">
+              <button type="button" className="episode-switch-btn" aria-expanded={episodeMenuOpen} onClick={() => setEpisodeMenuOpen((value) => !value)}>
+                <b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择分集"}</b><i aria-hidden="true" />
+              </button>
+              {episodeMenuOpen && (
+                <div className="episode-switch-menu" role="menu" aria-label="切换分集">
+                  {episodes.map((episode) => (
+                    <button type="button" role="menuitem" className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => { setSelectedEpisodeId(episode.id); setEpisodeMenuOpen(false); }}>
+                      <b>第 {episode.episode_index} 集</b><span title={episode.filename}>{episode.filename}</span>{!episode.file_url && <i className="episode-tag pending">待上传原片</i>}
+                    </button>
+                  ))}
+                  <button type="button" className="episode-switch-new" disabled={busy} onClick={() => void createBlankEpisode()}>＋ 新建分集</button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-        {(screen === "assets" || screen === "segments" || screen === "compare") && (
-          <div className="episode-switch topbar-episode-switch">
-            <button type="button" className="episode-switch-btn" aria-expanded={episodeMenuOpen} onClick={() => setEpisodeMenuOpen((value) => !value)}>
-              <b>{selectedEpisode ? `第 ${selectedEpisode.episode_index} 集` : "选择分集"}</b><i aria-hidden="true" />
-            </button>
-            {episodeMenuOpen && (
-              <div className="episode-switch-menu" role="menu" aria-label="切换分集">
-                {episodes.map((episode) => (
-                  <button type="button" role="menuitem" className={episode.id === selectedEpisodeId ? "active" : ""} key={episode.id} onClick={() => { setSelectedEpisodeId(episode.id); setEpisodeMenuOpen(false); }}>
-                    <b>第 {episode.episode_index} 集</b><span title={episode.filename}>{episode.filename}</span>{!episode.file_url && <i className="episode-tag pending">待上传原片</i>}
-                  </button>
-                ))}
-                <button type="button" className="episode-switch-new" disabled={busy} onClick={() => void createBlankEpisode()}>＋ 新建分集</button>
-              </div>
-            )}
-          </div>
-        )}
         <nav className="steps">
           {[
             ["home", "▻", "原片"],
