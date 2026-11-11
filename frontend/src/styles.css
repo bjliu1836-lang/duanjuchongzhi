@@ -1170,17 +1170,33 @@ body[data-screen="segments"] .storyboard-heading { display: grid; min-width: 0; 
   cursor: pointer;
 }
 .frame-slot-arrow { color: var(--muted); font-size: 13px; }
-/* 首尾帧选择器（缩小版资产列表） */
-.frame-picker { width: min(430px, calc(100vw - 32px)); }
-.frame-picker-tabs { margin-bottom: 8px; }
-.frame-picker-grid {
+/* 搜索与资产组筛选同一排 */
+.storyboard-filter-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+.storyboard-filter-row .storyboard-asset-search { flex: 1 1 auto; min-width: 0; height: 30px; margin: 0; }
+.storyboard-filter-row .storyboard-group-filter { flex: 0 1 44%; width: auto; min-width: 0; height: 30px; margin: 0; align-self: center; }
+
+/* 首尾帧选择器（缩小版资产列表）——独立于 .asset-group-modal 的 grid 布局，显式纵向排布 */
+.frame-picker.asset-group-modal {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+}
+.frame-picker.asset-group-modal > h3 { margin: 0; }
+.frame-picker .frame-picker-tabs { display: flex; flex-wrap: nowrap; gap: 6px; width: 100%; }
+.frame-picker .frame-picker-tabs button { flex: 0 0 auto; white-space: nowrap; }
+.frame-picker .frame-picker-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+  width: 100%;
   max-height: 300px;
   overflow-y: auto;
   padding: 2px;
 }
+.frame-picker .asset-group-modal-actions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
+.frame-picker .asset-group-modal-actions button { flex: 0 0 auto; white-space: nowrap; }
 .frame-picker-item { display: grid; gap: 4px; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; text-align: center; }
 .frame-picker-item:hover { border-color: var(--purple, #6d5dfc); }
 .frame-picker-item img, .frame-picker-item .asset-empty-thumb { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; background: #f0eef6; }
@@ -1328,8 +1344,9 @@ body[data-screen="segments"] .shot-card-index { position: absolute; left: 5px; t
 body[data-screen="segments"] .shot-card-menu-trigger {
   position: absolute;
   z-index: 4;
-  top: 5px;
-  right: 5px;
+  top: 6px;
+  /* wrap = 缩略卡 + 间隙 + 插入按钮(32px)，right 需跳过插入按钮的宽度才能落在卡片右上角 */
+  right: calc(6px + 40px);
   display: grid;
   width: 27px;
   height: 25px;
@@ -1714,8 +1731,10 @@ body[data-screen="compare"] .media-item > em { color: var(--green); }
   border-radius: 999px;
   font-size: 11px;
   line-height: 1.4;
+  white-space: nowrap;
 }
-.asset-card-status-end { display: inline-flex; align-items: center; gap: 8px; line-height: 1.4; }
+.asset-card-status-end { display: inline-flex; align-items: center; gap: 8px; line-height: 1.4; white-space: nowrap; }
+.asset-card-status-end .asset-card-delete { flex: 0 0 auto; white-space: nowrap; }
 .asset-card-delete {
   padding: 0;
   border: 0;
@@ -2078,6 +2097,18 @@ body[data-screen="compare"] .global-message { top: 12px; right: 12px; width: min
   cursor: pointer;
 }
 .asset-voice-button .voice-dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; opacity: 0.8; }
+/* 原型 `.asset-card i` 会把卡片里任何 i 元素拽到右上角成圆形——音色条的小圆点豁免 */
+.asset-card .asset-voice-action .voice-dot {
+  position: static;
+  right: auto;
+  top: auto;
+  width: 8px;
+  height: 8px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 1.5px solid currentColor;
+}
 .asset-voice-button:hover { border-color: #9a78e8; background: #f0eaff; }
 .asset-voice-action small { color: var(--muted); font-size: 10px; text-align: center; }
 

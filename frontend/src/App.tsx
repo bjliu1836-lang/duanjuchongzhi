@@ -3869,21 +3869,21 @@ export function App() {
                   </button>
                 ))}
               </div>
-              <input className="storyboard-asset-search" placeholder={`搜索${storyboardAssetTab}`} value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
-              {(storyboardAssetTab === "角色" || storyboardAssetTab === "场景" || storyboardAssetTab === "道具") && (
-                <>
+              <div className="storyboard-filter-row">
+                <input className="storyboard-asset-search" placeholder={`搜索${storyboardAssetTab}`} value={storyboardAssetSearch} onChange={(event) => setStoryboardAssetSearch(event.target.value)} />
+                {(storyboardAssetTab === "角色" || storyboardAssetTab === "场景" || storyboardAssetTab === "道具") && (
                   <select className="storyboard-group-filter" aria-label="按资产组筛选" value={storyboardAssetGroupId} onChange={(event) => setStoryboardAssetGroupId(event.target.value)}>
                     <option value="all">全部资产</option>
                     <option value="ungrouped">未分组</option>
                     {storyboardCustomGroups.map((group) => <option value={group.id} key={group.id}>{group.name}</option>)}
                   </select>
-                  {storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
-                    <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
-                      const group = customGroupById.get(storyboardAssetGroupId);
-                      if (group) void bindStoryboardCustomGroup(group);
-                    }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
-                  )}
-                </>
+                )}
+              </div>
+              {(storyboardAssetTab === "角色" || storyboardAssetTab === "场景" || storyboardAssetTab === "道具") && storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
+                <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
+                  const group = customGroupById.get(storyboardAssetGroupId);
+                  if (group) void bindStoryboardCustomGroup(group);
+                }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
               )}
               <div className="storyboard-asset-view-controls"><span>资产库</span><div><button className={storyboardAssetLayout === "list" ? "active" : ""} aria-pressed={storyboardAssetLayout === "list"} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} aria-pressed={storyboardAssetLayout === "grid"} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div></div>
             </div>
