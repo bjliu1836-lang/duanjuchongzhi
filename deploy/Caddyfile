@@ -1,0 +1,22 @@
+# Caddy 反向代理：为后端 API 提供自动 HTTPS
+# 通过环境变量 API_DOMAIN 注入域名（如 api.0po3eu1.com），Caddy 自动申请/续期证书。
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# 视频上传体积大、链路慢，放宽超时，不限制请求体大小
+	servers {
+		timeouts {
+			read_body 10m
+			read 10m
+			write 10m
+			idle 5m
+		}
+	}
+
+	reverse_proxy backend:8003 {
+		# 后端同步处理（存盘 + Ark 同步）可能耗时较长
+		dial_timeout 30s
+		response_header_timeout 10m
+	}
+}

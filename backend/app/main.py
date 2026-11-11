@@ -2753,9 +2753,17 @@ class ModelChatTestRequest(BaseModel):
 
 
 app = FastAPI(title="视频重制工坊 API", version="0.1.0")
+# 允许的前端来源用环境变量配置：云端部署时浏览器直连 API 域名（跨域），
+# 本地开发默认只放行 5174。逗号分隔多个来源，空值回退本地默认。
+_cors_origins_env = str(os.environ.get("CORS_ALLOW_ORIGINS") or "").strip()
+_cors_allow_origins = (
+    [origin.strip() for origin in _cors_origins_env.split(",") if origin.strip()]
+    if _cors_origins_env
+    else ["http://localhost:5174", "http://127.0.0.1:5174"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174", "http://127.0.0.1:5174"],
+    allow_origins=_cors_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

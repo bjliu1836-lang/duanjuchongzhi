@@ -1,0 +1,51 @@
+# 云服务器部署 compose（中国香港节点 / 免备案方案）
+# 与根目录 compose.yaml 的差异：面向公网服务，增加 Caddy 自动 HTTPS 反代；
+# 不再包含 tunnel-gateway（不需要 cloudflared 隧道回源本机）。
+#
+# 用法（在服务器上，仓库根目录）：
+#   cp deploy/.env.example deploy/.env   # 填写 ARK_API_KEY 等
+#   docker compose -f deploy/compose.server.yaml --env-file deploy/.env up -d --build
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ARK_API_KEY: ${ARK_API_KEY:?Set ARK_API_KEY in deploy/.env}
+      # 浏览器从 workers.dev 页面直连 API 域名，必须放行该来源
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://video-remake-workshop.bjliu1836.workers.dev}
+    volumes:
+      - workshop-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/api/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN in deploy/.env, e.g. api.0po3eu1.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  workshop-data:
+  caddy-data:
+  caddy-config:
