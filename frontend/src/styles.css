@@ -1130,23 +1130,8 @@ body[data-screen="segments"] .storyboard-heading { display: grid; min-width: 0; 
   white-space: nowrap;
 }
 /* 资产库标题行 */
-.storyboard-library-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 6px; }
+.storyboard-library-head { display: flex; align-items: center; padding: 2px 2px 6px; }
 .storyboard-library-head b { font-size: 13px; font-weight: 650; color: var(--text); }
-.storyboard-library-actions { display: flex; gap: 4px; }
-.storyboard-library-actions button {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 13px;
-  cursor: pointer;
-}
-.storyboard-library-actions button:hover { color: var(--text); border-color: var(--border, #cfcfd8); }
 /* 片段标题下的 @ 提示 */
 .storyboard-heading .shot-hint { margin: 0; color: var(--muted); font-size: 11px; }
 /* 首尾帧参考位 */
@@ -3451,8 +3436,6 @@ body[data-screen="segments"] .episode-blank-guide b { color: #e8e7ed; }
 body[data-screen] .credit-pill { background: rgba(128, 105, 238, 0.16); color: #b4a5ff; }
 body[data-screen] .script-record-btn { border-color: #35353e; color: #c4c2cd; }
 body[data-screen] .storyboard-library-head b { color: #e8e7ed; }
-body[data-screen] .storyboard-library-actions button { border-color: #35353e; color: #8d8a97; }
-body[data-screen] .storyboard-library-actions button:hover { color: #e8e7ed; border-color: #474752; }
 body[data-screen="segments"] .frame-slot { border-color: #35353e; color: #8d8a97; }
 body[data-screen="segments"] .frame-slot:hover { border-color: #8069ee; color: #b4a5ff; }
 body[data-screen="segments"] .frame-slot.filled { border-color: #8069ee; }

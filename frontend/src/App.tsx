@@ -3861,14 +3861,6 @@ export function App() {
             <div className="storyboard-asset-controls">
               <div className="storyboard-library-head">
                 <b>项目资产库</b>
-                <div className="storyboard-library-actions">
-                  <button type="button" aria-label="刷新资产库" title="刷新资产库" disabled={busy} onClick={() => { if (currentProject) { void loadAssets(currentProject.id); void loadCustomAssetGroups(currentProject.id); } }}>↻</button>
-                  <button type="button" aria-label="搜索资产" title="搜索资产" onClick={() => document.querySelector<HTMLInputElement>(".storyboard-asset-search")?.focus()}>⌕</button>
-                  <button type="button" aria-label="新建资产" title="新建空白资产" disabled={busy} onClick={() => {
-                    if (storyboardAssetTab === "视频帧" || storyboardAssetTab === "本地素材") { setMessage("当前标签页暂不支持新建资产"); return; }
-                    void createBlankAsset(storyboardAssetTab);
-                  }}>＋</button>
-                </div>
               </div>
               <div className="storyboard-asset-tabs" role="tablist" aria-label="分镜资产类别">
                 {(["角色", "场景", "道具", "视频帧", "本地素材"] as const).map((type) => (
