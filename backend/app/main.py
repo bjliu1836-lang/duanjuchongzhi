@@ -6662,7 +6662,30 @@ def run_target_localization(
         correction_parsed = parse_json_object(correction_raw, {})
         corrected_assets = correction_parsed.get("localizedAssets") if isinstance(correction_parsed.get("localizedAssets"), list) else []
         attempts.append({"source": "targeted_correction", "raw": correction_raw, "auditPath": correction_audit_path, "localizedAssets": corrected_assets, "validationErrors": errors})
-        localized_assets = corrected_assets
+        # 纠偏返回的是"只含待修资产"的 patch，不能整体替换首次结果——
+        # 否则只修了 1 个资产的纠偏会把其余已合格的画像全部丢弃。
+        # 按稳定资产变量合并：纠偏条目覆盖同名条目，未涉及的资产保留首次画像。
+        merged_by_variable: dict[str, dict[str, Any]] = {}
+        merged_order: list[str] = []
+        for item in localized_assets:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("assetVariable") or item.get("资产变量") or "")
+            if not key:
+                continue
+            if key not in merged_by_variable:
+                merged_order.append(key)
+            merged_by_variable[key] = item
+        for item in corrected_assets:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("assetVariable") or item.get("资产变量") or "")
+            if not key:
+                continue
+            if key not in merged_by_variable:
+                merged_order.append(key)
+            merged_by_variable[key] = item
+        localized_assets = [merged_by_variable[key] for key in merged_order]
         errors = validate_candidate(localized_assets)
         cache_repaired = bool(cached) and not errors
 
