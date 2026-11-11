@@ -914,6 +914,133 @@ function OriginalClipPreview({ sourceUrl, storyboard }: {
   );
 }
 
+type DepthVideoJob = { status: string; progress: number; video_url: string; error: string };
+
+// 深度 tab：原片/深度视频播放 + 帧步进 + 手动截取当前帧转深度图 + 可选整段深度视频。
+function DepthPreviewPanel({ episode, projectId, onFrameCaptured, notify }: {
+  episode: Episode | null;
+  projectId: string;
+  onFrameCaptured: () => void;
+  notify: (message: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const resumeTimeRef = useRef(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [capturing, setCapturing] = useState(false);
+  const [job, setJob] = useState<DepthVideoJob>({ status: "none", progress: 0, video_url: "", error: "" });
+  const [showDepthVideo, setShowDepthVideo] = useState(false);
+  const episodeId = episode?.id ?? "";
+
+  useEffect(() => {
+    if (!projectId || !episodeId) return;
+    let cancelled = false;
+    request<{ job: DepthVideoJob }>(`/api/projects/${projectId}/episodes/${episodeId}/depth-video`)
+      .then((data) => { if (!cancelled) setJob(data.job); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId, episodeId]);
+
+  useEffect(() => {
+    if (job.status !== "running" || !projectId || !episodeId) return;
+    const timer = window.setInterval(() => {
+      request<{ job: DepthVideoJob }>(`/api/projects/${projectId}/episodes/${episodeId}/depth-video`)
+        .then((data) => setJob(data.job))
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [job.status, projectId, episodeId]);
+
+  if (!episode?.file_url) {
+    return <div className="video-not-ready">上传原片后可使用深度工具：手动截取关键帧并转换为深度图。</div>;
+  }
+
+  const stepFrame = (delta: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+    video.currentTime = Math.max(0, Math.min(duration, video.currentTime + delta));
+  };
+
+  const capture = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    setCapturing(true);
+    try {
+      const seconds = video.currentTime;
+      await request(`/api/projects/${projectId}/episodes/${episodeId}/spatial-frames`, {
+        method: "POST",
+        body: JSON.stringify({ timepointSeconds: seconds }),
+      });
+      notify(`已截取 ${seconds.toFixed(2)}s 并生成深度图，见资产库「视频帧」栏目`);
+      onFrameCaptured();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "截帧失败");
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const startDepthVideo = async () => {
+    try {
+      const data = await request<{ job: DepthVideoJob }>(`/api/projects/${projectId}/episodes/${episodeId}/depth-video`, { method: "POST" });
+      setJob(data.job);
+      notify("已启动整段深度视频转换（抽帧低帧率），完成后可在此播放");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "启动失败");
+    }
+  };
+
+  const videoSrc = showDepthVideo && job.video_url ? apiAssetUrl(job.video_url) : apiAssetUrl(episode.file_url);
+  return (
+    <div className="depth-preview">
+      <div className="source-preview-label">{showDepthVideo ? "整段深度视频（抽帧低帧率）" : "原片（帧步进定位后截取）"}</div>
+      <video
+        ref={videoRef}
+        key={videoSrc}
+        src={videoSrc}
+        controls
+        playsInline
+        muted
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (resumeTimeRef.current > 0 && resumeTimeRef.current < video.duration) video.currentTime = resumeTimeRef.current;
+        }}
+        onTimeUpdate={(event) => {
+          resumeTimeRef.current = event.currentTarget.currentTime;
+          setCurrentTime(event.currentTarget.currentTime);
+        }}
+      />
+      <div className="depth-preview-controls">
+        <button type="button" onClick={() => stepFrame(-1 / 25)}>‹ 1帧</button>
+        <span className="depth-timecode">{currentTime.toFixed(2)}s</span>
+        <button type="button" onClick={() => stepFrame(1 / 25)}>1帧 ›</button>
+        <button type="button" className="primary" disabled={capturing} onClick={() => void capture()}>
+          {capturing ? "转换中…" : "截取当前帧转深度图"}
+        </button>
+      </div>
+      <div className="depth-video-job">
+        {job.status === "done" ? (
+          <label className="depth-video-toggle">
+            <input type="checkbox" checked={showDepthVideo} onChange={(event) => setShowDepthVideo(event.target.checked)} /> 播放整段深度视频
+          </label>
+        ) : job.status === "running" ? (
+          <span className="depth-video-progress">整段深度视频转换中 {Math.round(job.progress * 100)}%…</span>
+        ) : (
+          <button type="button" className="ghost" onClick={() => void startDepthVideo()}>生成整段深度视频（抽帧低帧率，需几分钟）</button>
+        )}
+        {job.status === "failed" && (
+          <>
+            <span className="depth-video-error">上次转换失败：{job.error}</span>
+            <button type="button" className="ghost" onClick={() => void startDepthVideo()}>重试</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -987,7 +1114,7 @@ export function App() {
   const [selectedStoryboardId, setSelectedStoryboardId] = useState<string | null>(null);
   const [segmentPanel, setSegmentPanel] = useState<SegmentPanel>("shot-prompt");
   // 右侧预览区分两种：整集原片参考（episode）与切分原片片段对比（segments）。
-  const [previewMode, setPreviewMode] = useState<"episode" | "segments">("episode");
+  const [previewMode, setPreviewMode] = useState<"episode" | "segments" | "depth">("episode");
   const [storyboardSaveStates, setStoryboardSaveStates] = useState<Record<string, "saved" | "saving" | "failed">>({});
   const [activeAnalysisTask, setActiveAnalysisTask] = useState<Task | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState({ story: 0, asset: 0 });
@@ -3966,9 +4093,16 @@ export function App() {
             {segmentPanel === "shot-assets" && <div className="sub-panel simple-panel active">{selectedStoryboardAssets.map((asset) => <span className="chip" key={asset.id}>{assetDisplayVariable(asset)}</span>)}<button className="ghost full" onClick={() => setSegmentPanel("shot-prompt")}>返回提示词</button></div>}
           </section>
           <aside className={`video-preview${previewPanelCollapsed ? " folded" : ""}`}>
-            <div className="preview-tabs"><button className={previewMode === "episode" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("episode"); }}>分镜生成</button><button className={previewMode === "segments" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("segments"); }}>原片对比</button></div>
+            <div className="preview-tabs"><button className={previewMode === "episode" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("episode"); }}>分镜生成</button><button className={previewMode === "segments" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("segments"); }}>原片对比</button><button className={previewMode === "depth" ? "active" : ""} onClick={() => { setSegmentPanel("shot-prompt"); setPreviewMode("depth"); }}>深度</button></div>
             <div className="preview-content">
-              {previewMode === "segments" ? (
+              {previewMode === "depth" ? (
+                <DepthPreviewPanel
+                  episode={selectedEpisode}
+                  projectId={currentProject?.id ?? ""}
+                  onFrameCaptured={() => void loadSpatialFrames()}
+                  notify={setMessage}
+                />
+              ) : previewMode === "segments" ? (
                 selectedEpisode?.file_url && selectedStoryboard ? (
                   <OriginalClipPreview
                     sourceUrl={apiAssetUrl(selectedEpisode.file_url)}

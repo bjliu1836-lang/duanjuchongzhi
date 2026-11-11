@@ -335,57 +335,46 @@ def capture_asset_original_frames(project_id: str, episode: dict[str, Any], asse
     return {"候选时码数": len(ordered_times), "解码进程数": process_count, "成功帧数": successful_frames}
 
 
-SPATIAL_FRAME_MAX_PER_STORYBOARD = 3
+def create_manual_spatial_frame(
+    conn: sqlite3.Connection, project_id: str, episode: dict[str, Any], seconds: float, note: str
+) -> dict[str, Any]:
+    """手动截帧（深度 tab）：ffmpeg 精确截取 → 同步转深度图 → 落库 source=manual。"""
+    video_path = Path(str(episode.get("file_path") or ""))
+    frame_id = new_id("sframe")
+    frame_path = PROJECTS_DIR / project_id / "spatial_frames" / f"{frame_id}.jpg"
+    if not capture_spatial_frame_image(video_path, seconds, frame_path):
+        raise HTTPException(status_code=400, detail="截帧失败：请确认原片视频可用且时间点在片长范围内")
+    depth_path = frame_path.with_suffix(".depth.png")
+    status, stored_depth = "深度图失败", ""
+    try:
+        from backend.app.depth import render_depth_map
 
-
-def collect_spatial_frame_marks(storyboards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """从各分镜 payload 的镜头列表收集"空间参考帧"标记。
-
-    只接受：时间点非空且落在本镜头时间范围内（0.05s 容差）、难点说明非空的标记；
-    每个分镜最多取 SPATIAL_FRAME_MAX_PER_STORYBOARD 个，与提示词规则一致。
-    """
-    marks: list[dict[str, Any]] = []
-    for board in storyboards:
-        payload = board.get("payload") if isinstance(board.get("payload"), dict) else {}
-        shots = payload.get("镜头列表")
-        if not isinstance(shots, list):
-            continue
-        board_marks: list[dict[str, Any]] = []
-        for shot in shots:
-            if not isinstance(shot, dict):
-                continue
-            frames = shot.get("空间参考帧")
-            if not isinstance(frames, list):
-                continue
-            shot_range = shot.get("时间范围") or shot.get("镜头时间范围")
-            if isinstance(shot_range, dict):
-                shot_range = f"{shot_range.get('开始时间', '')}-{shot_range.get('结束时间', '')}"
-            shot_start, shot_end = parse_storyboard_range(str(shot_range or ""))
-            for mark in frames:
-                if not isinstance(mark, dict):
-                    continue
-                raw_time = mark.get("时间点")
-                if raw_time in (None, ""):
-                    continue
-                seconds = parse_asset_timecode(raw_time)
-                if shot_end > shot_start and not (shot_start - 0.05 <= seconds <= shot_end + 0.05):
-                    continue
-                reason = str(mark.get("难点") or "").strip()
-                if not reason:
-                    continue
-                ref_assets = mark.get("涉及资产")
-                board_marks.append(
-                    {
-                        "storyboard_id": str(board.get("id") or ""),
-                        "storyboard_title": str(board.get("title") or ""),
-                        "shot_label": str(shot.get("镜头编号") or ""),
-                        "timepoint_seconds": seconds,
-                        "reason": reason,
-                        "ref_assets": [str(item) for item in ref_assets if str(item).strip()] if isinstance(ref_assets, list) else [],
-                    }
-                )
-        marks.extend(board_marks[:SPATIAL_FRAME_MAX_PER_STORYBOARD])
-    return marks
+        render_depth_map(str(frame_path), str(depth_path))
+        status, stored_depth = "深度图已生成", str(depth_path)
+    except Exception:
+        pass
+    reason = note.strip() or "手动截取"
+    conn.execute(
+        "INSERT INTO spatial_frames (id,project_id,episode_id,storyboard_id,storyboard_title,shot_label,timepoint_seconds,reason,ref_assets_json,frame_path,depth_path,status,created_at,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            frame_id, project_id, episode["id"], "", "手动截取", "", float(seconds), reason,
+            "[]", str(frame_path), stored_depth, status, now_iso(), "manual",
+        ),
+    )
+    conn.commit()
+    return {
+        "id": frame_id,
+        "storyboard_id": "",
+        "storyboard_title": "手动截取",
+        "shot_label": "",
+        "timepoint": format_timecode(seconds),
+        "timepoint_seconds": float(seconds),
+        "reason": reason,
+        "ref_assets": [],
+        "frame_url": data_file_url(str(frame_path)),
+        "depth_url": data_file_url(stored_depth) if stored_depth else "",
+        "status": status,
+    }
 
 
 def capture_spatial_frame_image(video_path: Path, seconds: float, output_path: Path) -> bool:
@@ -405,97 +394,71 @@ def capture_spatial_frame_image(video_path: Path, seconds: float, output_path: P
     return output_path.exists() and output_path.stat().st_size > 0
 
 
-_spatial_depth_running: set[str] = set()
+# ---------- 整段深度视频（可选、异步、抽帧低帧率） ----------
+
+_depth_video_jobs: dict[str, dict[str, Any]] = {}
 
 
-def start_spatial_depth_conversion(project_id: str, episode_id: str) -> None:
-    """后台线程逐帧生成深度图；同一集同时只允许一个转换线程。"""
+def depth_video_state(project_id: str, episode_id: str) -> dict[str, Any]:
     key = f"{project_id}:{episode_id}"
-    if key in _spatial_depth_running:
-        return
+    job = _depth_video_jobs.get(key)
+    if job:
+        return job
+    out = PROJECTS_DIR / project_id / "depth_video" / f"{episode_id}.mp4"
+    if out.exists():
+        return {"status": "done", "progress": 1.0, "video_url": data_file_url(str(out)), "error": ""}
+    return {"status": "none", "progress": 0.0, "video_url": "", "error": ""}
+
+
+def start_depth_video_job(project_id: str, episode: dict[str, Any]) -> dict[str, Any]:
+    """整段深度视频：抽 6fps + 384 宽逐帧深度，再合成 mp4。同一集去重，失败可重试。"""
+    key = f"{project_id}:{episode['id']}"
+    existing = _depth_video_jobs.get(key)
+    if existing and existing.get("status") == "running":
+        return existing
+    video_path = Path(str(episode.get("file_path") or ""))
+    if not video_path.exists():
+        raise HTTPException(status_code=400, detail="原片视频不可用，无法生成深度视频")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=400, detail="未检测到 ffmpeg")
+    job: dict[str, Any] = {"status": "running", "progress": 0.0, "video_url": "", "error": ""}
+    _depth_video_jobs[key] = job
 
     def worker() -> None:
         try:
+            work_dir = PROJECTS_DIR / project_id / "depth_video" / episode["id"]
+            frames_dir = work_dir / "frames"
+            depth_dir = work_dir / "depth"
+            shutil.rmtree(work_dir, ignore_errors=True)
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [ffmpeg, "-y", "-i", str(video_path), "-vf", "fps=6,scale=384:-2", "-q:v", "3", str(frames_dir / "%04d.jpg")],
+                check=True, capture_output=True, timeout=300,
+            )
+            frames = sorted(frames_dir.glob("*.jpg"))
+            if not frames:
+                raise RuntimeError("抽帧失败：未得到任何帧")
             from backend.app.depth import render_depth_map
-            while True:
-                with connect() as conn:
-                    row = conn.execute(
-                        "SELECT id,frame_path FROM spatial_frames WHERE project_id=? AND episode_id=? AND status='已截帧' ORDER BY created_at LIMIT 1",
-                        (project_id, episode_id),
-                    ).fetchone()
-                if row is None:
-                    break
-                frame_path = Path(str(row["frame_path"]))
-                depth_path = frame_path.with_suffix(".depth.png")
-                try:
-                    render_depth_map(str(frame_path), str(depth_path))
-                    status, stored_depth = "深度图已生成", str(depth_path)
-                except Exception:
-                    status, stored_depth = "深度图失败", ""
-                with connect() as conn:
-                    conn.execute("UPDATE spatial_frames SET status=?, depth_path=? WHERE id=?", (status, stored_depth, row["id"]))
-                    conn.commit()
-        finally:
-            _spatial_depth_running.discard(key)
 
-    _spatial_depth_running.add(key)
-    threading.Thread(target=worker, daemon=True, name=f"spatial-depth-{episode_id}").start()
+            total = len(frames)
+            for index, frame_file in enumerate(frames, start=1):
+                render_depth_map(str(frame_file), str(depth_dir / f"{frame_file.stem}.png"))
+                job["progress"] = round(index / total * 0.9, 3)
+            out_path = PROJECTS_DIR / project_id / "depth_video" / f"{episode['id']}.mp4"
+            subprocess.run(
+                [ffmpeg, "-y", "-framerate", "6", "-i", str(depth_dir / "%04d.png"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path)],
+                check=True, capture_output=True, timeout=300,
+            )
+            shutil.rmtree(work_dir, ignore_errors=True)
+            job.update(status="done", progress=1.0, video_url=data_file_url(str(out_path)))
+        except Exception as exc:
+            job.update(status="failed", error=str(exc)[:300])
 
-
-def refresh_episode_spatial_frames(conn: sqlite3.Connection, project_id: str, episode: dict[str, Any], *, rebuild: bool) -> dict[str, int]:
-    """按分镜里的空间参考帧标记重建/补齐该集的截帧记录，并触发异步深度图转换。
-
-    rebuild=True（新分析落库后）：清空该集旧的自动帧（含文件）后重建。
-    rebuild=False（缓存复用路径）：仅在该集尚无记录时补建，保留用户手动删除的结果。
-    """
-    episode_id = episode["id"]
-    existing = conn.execute(
-        "SELECT COUNT(*) AS c FROM spatial_frames WHERE project_id=? AND episode_id=?", (project_id, episode_id)
-    ).fetchone()["c"]
-    if not rebuild and existing:
-        return {"标记数": 0, "截帧数": 0, "复用现有帧数": existing}
-    rows = rows_to_dicts(
-        conn.execute(
-            "SELECT id,title,payload_json FROM storyboards WHERE project_id=? AND episode_id=? ORDER BY created_at",
-            (project_id, episode_id),
-        ).fetchall()
-    )
-    storyboards = [{"id": row["id"], "title": row["title"], "payload": json.loads(row["payload_json"])} for row in rows]
-    marks = collect_spatial_frame_marks(storyboards)
-    if rebuild:
-        old_rows = conn.execute(
-            "SELECT frame_path,depth_path FROM spatial_frames WHERE project_id=? AND episode_id=?", (project_id, episode_id)
-        ).fetchall()
-        conn.execute("DELETE FROM spatial_frames WHERE project_id=? AND episode_id=?", (project_id, episode_id))
-        for row in old_rows:
-            for key in ("frame_path", "depth_path"):
-                path = Path(str(row[key] or ""))
-                if path.is_file():
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
-    video_path = Path(str(episode.get("file_path") or ""))
-    output_dir = PROJECTS_DIR / project_id / "spatial_frames"
-    captured = 0
-    for mark in marks:
-        frame_id = new_id("sframe")
-        frame_path = output_dir / f"{frame_id}.jpg"
-        if not capture_spatial_frame_image(video_path, float(mark["timepoint_seconds"]), frame_path):
-            continue
-        conn.execute(
-            "INSERT INTO spatial_frames (id,project_id,episode_id,storyboard_id,storyboard_title,shot_label,timepoint_seconds,reason,ref_assets_json,frame_path,depth_path,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                frame_id, project_id, episode_id, mark["storyboard_id"], mark["storyboard_title"],
-                mark["shot_label"], float(mark["timepoint_seconds"]), mark["reason"],
-                json.dumps(mark["ref_assets"], ensure_ascii=False), str(frame_path), "", "已截帧", now_iso(),
-            ),
-        )
-        captured += 1
-    conn.commit()
-    if captured:
-        start_spatial_depth_conversion(project_id, episode_id)
-    return {"标记数": len(marks), "截帧数": captured}
+    threading.Thread(target=worker, daemon=True, name=f"depth-video-{episode['id']}").start()
+    return job
 
 
 def init_db() -> None:
@@ -717,6 +680,9 @@ def init_db() -> None:
         ensure_column(conn, "projects", "source_language", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "projects", "storyboard_visual_style", "TEXT NOT NULL DEFAULT 'live_action'")
         ensure_column(conn, "projects", "replace_characters", "INTEGER NOT NULL DEFAULT 0")
+        # 旧行是 VLM 自动标记时代的产物（auto）；手动截帧写入时显式传 manual
+        # 旧行是 VLM 自动标记时代的产物（auto）；手动截帧写入时显式传 manual
+        ensure_column(conn, "spatial_frames", "source", "TEXT NOT NULL DEFAULT 'auto'")
         ensure_column(conn, "projects", "replace_scenes", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "projects", "parent_project_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "asset_group_members", "sort_order", "INTEGER NOT NULL DEFAULT 0")
@@ -2687,6 +2653,11 @@ class ProjectCreate(BaseModel):
     replaceScenes: bool = False
 
 
+class SpatialFrameCreate(BaseModel):
+    timepointSeconds: float
+    note: str | None = None
+
+
 class ProjectUpdate(BaseModel):
     title: str | None = None
     remakeMode: str | None = None
@@ -4075,6 +4046,40 @@ def select_asset_image(project_id: str, asset_id: str, payload: SelectAssetImage
             conn.execute("UPDATE assets SET payload_json=? WHERE id=? AND project_id=?", (json.dumps(asset_payload, ensure_ascii=False), asset_id, project_id))
         mark_storyboards_asset_stale(conn, project_id, asset, "当前采用目标图已切换")
         return get_asset_response(conn, project_id, asset_id)
+
+
+@app.post("/api/projects/{project_id}/episodes/{episode_id}/spatial-frames")
+def create_spatial_frame(project_id: str, episode_id: str, payload: SpatialFrameCreate) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        episode = row_to_dict(
+            conn.execute("SELECT * FROM episodes WHERE id=? AND project_id=?", (episode_id, project_id)).fetchone()
+        )
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        if payload.timepointSeconds < 0:
+            raise HTTPException(status_code=400, detail="时间点非法")
+        frame = create_manual_spatial_frame(conn, project_id, episode, payload.timepointSeconds, str(payload.note or ""))
+    return {"frame": frame}
+
+
+@app.get("/api/projects/{project_id}/episodes/{episode_id}/depth-video")
+def get_depth_video_state(project_id: str, episode_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+    return {"job": depth_video_state(project_id, episode_id)}
+
+
+@app.post("/api/projects/{project_id}/episodes/{episode_id}/depth-video")
+def start_depth_video(project_id: str, episode_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        get_project_or_404(conn, project_id)
+        episode = row_to_dict(
+            conn.execute("SELECT * FROM episodes WHERE id=? AND project_id=?", (episode_id, project_id)).fetchone()
+        )
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+    return {"job": start_depth_video_job(project_id, episode)}
 
 
 @app.get("/api/projects/{project_id}/episodes/{episode_id}/spatial-frames")
@@ -8144,7 +8149,6 @@ def run_storyboard_generation(
             conn, project["id"], episode["id"], video_signature, analysis_context_signature
         )
         if cached_storyboards:
-            spatial_stats = refresh_episode_spatial_frames(conn, project["id"], episode, rebuild=False)
             result = {
                 "模型模式": "cache",
                 "分镜数量": sum(len((board.get("payload") or {}).get("镜头列表", [])) for board in cached_storyboards),
@@ -8152,7 +8156,6 @@ def run_storyboard_generation(
                 "复用分镜缓存": True,
                 "资产片段作为上下文": bool(asset_occurrence_index),
                 "使用回退分镜": False,
-                "空间参考帧": spatial_stats,
                 "sourceTaskId": "",
             }
             return finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "成功", "复用当前视频对应的完整逐镜分析结果", result, task_id)
@@ -8339,7 +8342,6 @@ def run_storyboard_generation(
                 })
                 conn.execute("DELETE FROM storyboards WHERE id=?", (row["id"],))
         insert_storyboards(conn, project["id"], episode["id"], generated_storyboards)
-    spatial_stats = refresh_episode_spatial_frames(conn, project["id"], episode, rebuild=True)
     payload = {
         "分镜编号": "分镜_001",
         "模型模式": agent["mode"],
@@ -8358,7 +8360,6 @@ def run_storyboard_generation(
         "sourceTaskId": latest_asset_task.get("id", "") if latest_asset_task else "",
         "被替换的旧分镜备份": replaced_storyboard_backups,
         "分镜时间边界自动修复": time_boundary_repairs,
-        "空间参考帧": spatial_stats,
         "流式输出字符数": stream_chars,
         "流式事件": [(stage, chars) for stage, chars in stream_events],
     }

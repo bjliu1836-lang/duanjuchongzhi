@@ -3911,3 +3911,33 @@ body[data-screen] .insert-shot:focus-visible {
   opacity: 0;
 }
 .spatial-frame-card:hover .spatial-frame-delete { opacity: 1; }
+
+/* 深度 tab */
+.depth-preview { display: grid; gap: 8px; }
+.depth-preview video { width: 100%; border-radius: 8px; background: #000; }
+.depth-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.depth-preview-controls button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.depth-preview-controls .depth-timecode {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: #a9a6b8;
+  min-width: 52px;
+  text-align: center;
+}
+.depth-preview-controls .primary { margin-left: auto; }
+.depth-video-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #8b8798;
+}
+.depth-video-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.depth-video-error { color: #d88; }
