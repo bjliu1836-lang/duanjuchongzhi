@@ -4,10 +4,10 @@ The Cloudflare Worker serves the built frontend, requires HTTP Basic Auth for ev
 
 The production Vite build writes only the app shell and referenced bundle to `cloudflare/assets`; it does not copy `frontend/public/design-proposals` or the ignored local API setting.
 
-Build the frontend with a same-origin API base. The trailing slash is normalized to an empty base by the app, and the ignored `frontend/.env.local` must not be copied into a build environment.
+Build the frontend with an empty, same-origin API base. Do not use `/` in Git Bash: MSYS may rewrite it to the local Git installation path, which makes browser API requests fail. The ignored `frontend/.env.local` must not be copied into a build environment.
 
 ```powershell
-$env:VITE_API_BASE = "/"
+$env:VITE_API_BASE = ""
 npm --prefix frontend run build
 Remove-Item Env:VITE_API_BASE
 npx wrangler@latest deploy --config cloudflare/wrangler.jsonc
