@@ -8286,6 +8286,38 @@ def run_storyboard_generation(
         detail = "；".join(fit_errors[:3])
         model_error = f"模型返回的分镜时间超出当前视频或镜头区间（{detail}），未替换现有分镜；请重试分析。"
         generated_storyboards = []
+    # 模型偶发输出 JSON 括号塌陷、镜头字段残缺或时间越界——同一视频重试通常即可通过。
+    # 这类属模型输出抖动的失败自动补一次调用，避免把可恢复的质量问题当成交付失败抛给用户。
+    quality_error_keywords = ("缺少完整逐镜事实", "时间超出当前视频或镜头区间", "没有可用分镜结构")
+    if agent["mode"] == "volcengine" and model_error and any(keyword in model_error for keyword in quality_error_keywords):
+        retry_raw = ""
+        try:
+            retry_raw = call_agent_chat("storyboardPromptGeneration", agent, input_payload)
+        except Exception as retry_exc:  # 重试自身的传输异常不得掩盖首次失败原因
+            transport_audit["模型输出质量重试异常"] = f"{type(retry_exc).__name__}: {retry_exc}"[:500]
+        if retry_raw:
+            retry_parsed, retry_repaired = parse_json_object_with_repair(retry_raw)
+            retry_storyboards = normalize_storyboards_from_agent(retry_parsed, old_to_display)
+            retry_repairs: list[str] = []
+            if retry_storyboards:
+                retry_repairs = repair_storyboard_time_bounds(retry_storyboards, episode)
+            retry_ok = (
+                bool(retry_storyboards)
+                and all(
+                    storyboard_has_real_shot_facts(storyboard.get("payload") or {})
+                    for storyboard in retry_storyboards
+                )
+                and storyboard_times_fit_source(retry_storyboards, episode)
+            )
+            transport_audit["模型输出质量重试"] = {"首次错误": model_error, "重试通过": retry_ok}
+            if retry_ok:
+                raw_model_output = retry_raw
+                parsed_model_output = retry_parsed
+                model_json_repaired = retry_repaired
+                generated_storyboards = retry_storyboards
+                time_boundary_repairs.extend(retry_repairs)
+                stream_chars = len(retry_raw)
+                model_error = ""
     if agent["mode"] == "volcengine" and (model_error or not generated_storyboards):
         if not model_error:
             model_error = "模型已返回内容，但 JSON 修复后仍没有可用分镜结构。"

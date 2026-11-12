@@ -3226,6 +3226,33 @@ def test_storyboard_uses_video_agent_not_asset_index_as_shot_cache_and_protects_
         assert any(row["id"] == "storyboard_manual_fixture" and json.loads(row["payload_json"])["分镜生成正文"] == "用户手工编辑的正文" for row in after_rows)
 
 
+def test_storyboard_retries_once_when_model_output_lacks_shot_facts(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """模型偶发输出结构塌陷时自动补一次调用，不必让用户手动重试分析。"""
+    project = create_project(client, title="storyboard-quality-retry")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "retry-source.mp4")
+    calls: list[int] = []
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "video storyboard", "prompt_file": "test"})
+
+    def fake_storyboard_call(_key, _agent, _payload):
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            # 首次输出结构塌陷：分镜没有镜头列表，逐镜事实缺失（今晚线上真实失败形态）
+            return json.dumps({"分镜列表": [{"分镜时间范围": "00:00:00-00:00:11", "最终视频生成提示词": "按原片演绎"}]}, ensure_ascii=False)
+        return _valid_storyboard_model_output()
+
+    monkeypatch.setattr(main, "call_agent_chat", fake_storyboard_call)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        task = main.run_storyboard_generation(conn, db_project, episode_id)
+        assert task["status"] == "成功", task
+        assert task["result"]["使用回退分镜"] is False
+        assert "缺少完整逐镜事实" not in task["message"]
+        rows = conn.execute("SELECT payload_json FROM storyboards WHERE project_id=? AND episode_id=?", (project["id"], episode_id)).fetchall()
+        assert rows
+        assert all(json.loads(row["payload_json"]).get("使用回退占位") is not True for row in rows)
+    assert len(calls) == 2
+
+
 def test_us_cg_storyboard_provider_context_uses_target_rules_and_separate_context_cache(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     project = create_project(client, title="us-cg-routing", remakeMode="cg_3d", targetCountry="美国", targetLanguage="英语", sourceLanguage="中文")
     episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "us-cg-source.mp4")
