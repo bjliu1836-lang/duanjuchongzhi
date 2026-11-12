@@ -7,6 +7,20 @@
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body data-screen="home">
+  <aside class="home-rail" aria-label="工作台主导航">
+    <a class="home-rail-brand" href="#" aria-label="返回创作首页">T</a>
+    <nav class="home-rail-nav">
+      <a class="home-rail-item active" href="#project-library"><span>⌂</span><small>项目管理</small></a>
+      <span class="home-rail-item"><span>▣</span><small>资产库</small></span>
+      <span class="home-rail-item"><span>◈</span><small>公共资产</small></span>
+      <span class="home-rail-item"><span>⌁</span><small>提示词</small></span>
+      <span class="home-rail-item"><span>♙</span><small>账号管理</small></span>
+      <span class="home-rail-item"><span>◉</span><small>组织管理</small></span>
+      <span class="home-rail-item"><span>▤</span><small>角色权限</small></span>
+      <span class="home-rail-item"><span>↺</span><small>费用消耗</small></span>
+    </nav>
+    <div class="home-rail-bottom"><span class="home-rail-credit">✦ 100.0</span><span class="home-rail-avatar">AI</span></div>
+  </aside>
   <header class="app-top">
     <div class="project">
       <button class="back-btn">‹</button>
@@ -30,7 +44,14 @@
 
   <main>
     <section class="screen active home-screen" id="home">
+      <div class="home-hero"><h1>翻开剧本，创作<span>精品短剧</span></h1></div>
       <div class="upload-card">
+        <div class="creation-mode-tabs" role="tablist" aria-label="创作模式">
+          <span role="tab" aria-selected="false">▧ Agent 模式</span>
+          <span role="tab" aria-selected="false">＋ 普通模式</span>
+          <span role="tab" aria-selected="false">⌗ 无限画布</span>
+          <span role="tab" aria-selected="true" class="active">▣ 视频重制</span>
+        </div>
         <div class="upload-tabs" id="source-tabs">
           <button class="active" data-source-mode="local">上传本地视频</button>
           <button data-source-mode="backend">拉取后台视频项目</button>

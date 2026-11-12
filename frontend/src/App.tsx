@@ -1041,6 +1041,326 @@ function DepthPreviewPanel({ episode, projectId, onFrameCaptured, notify }: {
   );
 }
 
+type HomeModule = "projects" | "assets" | "public-assets" | "prompts" | "account" | "organization" | "roles" | "usage";
+type CreationMode = "agent" | "standard" | "canvas" | "remake";
+
+const HOME_NAV_ITEMS: Array<{ id: HomeModule; icon: string; label: string }> = [
+  { id: "projects", icon: "⌂", label: "项目管理" },
+  { id: "assets", icon: "▣", label: "资产库" },
+  { id: "public-assets", icon: "◈", label: "公共资产" },
+  { id: "prompts", icon: "⌁", label: "提示词" },
+  { id: "account", icon: "♙", label: "账号管理" },
+  { id: "organization", icon: "◉", label: "组织管理" },
+  { id: "roles", icon: "▤", label: "角色权限" },
+  { id: "usage", icon: "↺", label: "费用消耗" },
+];
+
+const CREATION_MODES: Array<{ id: CreationMode; icon: string; label: string }> = [
+  { id: "agent", icon: "▧", label: "Agent 模式" },
+  { id: "standard", icon: "＋", label: "普通模式" },
+  { id: "canvas", icon: "⌗", label: "无限画布" },
+  { id: "remake", icon: "▣", label: "视频重制" },
+];
+
+function HomeRail({ activeModule, onSelect }: { activeModule: HomeModule; onSelect: (module: HomeModule) => void }) {
+  return <aside className="home-rail" aria-label="工作台主导航">
+    <button type="button" className="home-rail-brand" aria-label="返回创作首页" onClick={() => onSelect("projects")}>T</button>
+    <nav className="home-rail-nav">
+      {HOME_NAV_ITEMS.map((item) => <button type="button" className={activeModule === item.id ? "home-rail-item active" : "home-rail-item"} aria-current={activeModule === item.id ? "page" : undefined} key={item.id} onClick={() => onSelect(item.id)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}
+    </nav>
+    <div className="home-rail-bottom"><span className="home-rail-credit">✦ 100.0</span><span className="home-rail-avatar" aria-label="当前用户">AI</span></div>
+  </aside>;
+}
+
+function HomeModuleWorkspace({ module, projects, assets, onOpenProjectAssets, onNotice }: {
+  module: Exclude<HomeModule, "projects">;
+  projects: Project[];
+  assets: Asset[];
+  onOpenProjectAssets: (projectId: string) => void;
+  onNotice: (message: string) => void;
+}) {
+  const meta = {
+    assets: { title: "资产库", description: "按项目集中管理角色、场景和道具，进入原项目后继续生成与审核。" },
+    "public-assets": { title: "公共资产", description: "浏览可复用的创作素材，收藏常用资产并查看使用说明。" },
+    prompts: { title: "提示词", description: "沉淀可复用的剧本与视觉提示词，让团队保持统一的创作表达。" },
+    account: { title: "账号管理", description: "维护个人资料、工作区偏好和创作通知。" },
+    organization: { title: "组织管理", description: "查看组织成员与项目分工，通过内联表单邀请新成员。" },
+    roles: { title: "角色权限", description: "按角色配置项目、资产、生成和导出权限。" },
+    usage: { title: "费用消耗", description: "查看积分消耗趋势、项目明细并导出使用记录。" },
+  }[module];
+  return <section className="home-module-page" aria-labelledby="home-module-title">
+    <header className="home-module-header">
+      <span>统一创作工作台 / {meta.title}</span>
+      <h1 id="home-module-title">{meta.title}</h1>
+      <p>{meta.description}</p>
+    </header>
+    {module === "assets" && <ProjectAssetLibrary projects={projects} assets={assets} onOpenProjectAssets={onOpenProjectAssets} />}
+    {module === "public-assets" && <PublicAssetLibrary onNotice={onNotice} />}
+    {module === "prompts" && <PromptLibrary onNotice={onNotice} />}
+    {module === "account" && <AccountSettings onNotice={onNotice} />}
+    {module === "organization" && <OrganizationSettings onNotice={onNotice} />}
+    {module === "roles" && <RolePermissions onNotice={onNotice} />}
+    {module === "usage" && <UsageDashboard onNotice={onNotice} />}
+  </section>;
+}
+
+function ModuleEmpty({ title, description }: { title: string; description: string }) {
+  return <div className="module-empty"><span>⌁</span><b>{title}</b><p>{description}</p></div>;
+}
+
+function ProjectAssetLibrary({ projects, assets, onOpenProjectAssets }: { projects: Project[]; assets: Asset[]; onOpenProjectAssets: (projectId: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("all");
+  const filtered = projects.filter((project) => {
+    const matchesMode = mode === "all" || project.remake_mode === mode;
+    const haystack = `${project.title} ${project.target_country} ${project.target_language} ${project.source_language ?? ""}`.toLowerCase();
+    return matchesMode && haystack.includes(query.trim().toLowerCase());
+  });
+  const modeName = (project: Project) => project.remake_mode === "cg_3d" ? "3DCG 风格" : project.remake_mode === "asset_replacement" ? "角色 / 场景替换" : "海外本土化";
+  return <div className="home-module-stack">
+    <div className="module-stat-grid">
+      <article><span>可管理项目</span><b>{projects.length}</b><small>选择项目进入对应资产库</small></article>
+      <article><span>当前已加载资产</span><b>{assets.length}</b><small>角色 {assets.filter((asset) => asset.asset_type === "角色").length} · 场景 {assets.filter((asset) => asset.asset_type === "场景").length} · 道具 {assets.filter((asset) => asset.asset_type === "道具").length}</small></article>
+      <article><span>已确认资产</span><b>{assets.filter((asset) => asset.status === "已确认").length}</b><small>进入项目可继续生成、分组与送审</small></article>
+    </div>
+    <section className="module-panel">
+      <div className="module-toolbar">
+        <div className="module-segmented" role="group" aria-label="项目类型筛选">
+          {[["all", "全部"], ["overseas_localization", "海外本土化"], ["asset_replacement", "资产替换"], ["cg_3d", "3DCG"]].map(([value, label]) => <button type="button" className={mode === value ? "active" : ""} aria-pressed={mode === value} key={value} onClick={() => setMode(value)}>{label}</button>)}
+        </div>
+        <label className="module-search"><span>⌕</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目名称或地区" aria-label="搜索资产项目" /></label>
+      </div>
+      <div className="module-table asset-project-table">
+        <div className="module-table-head"><span>项目</span><span>创作类型</span><span>目标地区</span><span>项目状态</span><span>操作</span></div>
+        {filtered.map((project) => <div className="module-table-row" key={project.id}>
+          <span className="module-primary-cell"><i>{project.title.slice(0, 1)}</i><b>{project.title}</b></span>
+          <span>{modeName(project)}</span>
+          <span>{project.remake_mode === "overseas_localization" ? `${project.target_country} · ${project.target_language}` : project.source_language || "待确认"}</span>
+          <span><em className="module-status">{project.status}</em></span>
+          <button type="button" className="row-link" onClick={() => onOpenProjectAssets(project.id)}>管理资产 →</button>
+        </div>)}
+      </div>
+      {!filtered.length && <ModuleEmpty title="没有匹配的项目" description="调整搜索词或项目类型，即可继续查找对应资产。" />}
+    </section>
+  </div>;
+}
+
+const PUBLIC_ASSET_ENTRIES = [
+  { id: "public-role-1", type: "角色", name: "都市女性 · 职业装", icon: "人", description: "适用于都市、职场与情感短剧的成年女性角色参考。", usage: "建议用于人物设定、角色一致性与分镜引用。", tone: "violet" },
+  { id: "public-role-2", type: "角色", name: "都市男性 · 商务装", icon: "人", description: "适用于商务谈判、家庭冲突与都市剧情场景。", usage: "可搭配室内场景和正装道具使用。", tone: "blue" },
+  { id: "public-scene-1", type: "场景", name: "现代办公室 · 日景", icon: "景", description: "明亮通透的现代办公空间，适合对话与冲突镜头。", usage: "推荐搭配中景、近景和过肩镜头。", tone: "green" },
+  { id: "public-scene-2", type: "场景", name: "城市公寓 · 夜景", icon: "景", description: "暖色灯光与城市窗景，适合情感与独处段落。", usage: "适合夜景、室内对话与情绪特写。", tone: "amber" },
+  { id: "public-prop-1", type: "道具", name: "合同与签字笔", icon: "物", description: "合同签署、谈判与剧情转折常用桌面道具组合。", usage: "可用于桌面特写、签署动作和证据展示。", tone: "rose" },
+  { id: "public-prop-2", type: "道具", name: "手机聊天界面", icon: "物", description: "适合信息揭示、误会与远程沟通的屏幕素材。", usage: "使用时请避免真实个人信息与敏感数据。", tone: "slate" },
+];
+
+function PublicAssetLibrary({ onNotice }: { onNotice: (message: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [type, setType] = useState("全部");
+  const [saved, setSaved] = useState<Set<string>>(() => new Set());
+  const [selectedId, setSelectedId] = useState(PUBLIC_ASSET_ENTRIES[0].id);
+  const filtered = PUBLIC_ASSET_ENTRIES.filter((entry) => (type === "全部" || entry.type === type) && `${entry.name} ${entry.description}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const selected = PUBLIC_ASSET_ENTRIES.find((entry) => entry.id === selectedId) ?? PUBLIC_ASSET_ENTRIES[0];
+  const toggleSaved = (id: string, name: string) => {
+    setSaved((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      onNotice(next.has(id) ? `已收藏「${name}」` : `已取消收藏「${name}」`);
+      return next;
+    });
+  };
+  return <div className="home-module-stack">
+    <section className="module-panel">
+      <div className="module-toolbar">
+        <div className="module-segmented" role="group" aria-label="公共资产类型">{["全部", "角色", "场景", "道具"].map((item) => <button type="button" className={type === item ? "active" : ""} aria-pressed={type === item} key={item} onClick={() => setType(item)}>{item}</button>)}</div>
+        <label className="module-search"><span>⌕</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索公共资产" aria-label="搜索公共资产" /></label>
+      </div>
+      <div className="public-asset-grid">
+        {filtered.map((entry) => <article className={selected.id === entry.id ? "public-asset-card selected" : "public-asset-card"} key={entry.id}>
+          <button type="button" className={`public-asset-visual ${entry.tone}`} onClick={() => setSelectedId(entry.id)} aria-label={`查看${entry.name}详情`}><span>{entry.icon}</span><i>{entry.type}</i></button>
+          <div className="public-asset-copy"><span>{entry.type}</span><h3>{entry.name}</h3><p>{entry.description}</p></div>
+          <div className="public-asset-actions"><button type="button" className="ghost" onClick={() => setSelectedId(entry.id)}>查看详情</button><button type="button" className={saved.has(entry.id) ? "primary saved" : "primary"} onClick={() => toggleSaved(entry.id, entry.name)}>{saved.has(entry.id) ? "✓ 已收藏" : "☆ 收藏"}</button></div>
+        </article>)}
+      </div>
+      {!filtered.length && <ModuleEmpty title="没有找到公共资产" description="尝试清空搜索词或切换资产类型。" />}
+    </section>
+    <section className="module-detail-band"><div><span>当前选中</span><h2>{selected.name}</h2><p>{selected.description}</p></div><div><span>使用建议</span><p>{selected.usage}</p></div></section>
+  </div>;
+}
+
+type PromptTemplate = { id: string; name: string; category: string; description: string; content: string };
+const INITIAL_PROMPT_TEMPLATES: PromptTemplate[] = [
+  { id: "character", name: "角色一致性设定", category: "视觉生成", description: "固定角色外观、服装、镜头与负面约束。", content: "请保持同一角色在所有镜头中的面部特征、发型、服装与年龄一致。使用真人写实风格，自然微表情，柔和光线，避免角色漂移、肢体异常与画面文字。" },
+  { id: "storyboard", name: "短剧分镜拆解", category: "剧本创作", description: "把剧情段落拆为可拍摄的逐镜描述。", content: "请将以下剧情拆分为连续分镜。每个镜头包含时间范围、景别、机位、人物动作、表情、台词、场景与道具，保持事件因果和人物视线连续，不新增剧情。" },
+  { id: "emotion", name: "情绪节奏强化", category: "剧本创作", description: "强化冲突、反应与情绪递进，不改变剧情。", content: "在不改变人物关系和剧情结果的前提下，优化这一段落的情绪节奏。明确触发事件、人物反应、情绪升级与段落收束，避免重复台词。" },
+  { id: "localization", name: "海外本土化改写", category: "视频重制", description: "本地化称谓、场景与表达，保留核心冲突。", content: "请将内容自然本地化为目标地区表达。调整人名、称谓、货币、店铺和生活习惯，保留原始剧情、人物动机与镜头时长，不添加文化刻板印象。" },
+];
+
+function PromptLibrary({ onNotice }: { onNotice: (message: string) => void }) {
+  const [templates, setTemplates] = useState(INITIAL_PROMPT_TEMPLATES);
+  const [selectedId, setSelectedId] = useState(INITIAL_PROMPT_TEMPLATES[0].id);
+  const [draft, setDraft] = useState(INITIAL_PROMPT_TEMPLATES[0].content);
+  const [query, setQuery] = useState("");
+  const selected = templates.find((template) => template.id === selectedId) ?? templates[0];
+  const filtered = templates.filter((template) => `${template.name} ${template.category} ${template.description}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const selectTemplate = (template: PromptTemplate) => { setSelectedId(template.id); setDraft(template.content); };
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(draft); onNotice(`已复制「${selected.name}」`); }
+    catch { onNotice("浏览器未允许复制，请在编辑区手动选择文本复制"); }
+  };
+  return <div className="prompt-workspace">
+    <aside className="prompt-list-panel">
+      <label className="module-search"><span>⌕</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提示词" aria-label="搜索提示词" /></label>
+      <div className="prompt-template-list">{filtered.map((template) => <button type="button" className={selected.id === template.id ? "active" : ""} key={template.id} onClick={() => selectTemplate(template)}><span>{template.category}</span><b>{template.name}</b><small>{template.description}</small></button>)}</div>
+    </aside>
+    <section className="prompt-editor-panel">
+      <div className="prompt-editor-head"><div><span>{selected.category}</span><h2>{selected.name}</h2><p>{selected.description}</p></div><button type="button" className="ghost" onClick={() => void copy()}>复制提示词</button></div>
+      <label className="prompt-editor-field">提示词内容<textarea value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} /></label>
+      <div className="prompt-editor-footer"><span>{draft.length} 字 · 修改后可保存为当前工作区模板</span><button type="button" className="primary" onClick={() => { setTemplates((current) => current.map((template) => template.id === selected.id ? { ...template, content: draft } : template)); onNotice(`已保存「${selected.name}」`); }}>保存修改</button></div>
+    </section>
+  </div>;
+}
+
+function AccountSettings({ onNotice }: { onNotice: (message: string) => void }) {
+  const [profile, setProfile] = useState({ name: "AI 创作者", email: "creator@example.com", organization: "短剧创作组", language: "简体中文" });
+  const [preferences, setPreferences] = useState({ task: true, review: true, weekly: false });
+  return <form className="settings-layout" onSubmit={(event) => { event.preventDefault(); onNotice("账号设置已保存到当前工作区"); }}>
+    <section className="module-panel settings-section"><div className="settings-section-title"><span>个人资料</span><p>用于工作区展示与成员协作。</p></div><div className="account-profile"><span className="account-avatar">{profile.name.slice(0, 1)}</span><div><b>{profile.name}</b><small>{profile.organization}</small></div></div><div className="settings-form-grid">
+      <label>显示名称<input value={profile.name} required onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label>
+      <label>联系邮箱<input type="email" value={profile.email} required onChange={(event) => setProfile({ ...profile, email: event.target.value })} /></label>
+      <label>默认组织<input value={profile.organization} onChange={(event) => setProfile({ ...profile, organization: event.target.value })} /></label>
+      <label>界面语言<select value={profile.language} onChange={(event) => setProfile({ ...profile, language: event.target.value })}><option>简体中文</option><option>English</option></select></label>
+    </div></section>
+    <section className="module-panel settings-section"><div className="settings-section-title"><span>创作通知</span><p>选择需要在工作区中接收的提醒。</p></div><div className="preference-list">
+      {[["task", "任务完成提醒", "分析、图片或视频生成完成后提醒"], ["review", "资产审核提醒", "资产送审或审核状态变化时提醒"], ["weekly", "每周使用摘要", "每周整理项目与积分使用概况"]].map(([key, label, description]) => <label className="preference-row" key={key}><span><b>{label}</b><small>{description}</small></span><input type="checkbox" checked={preferences[key as keyof typeof preferences]} onChange={(event) => setPreferences({ ...preferences, [key]: event.target.checked })} /></label>)}
+    </div></section>
+    <div className="settings-save-bar"><span>设置仅影响当前工作区展示，不修改项目内容。</span><button type="submit" className="primary">保存设置</button></div>
+  </form>;
+}
+
+type OrganizationMember = { id: number; name: string; email: string; role: string; status: string };
+function OrganizationSettings({ onNotice }: { onNotice: (message: string) => void }) {
+  const [members, setMembers] = useState<OrganizationMember[]>([
+    { id: 1, name: "AI 创作者", email: "creator@example.com", role: "管理员", status: "当前账号" },
+    { id: 2, name: "林墨", email: "linmo@example.com", role: "编剧", status: "已加入" },
+    { id: 3, name: "周遥", email: "zhouyao@example.com", role: "设计师", status: "已加入" },
+  ]);
+  const [inviting, setInviting] = useState(false);
+  const [invite, setInvite] = useState({ name: "", email: "", role: "编剧" });
+  const submitInvite = (event: FormEvent) => {
+    event.preventDefault();
+    setMembers((current) => [...current, { id: Date.now(), ...invite, status: "待确认" }]);
+    onNotice(`已添加成员「${invite.name}」，当前状态为待确认`);
+    setInvite({ name: "", email: "", role: "编剧" });
+    setInviting(false);
+  };
+  return <div className="home-module-stack">
+    <section className="organization-overview module-panel"><div className="organization-mark">短</div><div><span>当前组织</span><h2>短剧创作组</h2><p>统一协作项目、资产与角色权限。</p></div><dl><div><dt>成员</dt><dd>{members.length}</dd></div><div><dt>待确认</dt><dd>{members.filter((member) => member.status === "待确认").length}</dd></div></dl><button type="button" className="primary" onClick={() => setInviting((value) => !value)}>{inviting ? "收起邀请" : "＋ 邀请成员"}</button></section>
+    {inviting && <form className="module-panel inline-invite-form" onSubmit={submitInvite}><label>成员姓名<input required value={invite.name} onChange={(event) => setInvite({ ...invite, name: event.target.value })} placeholder="输入姓名" /></label><label>联系邮箱<input required type="email" value={invite.email} onChange={(event) => setInvite({ ...invite, email: event.target.value })} placeholder="name@example.com" /></label><label>分配角色<select value={invite.role} onChange={(event) => setInvite({ ...invite, role: event.target.value })}><option>编剧</option><option>设计师</option><option>审阅者</option><option>管理员</option></select></label><button type="submit" className="primary">添加到组织</button></form>}
+    <section className="module-panel"><div className="module-panel-heading"><div><h2>组织成员</h2><p>成员添加后可在当前列表中查看角色与状态。</p></div><span>共 {members.length} 人</span></div><div className="module-table member-table"><div className="module-table-head"><span>成员</span><span>邮箱</span><span>角色</span><span>状态</span></div>{members.map((member) => <div className="module-table-row" key={member.id}><span className="module-primary-cell"><i>{member.name.slice(0, 1)}</i><b>{member.name}</b></span><span>{member.email}</span><span>{member.role}</span><span><em className={member.status === "待确认" ? "module-status pending" : "module-status"}>{member.status}</em></span></div>)}</div></section>
+  </div>;
+}
+
+const PERMISSION_ITEMS = ["查看项目", "编辑剧本", "管理资产", "生成视频", "导出成片", "管理成员"];
+const INITIAL_ROLE_PERMISSIONS: Record<string, string[]> = {
+  管理员: [...PERMISSION_ITEMS],
+  编剧: ["查看项目", "编辑剧本", "管理资产"],
+  设计师: ["查看项目", "管理资产", "生成视频"],
+  审阅者: ["查看项目"],
+};
+function RolePermissions({ onNotice }: { onNotice: (message: string) => void }) {
+  const [selectedRole, setSelectedRole] = useState("管理员");
+  const [rolePermissions, setRolePermissions] = useState(INITIAL_ROLE_PERMISSIONS);
+  const toggle = (permission: string) => setRolePermissions((current) => ({ ...current, [selectedRole]: current[selectedRole].includes(permission) ? current[selectedRole].filter((item) => item !== permission) : [...current[selectedRole], permission] }));
+  return <div className="permission-workspace">
+    <aside className="module-panel role-list"><div className="module-panel-heading"><div><h2>角色</h2><p>选择角色后配置权限。</p></div></div>{Object.keys(rolePermissions).map((role) => <button type="button" className={selectedRole === role ? "active" : ""} key={role} onClick={() => setSelectedRole(role)}><span>{role.slice(0, 1)}</span><div><b>{role}</b><small>{rolePermissions[role].length} 项权限</small></div><i>→</i></button>)}</aside>
+    <section className="module-panel permission-panel"><div className="module-panel-heading"><div><span className="home-module-kicker">权限配置</span><h2>{selectedRole}</h2><p>权限更改会作用于当前角色下的所有成员。</p></div><span>{rolePermissions[selectedRole].length} / {PERMISSION_ITEMS.length}</span></div><div className="permission-list">{PERMISSION_ITEMS.map((permission) => <label key={permission}><span><b>{permission}</b><small>{{ 查看项目: "浏览项目列表与项目详情", 编辑剧本: "修改剧本、分镜与提示词内容", 管理资产: "新建、编辑、分组与删除项目资产", 生成视频: "提交图片和视频生成任务", 导出成片: "导出视频片段与完整成片", 管理成员: "邀请成员并调整组织角色" }[permission]}</small></span><input type="checkbox" checked={rolePermissions[selectedRole].includes(permission)} onChange={() => toggle(permission)} /></label>)}</div><div className="settings-save-bar"><span>当前修改仅用于工作区权限配置预览。</span><button type="button" className="primary" onClick={() => onNotice(`已保存「${selectedRole}」的 ${rolePermissions[selectedRole].length} 项权限`)}>保存权限</button></div></section>
+  </div>;
+}
+
+const USAGE_PERIODS = {
+  week: { label: "近 7 天", total: 3280, tasks: 46, average: 71, trend: [36, 58, 44, 72, 62, 86, 68], details: [["11-12", "六年后再遇首富前男友", "视频生成", 680], ["11-11", "都市爱情故事", "资产生图", 240], ["11-10", "六年后再遇首富前男友", "整剧分析", 460], ["11-09", "城市重逢", "视频合成", 320]] },
+  month: { label: "近 30 天", total: 12680, tasks: 173, average: 73, trend: [42, 54, 70, 48, 78, 92, 64, 82, 74, 96], details: [["11-12", "六年后再遇首富前男友", "视频生成", 680], ["11-08", "都市爱情故事", "整剧分析", 460], ["11-03", "城市重逢", "资产生图", 320], ["10-29", "海外本土化项目", "视频生成", 890]] },
+  quarter: { label: "近 90 天", total: 38420, tasks: 508, average: 76, trend: [32, 46, 58, 52, 68, 72, 84, 76, 88, 94, 82, 90], details: [["11-12", "六年后再遇首富前男友", "视频生成", 680], ["10-18", "都市爱情故事", "整剧分析", 460], ["09-26", "城市重逢", "视频合成", 720], ["09-08", "海外本土化项目", "资产生图", 390]] },
+};
+type UsagePeriod = keyof typeof USAGE_PERIODS;
+function UsageDashboard({ onNotice }: { onNotice: (message: string) => void }) {
+  const [period, setPeriod] = useState<UsagePeriod>("week");
+  const data = USAGE_PERIODS[period];
+  const exportCsv = () => {
+    const csv = "\ufeff" + [["日期", "项目", "任务类型", "消耗积分"], ...data.details].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `费用消耗-${data.label}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    onNotice(`已导出${data.label}费用明细`);
+  };
+  return <div className="home-module-stack">
+    <div className="module-toolbar usage-toolbar"><div className="module-segmented" role="group" aria-label="费用统计周期">{(Object.keys(USAGE_PERIODS) as UsagePeriod[]).map((key) => <button type="button" className={period === key ? "active" : ""} aria-pressed={period === key} key={key} onClick={() => setPeriod(key)}>{USAGE_PERIODS[key].label}</button>)}</div><button type="button" className="ghost" onClick={exportCsv}>↓ 导出明细</button></div>
+    <div className="module-stat-grid"><article><span>总消耗积分</span><b>{data.total.toLocaleString()}</b><small>{data.label}</small></article><article><span>完成任务</span><b>{data.tasks}</b><small>分析、生图、视频与合成</small></article><article><span>单任务平均消耗</span><b>{data.average}</b><small>单位：积分</small></article></div>
+    <section className="module-panel usage-chart-panel"><div className="module-panel-heading"><div><h2>消耗趋势</h2><p>按所选周期展示每日积分消耗变化。</p></div><span>峰值 {Math.max(...data.trend) * 10} 积分</span></div><div className="usage-chart" role="img" aria-label={`${data.label}积分消耗趋势`}>{data.trend.map((value, index) => <div key={`${period}-${index}`}><i style={{ height: `${value}%` }} /><span>{index + 1}</span></div>)}</div></section>
+    <section className="module-panel"><div className="module-panel-heading"><div><h2>消耗明细</h2><p>展示当前周期内的代表性任务记录。</p></div></div><div className="module-table usage-table"><div className="module-table-head"><span>日期</span><span>项目</span><span>任务类型</span><span>消耗积分</span></div>{data.details.map(([date, project, task, points]) => <div className="module-table-row" key={`${date}-${project}-${task}`}><span>{date}</span><span>{project}</span><span>{task}</span><span className="usage-points">− {points}</span></div>)}</div></section>
+  </div>;
+}
+
+function AgentCreation({ onNotice }: { onNotice: (message: string) => void }) {
+  const [brief, setBrief] = useState("");
+  const [plan, setPlan] = useState<string[]>([]);
+  const examples = ["创作一部都市重逢题材短剧", "把小说片段整理为分镜创作方案", "为海外本土化项目制定制作清单"];
+  const generatePlan = () => {
+    if (!brief.trim()) return;
+    setPlan(["明确题材、受众与核心冲突", "整理人物关系和故事阶段", "拆分剧集节奏与关键场景", "建立角色、场景与道具资产", "进入分镜创作并检查连续性"]);
+    onNotice("已根据当前需求整理创作方案");
+  };
+  return <div className="creation-workspace agent-creation"><div className="creation-main"><span className="creation-eyebrow">AGENT 创作助手</span><h2>从一个想法开始，整理完整创作路径</h2><p>输入题材、故事或制作目标，先把需求整理为可执行的创作步骤。</p><textarea value={brief} onChange={(event) => setBrief(event.target.value)} placeholder="例如：创作一部 24 集的都市情感短剧，核心是久别重逢与身份差异……" /><div className="creation-example-list">{examples.map((example) => <button type="button" key={example} onClick={() => setBrief(example)}>{example}</button>)}</div><button type="button" className="primary creation-submit" disabled={!brief.trim()} onClick={generatePlan}>整理创作方案 →</button></div><aside className="creation-plan"><span>创作方案</span>{plan.length ? <ol>{plan.map((item, index) => <li key={item}><i>{index + 1}</i><b>{item}</b></li>)}</ol> : <ModuleEmpty title="等待创作需求" description="输入需求并点击整理后，步骤会固定展示在这里。" />}</aside></div>;
+}
+
+type StandardDraft = { id: number; title: string; genre: string; episodes: number; synopsis: string };
+function StandardCreation({ onNotice }: { onNotice: (message: string) => void }) {
+  const [drafts, setDrafts] = useState<StandardDraft[]>(() => {
+    try { return JSON.parse(localStorage.getItem("video-remake-standard-drafts") ?? "[]") as StandardDraft[]; }
+    catch { return []; }
+  });
+  const [draft, setDraft] = useState({ title: "", genre: "都市情感", episodes: 24, synopsis: "" });
+  const saveDraft = (event: FormEvent) => {
+    event.preventDefault();
+    const next = [{ ...draft, id: Date.now() }, ...drafts].slice(0, 6);
+    setDrafts(next);
+    localStorage.setItem("video-remake-standard-drafts", JSON.stringify(next));
+    onNotice(`「${draft.title}」草稿已保存到当前浏览器`);
+    setDraft({ title: "", genre: "都市情感", episodes: 24, synopsis: "" });
+  };
+  return <div className="creation-workspace standard-creation"><form className="creation-main" onSubmit={saveDraft}><span className="creation-eyebrow">普通创作</span><h2>建立剧本草稿</h2><p>先记录项目基础信息，后续再进入剧本与分镜制作。</p><div className="creation-form-grid"><label>剧本名称<input required value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="输入剧本或项目名称" /></label><label>题材类型<select value={draft.genre} onChange={(event) => setDraft({ ...draft, genre: event.target.value })}><option>都市情感</option><option>家庭伦理</option><option>悬疑反转</option><option>古装成长</option></select></label><label>计划集数<input type="number" min={1} max={200} value={draft.episodes} onChange={(event) => setDraft({ ...draft, episodes: Number(event.target.value) })} /></label></div><label className="creation-synopsis">故事梗概<textarea value={draft.synopsis} onChange={(event) => setDraft({ ...draft, synopsis: event.target.value })} placeholder="记录故事背景、主要人物和核心冲突……" /></label><button type="submit" className="primary creation-submit">保存创作草稿</button></form><aside className="creation-plan"><span>浏览器草稿</span>{drafts.length ? <div className="standard-draft-list">{drafts.map((item) => <button type="button" key={item.id} onClick={() => setDraft({ title: item.title, genre: item.genre, episodes: item.episodes, synopsis: item.synopsis })}><b>{item.title}</b><small>{item.genre} · {item.episodes} 集</small><p>{item.synopsis || "尚未填写故事梗概"}</p></button>)}</div> : <ModuleEmpty title="还没有草稿" description="保存后会显示在这里，点击草稿可重新载入编辑。" />}</aside></div>;
+}
+
+type CanvasNode = { id: number; type: string; title: string; content: string };
+const INITIAL_CANVAS_NODES: CanvasNode[] = [
+  { id: 1, type: "创意", title: "核心创意", content: "记录故事的一句话概念" },
+  { id: 2, type: "人物", title: "人物关系", content: "整理主角、对手与关系变化" },
+  { id: 3, type: "剧情", title: "关键转折", content: "放置推动剧情的重要事件" },
+  { id: 4, type: "分镜", title: "视觉方向", content: "沉淀场景、镜头与画面风格" },
+];
+function CanvasCreation() {
+  const [nodes, setNodes] = useState(INITIAL_CANVAS_NODES);
+  const [selectedId, setSelectedId] = useState(1);
+  const selected = nodes.find((node) => node.id === selectedId) ?? nodes[0];
+  const updateSelected = (patch: Partial<CanvasNode>) => setNodes((current) => current.map((node) => node.id === selected.id ? { ...node, ...patch } : node));
+  const addNode = () => {
+    const id = Date.now();
+    setNodes((current) => [...current, { id, type: "笔记", title: `创作节点 ${current.length + 1}`, content: "点击右侧编辑节点内容" }]);
+    setSelectedId(id);
+  };
+  return <div className="creation-workspace canvas-creation"><div className="canvas-board-wrap"><div className="canvas-toolbar"><div><span className="creation-eyebrow">无限画布</span><h2>把创意、人物与分镜放在同一张创作地图</h2></div><div><button type="button" className="ghost" onClick={() => { setNodes(INITIAL_CANVAS_NODES); setSelectedId(1); }}>整理画布</button><button type="button" className="primary" onClick={addNode}>＋ 添加节点</button></div></div><div className="canvas-board">{nodes.map((node, index) => <button type="button" className={selected.id === node.id ? "canvas-node selected" : "canvas-node"} key={node.id} onClick={() => setSelectedId(node.id)}><span>{String(index + 1).padStart(2, "0")} · {node.type}</span><b>{node.title}</b><p>{node.content}</p><i>点击查看与编辑</i></button>)}</div></div><aside className="canvas-inspector"><span>节点设置</span><label>节点类型<select value={selected.type} onChange={(event) => updateSelected({ type: event.target.value })}><option>创意</option><option>人物</option><option>剧情</option><option>分镜</option><option>笔记</option></select></label><label>节点标题<input value={selected.title} onChange={(event) => updateSelected({ title: event.target.value })} /></label><label>节点内容<textarea value={selected.content} onChange={(event) => updateSelected({ content: event.target.value })} /></label><small>节点采用稳定网格排列，不会在切换或编辑时漂移。</small></aside></div>;
+}
+
+function CreationModeWorkspace({ mode, onNotice }: { mode: Exclude<CreationMode, "remake">; onNotice: (message: string) => void }) {
+  if (mode === "agent") return <AgentCreation onNotice={onNotice} />;
+  if (mode === "standard") return <StandardCreation onNotice={onNotice} />;
+  return <CanvasCreation />;
+}
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -1070,6 +1390,8 @@ export function App() {
   const [generations, setGenerations] = useState<VideoGeneration[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [screen, setScreen] = useState<Screen>("home");
+  const [homeModule, setHomeModule] = useState<HomeModule>("projects");
+  const [creationMode, setCreationMode] = useState<CreationMode>("remake");
   const [assetSidebarCollapsed, setAssetSidebarCollapsed] = useState(false);
   const [previewPanelCollapsed, setPreviewPanelCollapsed] = useState(false);
   const [initialWorkbenchPaneWidths] = useState(getInitialWorkbenchPaneWidths);
@@ -1099,6 +1421,7 @@ export function App() {
   const [videoDuration, setVideoDuration] = useState(4);
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
   const [shotMenu, setShotMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [assetCardMenu, setAssetCardMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [deletingStoryboard, setDeletingStoryboard] = useState<Storyboard | null>(null);
   const [voiceEditor, setVoiceEditor] = useState<VoiceEditorState | null>(null);
   const [voiceUploading, setVoiceUploading] = useState(false);
@@ -2765,25 +3088,6 @@ export function App() {
     updateWorkbenchPaneWidth(pane, current + sign * step * (pane === "assets" ? 1 : -1));
   }
 
-  async function bindStoryboardCustomGroup(group: CustomAssetGroup) {
-    if (!selectedStoryboard) return;
-    const memberKeys = new Set(group.members.map((member) => member.assetKey));
-    const groupAssets = assets.filter((asset) => memberKeys.has(mainAssetKey(asset)) && assetAppearsInSelectedEpisode(asset));
-    if (!groupAssets.length) {
-      setMessage("当前剧集没有该资产组成员");
-      return;
-    }
-    const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
-    const referencedIds = new Set(currentReferences.map((item) => resolveUniqueAssetReference(item, storyboardScopeAssets)?.id).filter(Boolean));
-    const additions = groupAssets.filter((asset) => !referencedIds.has(asset.id)).map((asset) => asset.variable || assetDisplayVariable(asset));
-    if (!additions.length) {
-      setMessage("该资产组已在当前分镜中调用");
-      return;
-    }
-    if (!await saveStoryboardReferenceOverrides(selectedStoryboard, [...currentReferences, ...additions])) return;
-    setMessage(`已整组调用「${group.name}」中的 ${groupAssets.length} 个资产`);
-  }
-
   async function toggleStoryboardAsset(asset: Asset) {
     if (!selectedStoryboard) return;
     const currentReferences = getLatestStoryboardReferenceTokens(selectedStoryboard);
@@ -3217,6 +3521,28 @@ export function App() {
     };
   }, [shotMenu]);
   useEffect(() => {
+    if (!assetCardMenu) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".asset-card-menu") && !target?.closest(".asset-card-menu-trigger")) setAssetCardMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAssetCardMenu(null);
+    };
+    const closeOnScroll = () => setAssetCardMenu(null);
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [assetCardMenu]);
+  useEffect(() => {
+    setAssetCardMenu(null);
+  }, [storyboardAssetTab, storyboardAssetLayout, storyboardAssetSearch, storyboardAssetGroupId]);
+  useEffect(() => {
     if (!message || messageIsError) return;
     const timer = window.setTimeout(() => setMessage(""), 4200);
     return () => window.clearTimeout(timer);
@@ -3224,11 +3550,13 @@ export function App() {
 
   return (
     <>
+      {screen === "home" && <HomeRail activeModule={homeModule} onSelect={(module) => { setHomeModule(module); window.scrollTo({ top: 0, behavior: "smooth" }); }} />}
       <header className="app-top">
         <div className="project">
           <button className="back-btn" onClick={() => {
             // 资产生成（详情/分组）页点返回 → 先回资产列表，而不是直接退出项目
             if (screen === "assets" && assetView !== "overview") { setAssetView("overview"); return; }
+            setHomeModule("projects");
             setScreen("home");
           }}>‹</button>
           <div className="home-brand">视频重制工坊</div>
@@ -3261,7 +3589,7 @@ export function App() {
             ["segments", "▦", "分镜"],
             ["compare", "⌁", "视频"],
           ].map(([id, icon, label]) => (
-            <button className={activeStep() === id ? "step active" : "step"} key={id} onClick={() => setScreen(id as StepScreen)}>
+            <button className={activeStep() === id ? "step active" : "step"} key={id} onClick={() => { if (id === "home") setHomeModule("projects"); setScreen(id as StepScreen); }}>
               <span>{icon}</span>{label}
             </button>
           ))}
@@ -3280,17 +3608,23 @@ export function App() {
       {message && message !== "准备就绪" && !modal && <div className={messageIsError ? "global-message error" : "global-message"} role={messageIsError ? "alert" : "status"} aria-live="polite"><span>{message}</span><button type="button" aria-label="关闭提示" onClick={() => setMessage("")}>×</button></div>}
       <main>
         <section className={screen === "home" ? "screen active home-screen" : "screen home-screen"} id="home">
-          <div className="upload-card">
+          {homeModule === "projects" ? <>
+          <div className="home-hero"><h1>翻开剧本，创作<span>精品短剧</span></h1></div>
+          <div className={`upload-card creation-mode-${creationMode}`}>
+            <div className="creation-mode-tabs" role="tablist" aria-label="创作模式">
+              {CREATION_MODES.map((mode) => <button type="button" role="tab" aria-selected={creationMode === mode.id} className={creationMode === mode.id ? "active" : ""} key={mode.id} onClick={() => setCreationMode(mode.id)}>{mode.icon} {mode.label}</button>)}
+            </div>
+            {creationMode === "remake" ? <>
             <div className="upload-heading">上传本地视频</div>
 
             {!selectedSource && (
               <section className="source-empty">
                 <div className="drop-icon">▣</div>
                 <b>上传本地视频</b>
-                <span>可上传整部短剧文件夹，也可先上传单个视频。确认素材后再开始上传。</span>
+                <span>支持整部短剧文件夹或单个视频，确认素材后开始上传。</span>
                 <div className="empty-actions">
-                  <button className="primary" disabled={busy} onClick={() => folderInputRef.current?.click()}>上传文件夹</button>
-                  <button className="ghost" disabled={busy} onClick={() => fileInputRef.current?.click()}>上传单个视频</button>
+                  <button className="primary" disabled={busy} onClick={() => folderInputRef.current?.click()}>＋ 视频 / 文件夹</button>
+                  <button className="ghost" disabled={busy} onClick={() => fileInputRef.current?.click()}>↗ 上传单个视频</button>
                 </div>
               </section>
             )}
@@ -3333,9 +3667,10 @@ export function App() {
               handleLocalFiles(event.target.files, "folder");
               event.currentTarget.value = "";
             }} />
+            </> : <CreationModeWorkspace mode={creationMode} onNotice={setMessage} />}
           </div>
 
-          <section className="project-library">
+          {creationMode === "remake" && <section className="project-library">
             <div className="library-head">
               <div><h2>项目管理</h2><span>过往重绘项目</span></div>
               <div className="library-actions"><button className="ghost" onClick={createProject}>新建项目</button><button className="ghost" onClick={() => currentProject && selectProject(currentProject.id)}>刷新当前项目</button></div>
@@ -3360,7 +3695,8 @@ export function App() {
             </div>
             {!projectsLoading && !projectsError && !pagedProjects.length && <p className="project-empty">{projects.length ? "没有匹配的项目，请调整搜索词。" : "还没有项目，创建项目或上传视频开始制作。"}</p>}
             {!projectsError && searchedProjects.length > projectPageSize && <div className="list-pagination"><button className="ghost" disabled={projectPage === 0} onClick={() => setProjectPage((page) => Math.max(0, page - 1))}>上一页</button><span>{projectPage + 1} / {Math.ceil(searchedProjects.length / projectPageSize)}</span><button className="ghost" disabled={(projectPage + 1) * projectPageSize >= searchedProjects.length} onClick={() => setProjectPage((page) => page + 1)}>下一页</button></div>}
-          </section>
+          </section>}
+          </> : <HomeModuleWorkspace module={homeModule} projects={projects} assets={assets} onNotice={setMessage} onOpenProjectAssets={(projectId) => { void selectProject(projectId).then(() => { setAssetView("overview"); setScreen("assets"); }); }} />}
         </section>
 
         <section className={screen === "source" ? "screen active page-screen" : "screen page-screen"} id="source">
@@ -3424,7 +3760,7 @@ export function App() {
             </section>
           )}
           <div className="footer-actions">
-            <button className="ghost" onClick={() => setScreen("home")}>返回</button>
+            <button className="ghost" onClick={() => { setHomeModule("projects"); setScreen("home"); }}>返回</button>
           </div>
         </section>
 
@@ -3835,23 +4171,6 @@ export function App() {
             </div>
           )}
 
-          {assetDeleteTarget && (
-            <div className="asset-group-modal-backdrop" role="presentation">
-              <div className="asset-group-modal asset-delete-modal" role="dialog" aria-modal="true" aria-label="确认删除资产">
-                <h3>确认删除 {assetDeleteTarget.labels.length} 个资产？</h3>
-                <p>删除后资产记录与生成图版本会从项目中移除，引用这些资产的分镜将被标记为待更新。此操作不可撤销。</p>
-                <ul className="asset-delete-list">
-                  {assetDeleteTarget.labels.slice(0, 8).map((label) => <li key={label}>{label}</li>)}
-                  {assetDeleteTarget.labels.length > 8 && <li>…等共 {assetDeleteTarget.labels.length} 项</li>}
-                </ul>
-                <div className="asset-group-modal-actions">
-                  <button className="ghost" onClick={() => setAssetDeleteTarget(null)} disabled={busy}>取消</button>
-                  <button className="asset-danger solid" onClick={() => void confirmBatchDelete()} disabled={busy}>确认删除</button>
-                </div>
-              </div>
-            </div>
-          )}
-
         </section>
 
         <section ref={workbenchRef} style={workbenchStyle} className={`screen workbench${screen === "segments" ? " active" : ""}${assetSidebarCollapsed ? " assets-collapsed" : ""}${previewPanelCollapsed ? " preview-collapsed" : ""}`} id="segments">
@@ -3879,12 +4198,6 @@ export function App() {
                   </select>
                 )}
               </div>
-              {(storyboardAssetTab === "角色" || storyboardAssetTab === "场景" || storyboardAssetTab === "道具") && storyboardAssetGroupId !== "all" && storyboardAssetGroupId !== "ungrouped" && customGroupById.get(storyboardAssetGroupId) && (
-                <button className="primary small storyboard-family-bind" disabled={!selectedStoryboard || busy} onClick={() => {
-                  const group = customGroupById.get(storyboardAssetGroupId);
-                  if (group) void bindStoryboardCustomGroup(group);
-                }}>整组调用（{customGroupById.get(storyboardAssetGroupId)?.members.length ?? 0}）</button>
-              )}
               <div className="storyboard-asset-view-controls"><span>资产库</span><div><button className={storyboardAssetLayout === "list" ? "active" : ""} aria-pressed={storyboardAssetLayout === "list"} onClick={() => setStoryboardAssetLayout("list")}>列表</button><button className={storyboardAssetLayout === "grid" ? "active" : ""} aria-pressed={storyboardAssetLayout === "grid"} onClick={() => setStoryboardAssetLayout("grid")}>网格</button></div></div>
             </div>
             <div className={`storyboard-asset-list ${storyboardAssetLayout}`} role="tabpanel" aria-label={`${storyboardAssetTab}资产`}>
@@ -3920,9 +4233,35 @@ export function App() {
                   {storyboardFilteredAssets.map((asset) => {
                     const thumbUrl = selectedAssetImageUrl(asset) || originalAssetImageUrl(asset);
                     const isReferenced = selectedStoryboardAssets.some((item) => item.id === asset.id);
-                    return <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} key={asset.id} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
-                      {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
-                    </button>;
+                    return <div className="storyboard-asset-cell" key={asset.id}>
+                      <button className={isReferenced ? "storyboard-asset-row referenced" : "storyboard-asset-row"} disabled={!selectedStoryboard} onClick={() => toggleStoryboardAsset(asset)}>
+                        {thumbUrl ? <img src={thumbUrl} alt="" /> : <span className="asset-empty-thumb">—</span>}<span><b>{assetDisplayName(asset)}</b><small>{assetDisplayVariable(asset)}</small></span><i>{isReferenced ? "已引用" : "引用"}</i>
+                      </button>
+                      <button
+                        type="button"
+                        className="asset-card-menu-trigger"
+                        aria-label={`${assetDisplayName(asset)} 更多操作`}
+                        aria-haspopup="menu"
+                        aria-expanded={assetCardMenu?.id === asset.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (assetCardMenu?.id === asset.id) {
+                            setAssetCardMenu(null);
+                            return;
+                          }
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          setAssetCardMenu({ id: asset.id, x: rect.right, y: rect.bottom + 6 });
+                        }}
+                      >⋯</button>
+                      {assetCardMenu?.id === asset.id && (
+                        <div className="asset-card-menu" role="menu" style={{ left: assetCardMenu.x, top: assetCardMenu.y }} onClick={(event) => event.stopPropagation()}>
+                          <button type="button" role="menuitem" className="danger" disabled={busy} onClick={() => {
+                            setAssetCardMenu(null);
+                            setAssetDeleteTarget({ ids: [asset.id], labels: [assetDisplayName(asset)] });
+                          }}>删除资产</button>
+                        </div>
+                      )}
+                    </div>;
                   })}
                   {!storyboardFilteredAssets.length && <p className="empty-shot-assets">{assets.some((asset) => asset.asset_type === storyboardAssetTab) ? "没有匹配的资产。" : `当前项目还没有${storyboardAssetTab}资产。`}</p>}
                 </>
@@ -4188,6 +4527,23 @@ export function App() {
           <VideoComposition projectId={currentProject?.id} episodeId={selectedEpisodeId ?? undefined} episodeIndex={selectedEpisode?.episode_index} comparisonItems={videoComparisonItems} active={screen === "compare"} onMessage={setMessage} />
         </section>
       </main>
+
+      {assetDeleteTarget && (
+        <div className="asset-group-modal-backdrop" role="presentation">
+          <div className="asset-group-modal asset-delete-modal" role="dialog" aria-modal="true" aria-label="确认删除资产">
+            <h3>确认删除 {assetDeleteTarget.labels.length} 个资产？</h3>
+            <p>删除后资产记录与生成图版本会从项目中移除，引用这些资产的分镜将被标记为待更新。此操作不可撤销。</p>
+            <ul className="asset-delete-list">
+              {assetDeleteTarget.labels.slice(0, 8).map((label) => <li key={label}>{label}</li>)}
+              {assetDeleteTarget.labels.length > 8 && <li>…等共 {assetDeleteTarget.labels.length} 项</li>}
+            </ul>
+            <div className="asset-group-modal-actions">
+              <button className="ghost" onClick={() => setAssetDeleteTarget(null)} disabled={busy}>取消</button>
+              <button className="asset-danger solid" onClick={() => void confirmBatchDelete()} disabled={busy}>确认删除</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {framePicker && (
         <div className="asset-group-modal-backdrop" role="presentation" onClick={() => setFramePicker(null)}>
