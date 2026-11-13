@@ -1366,6 +1366,12 @@ export function App() {
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectsError, setProjectsError] = useState("");
   const [projectSearch, setProjectSearch] = useState("");
+  const [projectGroupFilter, setProjectGroupFilter] = useState("all");
+  const [projectTypeFilter, setProjectTypeFilter] = useState("all");
+  const [projectLanguageFilter, setProjectLanguageFilter] = useState("all");
+  const [projectProgressFilter, setProjectProgressFilter] = useState("all");
+  const [projectBatchMode, setProjectBatchMode] = useState(false);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
   const [projectPage, setProjectPage] = useState(0);
   const [sourcePage, setSourcePage] = useState(0);
   const [assetStatusFilter, setAssetStatusFilter] = useState<"all" | "pending" | "confirmed">("all");
@@ -1522,7 +1528,17 @@ export function App() {
     [assetGroups, assetTab, assetStatusFilter, customAssetGroups, normalizedAssetQuery]
   );
   const allVisibleAssetsSelected = filteredGroups.length > 0 && filteredGroups.every((group) => selectedAssetGroupKeys.has(group.key));
-  const searchedProjects = useMemo(() => projects.filter((project) => (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase().includes(projectSearch.trim().toLowerCase())), [projects, projectSearch]);
+  const projectGroupOptions = useMemo(() => [...new Set(projects.map((project) => project.target_country).filter(Boolean))], [projects]);
+  const projectLanguageOptions = useMemo(() => [...new Set(projects.map((project) => project.target_language).filter(Boolean))], [projects]);
+  const searchedProjects = useMemo(() => projects.filter((project) => {
+    const text = (project.title + " " + project.target_country + " " + project.target_language + " " + project.source_language).toLowerCase();
+    if (!text.includes(projectSearch.trim().toLowerCase())) return false;
+    if (projectGroupFilter !== "all" && project.target_country !== projectGroupFilter) return false;
+    if (projectTypeFilter !== "all" && project.remake_mode !== projectTypeFilter) return false;
+    if (projectLanguageFilter !== "all" && project.target_language !== projectLanguageFilter) return false;
+    if (projectProgressFilter !== "all" && projectProgressOf(project) !== projectProgressFilter) return false;
+    return true;
+  }), [projects, projectSearch, projectGroupFilter, projectTypeFilter, projectLanguageFilter, projectProgressFilter]);
   const projectPageSize = 8;
   const pagedProjects = searchedProjects.slice(projectPage * projectPageSize, (projectPage + 1) * projectPageSize);
   const roleCount = assets.filter((asset) => asset.asset_type === "角色").length;
@@ -1691,6 +1707,47 @@ export function App() {
     } finally {
       setProjectsLoading(false);
     }
+  }
+
+  function projectProgressOf(project: Project) {
+    if (project.status.includes("失败")) return "failed";
+    if (project.status === "已创建") return "not-started";
+    if (project.status === "视频片段已生成") return "done";
+    return "in-progress";
+  }
+
+  function toggleProjectSelection(projectId: string) {
+    setSelectedProjectIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  }
+
+  function toggleProjectBatchMode() {
+    setProjectBatchMode((active) => {
+      if (active) setSelectedProjectIds(new Set());
+      return !active;
+    });
+  }
+
+  function exportSelectedProjects() {
+    const rows = projects.filter((project) => selectedProjectIds.has(project.id));
+    if (!rows.length) return;
+    const modeLabel = (mode?: string) => mode === "cg_3d" ? "3DCG" : mode === "asset_replacement" ? "资产替换" : "海外本土化";
+    const header = ["项目ID", "项目名称", "制作进度", "内容类型", "目标地区", "目标语言", "源语言"];
+    const csv = [header, ...rows.map((project) => [project.id, project.title, project.status, modeLabel(project.remake_mode), project.target_country, project.target_language, project.source_language || ""])]
+      .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `项目清单-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setMessage(`已导出 ${rows.length} 个项目的清单 CSV`);
   }
 
   async function selectProject(projectId: string) {
@@ -3675,14 +3732,52 @@ export function App() {
               <div><h2>项目管理</h2><span>过往重绘项目</span></div>
               <div className="library-actions"><button className="ghost" onClick={createProject}>新建项目</button><button className="ghost" onClick={() => currentProject && selectProject(currentProject.id)}>刷新当前项目</button></div>
             </div>
-            <div className="project-library-tools"><input type="search" value={projectSearch} placeholder="搜索项目名称或地区" onChange={(event) => { setProjectSearch(event.target.value); setProjectPage(0); }} aria-label="搜索项目" /><span>{projectsLoading ? "正在加载项目…" : projectsError ? "项目列表加载失败" : "共 " + searchedProjects.length + " 个项目"}</span></div>
+            <div className="project-library-tools">
+              <input type="search" value={projectSearch} placeholder="输入项目名/制作组" onChange={(event) => { setProjectSearch(event.target.value); setProjectPage(0); }} aria-label="搜索项目" />
+              <select value={projectGroupFilter} onChange={(event) => { setProjectGroupFilter(event.target.value); setProjectPage(0); }} aria-label="项目组筛选">
+                <option value="all">项目组</option>
+                {projectGroupOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+              <select value={projectTypeFilter} onChange={(event) => { setProjectTypeFilter(event.target.value); setProjectPage(0); }} aria-label="内容类型筛选">
+                <option value="all">内容类型</option>
+                <option value="overseas_localization">海外本土化</option>
+                <option value="asset_replacement">资产替换</option>
+                <option value="cg_3d">3DCG</option>
+              </select>
+              <select value={projectLanguageFilter} onChange={(event) => { setProjectLanguageFilter(event.target.value); setProjectPage(0); }} aria-label="目标语言筛选">
+                <option value="all">目标语言</option>
+                {projectLanguageOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+              <select value={projectProgressFilter} onChange={(event) => { setProjectProgressFilter(event.target.value); setProjectPage(0); }} aria-label="制作进度筛选">
+                <option value="all">制作进度</option>
+                <option value="not-started">未开始</option>
+                <option value="in-progress">制作中</option>
+                <option value="done">已完成</option>
+                <option value="failed">失败</option>
+              </select>
+              <span>{projectsLoading ? "正在加载项目…" : projectsError ? "项目列表加载失败" : "共 " + searchedProjects.length + " 个项目"}</span>
+              <button type="button" className={projectBatchMode ? "project-batch-btn active" : "project-batch-btn"} onClick={toggleProjectBatchMode}>{projectBatchMode ? "退出批量" : "批量操作"}</button>
+            </div>
+            {projectBatchMode && <div className="project-batch-bar">
+              <label><input type="checkbox" checked={searchedProjects.length > 0 && searchedProjects.every((project) => selectedProjectIds.has(project.id))} onChange={(event) => setSelectedProjectIds(event.target.checked ? new Set(searchedProjects.map((project) => project.id)) : new Set())} /> 全选</label>
+              <span className="project-batch-count">已选 {selectedProjectIds.size} 项</span>
+              <div className="project-batch-actions">
+                <button type="button" className="ghost small" disabled={!selectedProjectIds.size} onClick={exportSelectedProjects}>导出所选 CSV</button>
+                <button type="button" className="ghost small" onClick={toggleProjectBatchMode}>取消</button>
+              </div>
+            </div>}
             {projectsError && <div className="project-load-error" role="alert"><span>项目列表暂时不可用：{projectsError}</span><button className="ghost" onClick={() => void loadProjects().catch(() => undefined)}>重试</button></div>}
             <div className="project-grid">
               {pagedProjects.map((project, index) => (
-                <article className="project-card" key={project.id} onClick={() => {
+                <article className={`project-card${selectedProjectIds.has(project.id) ? " selected" : ""}`} key={project.id} onClick={() => {
+                  if (projectBatchMode) {
+                    toggleProjectSelection(project.id);
+                    return;
+                  }
                   void selectProject(project.id);
                   setScreen("source");
                 }}>
+                  {projectBatchMode && <span className="project-check" role="checkbox" aria-checked={selectedProjectIds.has(project.id)} aria-label={`选择项目 ${project.title}`}>{selectedProjectIds.has(project.id) ? "✓" : ""}</span>}
                   <div className={`project-cover cover-${["a", "b", "c", "d"][index % 4]}`}></div>
                   <div className="project-info">
                   <span>{project.status}</span>
@@ -3693,7 +3788,7 @@ export function App() {
                 </article>
               ))}
             </div>
-            {!projectsLoading && !projectsError && !pagedProjects.length && <p className="project-empty">{projects.length ? "没有匹配的项目，请调整搜索词。" : "还没有项目，创建项目或上传视频开始制作。"}</p>}
+            {!projectsLoading && !projectsError && !pagedProjects.length && <p className="project-empty">{projects.length ? "没有匹配的项目，请调整搜索或筛选条件。" : "还没有项目，创建项目或上传视频开始制作。"}</p>}
             {!projectsError && searchedProjects.length > projectPageSize && <div className="list-pagination"><button className="ghost" disabled={projectPage === 0} onClick={() => setProjectPage((page) => Math.max(0, page - 1))}>上一页</button><span>{projectPage + 1} / {Math.ceil(searchedProjects.length / projectPageSize)}</span><button className="ghost" disabled={(projectPage + 1) * projectPageSize >= searchedProjects.length} onClick={() => setProjectPage((page) => page + 1)}>下一页</button></div>}
           </section>}
           </> : <HomeModuleWorkspace module={homeModule} projects={projects} assets={assets} onNotice={setMessage} onOpenProjectAssets={(projectId) => { void selectProject(projectId).then(() => { setAssetView("overview"); setScreen("assets"); }); }} />}
