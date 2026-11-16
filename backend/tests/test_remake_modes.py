@@ -969,7 +969,7 @@ def test_extraction_uses_separate_source_and_target_model_messages(client: TestC
         "脸部特征": target_structure["脸部特征"],
         "发型": target_structure["发型"],
     }
-    localized_result = {"localizedAssets": [{
+    localized_result = {"resolvedTargetEra": "19世纪美国西部背景", "targetSetting": "美国西部；19世纪；依原剧情关系采用文化等价礼俗。", "localizedAssets": [{
         "assetVariable": "{{role-source-1}}",
         "localizedProfile": {
             "localizedName": "Alex", "localizedChildName": "Wedding attire",
@@ -1044,7 +1044,8 @@ def test_extraction_uses_separate_source_and_target_model_messages(client: TestC
         assert "sourceSnapshot" in correction_input["assets"][0]
         assert stored["localizedProfile"]["structuredDescription"]["脸部特征"]["目标族裔背景"] == "墨西哥裔美国男性"
         assert stored["localizedProfile"]["status"] == "complete"
-        assert stored["localizedProfile"]["structuredDescription"]["基础设定"]["国家 / 时代 / 朝代"] == "现代"
+        assert stored["localizedProfile"]["structuredDescription"]["基础设定"]["国家 / 时代 / 朝代"] == "19世纪美国西部背景"
+        assert stored["localizedProfile"]["targetContext"]["requestedTargetEra"] == ""
         assert stored["localizedProfile"]["structuredDescription"]["身材体态"] == source_structure["身材体态"]
         assert stored["localizedProfile"]["structuredDescription"]["服装"] == source_structure["服装"]
         assert "东亚裔" not in stored["localizedProfile"]["coreDescription"]
@@ -2008,7 +2009,7 @@ def test_unknown_shoes_are_nonblocking_only_when_explicit_hem_and_both_visibilit
     asset = {"asset_type": "角色", "variable": "{{BRIDE}}", "name": "新娘", "localized_name": "Bride", "payload": {"sourceSnapshot": source_snapshot, "当前子资产": {}}}
     target = {"基础设定": {"族裔外貌": "白人美国女性"}, "脸部特征": valid_role_visual_structure()["脸部特征"], "发型": valid_role_visual_structure()["发型"]}
     target["脸部特征"]["目标族裔背景"] = "白人美国女性"
-    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Bride", "structuredDescription": target}}]}, "美国", "当代", "英语")
+    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Bride", "structuredDescription": target}}]}, "美国", "", "英语", resolved_target_era="当代")
     profile = asset["payload"]["localizedProfile"]
     assert not errors
     assert profile["status"] == "complete"
@@ -2029,6 +2030,62 @@ def test_unknown_shoes_are_nonblocking_only_when_explicit_hem_and_both_visibilit
     assert any("服装.摆与地面关系" in path for path in missing)
 
 
+def test_target_cultural_patch_keeps_source_facts_and_maps_auto_era():
+    source_structure = valid_role_visual_structure()
+    source_structure["基础设定"]["国家 / 时代 / 朝代"] = "现代中国"
+    source_structure["基础设定"]["身份定位"] = "王爷"
+    source_structure["服装"]["外层"] = "现代蓝色西装"
+    source_snapshot = {"sourceStructuredDescription": json.loads(json.dumps(source_structure, ensure_ascii=False)), "coreDescription": "源身份王爷，穿现代蓝色西装。"}
+    asset = {"asset_type": "角色", "variable": "{{ROLE_1}}", "name": "源角色", "localized_name": "旧名", "payload": {"sourceSnapshot": source_snapshot, "当前子资产": {}}}
+    role = valid_role_visual_structure()
+    patch = {
+        "基础设定": {"族裔外貌": "目标地区多族裔背景", "目标身份表达": "当地具有同等权力关系的领主"},
+        "脸部特征": {**role["脸部特征"], "目标族裔背景": "目标地区多族裔背景"},
+        "发型": role["发型"],
+        "服装": {"场合": "19世纪正式宴会", "外层": "当地历史风格长礼服"},
+    }
+    errors = main.merge_localized_profiles(
+        [asset], {"localizedAssets": [{"assetVariable": "{{ROLE_1}}", "localizedProfile": {"localizedName": "Target name", "structuredDescription": patch}}]},
+        "美国", "", "英语", resolved_target_era="19世纪美国历史背景", target_setting="美国；19世纪；历史宴会礼俗",
+    )
+    assert errors == []
+    profile = asset["payload"]["localizedProfile"]
+    assert asset["payload"]["sourceSnapshot"] == source_snapshot
+    assert profile["structuredDescription"]["基础设定"]["身份定位"] == "当地具有同等权力关系的领主"
+    assert profile["structuredDescription"]["基础设定"]["目标身份表达"] == "当地具有同等权力关系的领主"
+    assert profile["structuredDescription"]["服装"]["外层"] == "当地历史风格长礼服"
+    assert profile["targetContext"]["resolvedTargetEra"] == "19世纪美国历史背景"
+    assert profile["targetContext"]["targetSetting"] == "美国；19世纪；历史宴会礼俗"
+    assert "王爷" not in profile["coreDescription"]
+    image_prompt = main.build_project_asset_prompt("角色", asset["payload"], {
+        "remake_mode": "overseas_localization", "target_country": "美国", "target_language": "英语",
+        "storyboard_visual_style": "live_action",
+    })
+    assert "身份定位：当地具有同等权力关系的领主" in image_prompt
+    assert "当地历史风格长礼服" in image_prompt
+    assert "身份定位：王爷" not in image_prompt
+    assert asset["payload"]["sourceSnapshot"]["sourceStructuredDescription"]["基础设定"]["身份定位"] == "王爷"
+
+
+def test_auto_era_does_not_inherit_source_era_and_legacy_profile_stays_readable():
+    project = {"target_country": "美国", "target_language": "英语"}
+    payload = {"sourceSnapshot": {"sourceStructuredDescription": {"基础设定": {"国家 / 时代 / 朝代": "现代中国"}}}}
+    assert main.resolve_target_era(project, [payload]) == ""
+    assert main.resolve_target_era({**project, "target_era": "维多利亚时代"}, [payload]) == "维多利亚时代"
+    legacy_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    legacy_payload["localizedProfile"] = {
+        "status": "complete", "localizedName": "Legacy target", "coreDescription": "Legacy target appearance.",
+        "structuredDescription": {"基础设定": {"国家 / 时代 / 朝代": "维多利亚时代"}},
+        "targetContext": {
+            "targetCountry": "美国", "targetLanguage": "英语", "targetEra": "维多利亚时代",
+            "sourceHash": main.localized_profile_source_hash(legacy_payload),
+        },
+    }
+    assert main.localized_profile_context_matches(legacy_payload, project)
+    assert main.localized_profile_shared_background(legacy_payload["localizedProfile"], "美国")[0] == "维多利亚时代"
+    assert not main.localized_profile_context_matches(legacy_payload, {**project, "target_country": "加拿大"})
+
+
 def test_real_wuyuehong_long_skirt_hides_unknown_shoes_without_guessing_shoe_type():
     fixture = json.loads((Path(__file__).parent / "fixtures" / "wuyuehong_hidden_shoes_source_review.json").read_text(encoding="utf-8"))["evidence"]
     assert fixture["targetProfileStatus"] == "source_review"
@@ -2043,7 +2100,7 @@ def test_real_wuyuehong_long_skirt_hides_unknown_shoes_without_guessing_shoe_typ
     asset = {"asset_type": "角色", "variable": "{{BRIDE}}", "name": "吴月红", "localized_name": "Maya Carter", "payload": {"sourceSnapshot": source_snapshot, "当前子资产": {}}}
     target = {"基础设定": {"族裔外貌": "白人美国女性"}, "脸部特征": valid_role_visual_structure()["脸部特征"], "发型": valid_role_visual_structure()["发型"]}
     target["脸部特征"]["目标族裔背景"] = "白人美国女性"
-    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Maya Carter", "structuredDescription": target}}]}, "美国", "当代", "英语")
+    errors = main.merge_localized_profiles([asset], {"localizedAssets": [{"assetVariable": "{{BRIDE}}", "localizedProfile": {"localizedName": "Maya Carter", "structuredDescription": target}}]}, "美国", "", "英语", resolved_target_era="当代")
     profile = asset["payload"]["localizedProfile"]
     assert not errors
     assert profile["status"] == "complete"
@@ -2121,7 +2178,7 @@ def test_source_review_get_post_auto_draft_blocks_provider_but_manual_complete_p
     }
     main.merge_localized_profiles([asset], {"localizedAssets": [{
         "assetVariable": asset["variable"], "localizedProfile": {"localizedName": "Morgan Reed", "structuredDescription": target_patch},
-    }]}, "美国", "现代", "英语")
+    }]}, "美国", "", "英语", resolved_target_era="现代")
     with main.connect() as conn:
         episode_id = "episode-source-review"
         conn.execute("INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at) VALUES (?,?,?,?,?,?,?)", (episode_id, project["id"], 1, "source.mp4", "C:/test/source.mp4", "已上传", "2026-01-01T00:00:00Z"))
@@ -3118,9 +3175,19 @@ def _seed_storyboard_agent_input(project: dict, video_path: Path) -> tuple[str, 
             "INSERT INTO episodes (id,project_id,episode_index,filename,file_path,status,created_at,ark_file_id,ark_file_status) VALUES (?,?,?,?,?,?,?,?,?)",
             (episode_id, project["id"], 1, "source.mp4", str(video_path), "已上传并同步 Ark", "2026-01-01T00:00:00Z", "ark-storyboard-fixture", "active"),
         )
+        asset_payload = {"sourceSnapshot": {"name": "林浩", "coreDescription": "源角色"}}
+        asset_payload["localizedProfile"] = {
+            "status": "complete", "localizedName": "Lin Hao", "coreDescription": "目标角色",
+            "targetContext": {
+                "targetCountry": project.get("target_country", "美国"),
+                "targetLanguage": project.get("target_language", "英语"),
+                "targetEra": "时代沿用原片事实",
+                "sourceHash": main.localized_profile_source_hash(asset_payload),
+            },
+        }
         conn.execute(
             "INSERT INTO assets (id,project_id,episode_id,asset_type,name,localized_name,variable,status,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            ("asset_storyboard_agent", project["id"], episode_id, "角色", "林浩", "Lin Hao", "{{role_1}}", "已确认", "{}", "2026-01-01T00:00:00Z"),
+            ("asset_storyboard_agent", project["id"], episode_id, "角色", "林浩", "Lin Hao", "{{role_1}}", "已确认", json.dumps(asset_payload, ensure_ascii=False), "2026-01-01T00:00:00Z"),
         )
         conn.execute(
             "INSERT INTO tasks (id,project_id,episode_id,task_type,status,message,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -3822,8 +3889,8 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
         conn.commit()
     captured: list[dict] = []
     monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "video storyboard", "prompt_file": "test"})
-    def fake_call(_key, _agent, payload):
-        captured.append(payload)
+    def fake_call(_key, agent, payload):
+        captured.append({"payload": payload, "prompt": agent["prompt"]})
         return _valid_storyboard_model_output()
     monkeypatch.setattr(main, "call_agent_chat", fake_call)
     with main.connect() as conn:
@@ -3832,12 +3899,101 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
         conn.commit()
     assert task["status"] == "成功"
     assert captured, "应捕获到分镜请求上下文"
-    payload = captured[0]
+    payload = captured[0]["payload"]
     assert payload["目标国家"] == "美国"
     assert payload["目标语言"] == "英语"
     assert "按明确目标国家（美国）和目标语言（英语）适配分镜" in payload["模式路由强约束"]
     summary_names = [item["本地化资产名称"] for item in payload["资产摘要"]]
     assert "Lin Hao" in summary_names
+    assert payload["资产摘要"][0]["当前有效目标画像"]["coreDescription"] == "目标角色"
+    assert payload["资产摘要"][0]["当前有效目标画像"]["localizedChildName"] == ""
+    assert payload["资产摘要"][0]["当前有效目标画像"]["目标时代"] == "时代沿用原片事实"
+    assert "当前有效目标画像是资产外观唯一依据" in captured[0]["prompt"]
+
+
+def test_country_switch_stales_storyboards_and_filters_previous_target_name(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="country-switch-storyboard")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "country-switch.mp4")
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("stable_storyboard", project["id"], episode_id, "旧国分镜", "00:00:00-00:00:11", "old target", json.dumps({"分镜分析来源": {"来源": "fixture"}}, ensure_ascii=False), "已生成", "2026-01-01T00:00:00Z"),
+        )
+        original = conn.execute("SELECT id,variable FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+    changed = client.patch(f"/api/projects/{project['id']}", json={"targetCountry": "加拿大", "targetLanguage": "英语"})
+    assert changed.status_code == 200
+    with main.connect() as conn:
+        board = conn.execute("SELECT status FROM storyboards WHERE id='stable_storyboard'").fetchone()
+        current = conn.execute("SELECT id,variable FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+    assert board["status"] == "待更新"
+    assert tuple(current) == tuple(original)
+
+    captured: list[dict] = []
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "storyboard", "prompt_file": "test"})
+    def fake_call(_key, agent, payload):
+        captured.append({"payload": payload, "prompt": agent["prompt"]})
+        return _valid_storyboard_model_output()
+    monkeypatch.setattr(main, "call_agent_chat", fake_call)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        with pytest.raises(main.HTTPException) as stale_error:
+            main.run_storyboard_generation(conn, db_project, episode_id, force=True)
+        assert stale_error.value.status_code == 409
+        assert conn.execute("SELECT id FROM storyboards WHERE id='stable_storyboard'").fetchone() is not None
+        asset_row = conn.execute("SELECT id,payload_json FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+        legacy_payload = json.loads(asset_row["payload_json"])
+        legacy_payload["localizedProfile"].pop("targetContext", None)
+        conn.execute("UPDATE assets SET payload_json=? WHERE id=?", (json.dumps(legacy_payload, ensure_ascii=False), asset_row["id"]))
+        conn.commit()
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        task = main.run_storyboard_generation(conn, db_project, episode_id, force=True)
+    assert task["status"] == "成功", task["message"]
+    payload = captured[0]["payload"]
+    assert payload["资产摘要"][0]["本地化资产名称"] == "林浩"
+    assert payload["资产摘要"][0]["当前有效目标画像"] == {}
+    assert all(item.get("本地化资产名称") != "Lin Hao" for segment in payload["资产出现片段索引"] for item in segment.get("出现资产", []))
+
+
+def test_country_switch_during_storyboard_call_preserves_old_rows_and_rejects_stale_write(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = create_project(client, title="country-switch-during-storyboard")
+    episode_id, _ = _seed_storyboard_agent_input(project, tmp_path / "country-switch-during.mp4")
+    with main.connect() as conn:
+        conn.execute(
+            "INSERT INTO storyboards (id,project_id,episode_id,title,time_range,prompt,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("stable_inflight_storyboard", project["id"], episode_id, "旧国分镜", "00:00:00-00:00:11", "old target", json.dumps({"分镜分析来源": {"来源": "storyboardPromptGeneration", "analysisContextSignature": "old"}}, ensure_ascii=False), "已生成", "2026-01-01T00:00:00Z"),
+        )
+        before_project_status = conn.execute("SELECT status FROM projects WHERE id=?", (project["id"],)).fetchone()["status"]
+        before_asset = conn.execute("SELECT id,variable FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+
+    captured: list[dict] = []
+    def fake_call(_key, agent, payload):
+        response = client.patch(f"/api/projects/{project['id']}", json={"targetCountry": "加拿大", "targetLanguage": "英语"})
+        assert response.status_code == 200
+        captured.append({"payload": payload, "prompt": agent["prompt"]})
+        return _valid_storyboard_model_output()
+
+    monkeypatch.setattr(main, "prepare_agent", lambda _key: {"mode": "volcengine", "model_name": "provider-spy", "prompt": "storyboard", "prompt_file": "test"})
+    monkeypatch.setattr(main, "call_agent_chat", fake_call)
+    with main.connect() as conn:
+        db_project = main.get_project_or_404(conn, project["id"])
+        task = main.run_storyboard_generation(conn, db_project, episode_id, force=True)
+        conn.commit()
+
+    assert task["status"] == "失败"
+    assert task["result"]["分镜上下文已过期"] is True
+    assert "旧上下文结果未写入" in task["message"]
+    assert captured, "应先调用模型，然后在写入前发现目标国家已变化"
+    with main.connect() as conn:
+        boards = conn.execute("SELECT id,status,prompt FROM storyboards WHERE project_id=? AND episode_id=?", (project["id"], episode_id)).fetchall()
+        project_status = conn.execute("SELECT status FROM projects WHERE id=?", (project["id"],)).fetchone()["status"]
+        after_asset = conn.execute("SELECT id,variable FROM assets WHERE project_id=?", (project["id"],)).fetchone()
+    assert len(boards) == 1
+    assert boards[0]["id"] == "stable_inflight_storyboard"
+    assert boards[0]["status"] == "待更新"
+    assert boards[0]["prompt"] == "old target"
+    assert project_status == before_project_status
+    assert tuple(after_asset) == tuple(before_asset)
 
 
 def test_asset_groups_batch_membership_replaces_parent_style_and_preserves_assets(client: TestClient):

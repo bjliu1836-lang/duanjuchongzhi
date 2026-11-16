@@ -62,6 +62,7 @@ REMAKE_MODES = {"overseas_localization", "cg_3d", "asset_replacement"}
 ASSET_PROMPT_TEMPLATE_VERSION = "asset-prompt-v3-independent-visual"
 ASSET_SOURCE_SCHEMA_VERSION = "asset-source-snapshot-v2-canonical-reviewed"
 ASSET_LOCALIZATION_SCHEMA_VERSION = "asset-localized-profile-v2-source-bound"
+TARGET_CULTURAL_ADAPTATION_POLICY_VERSION = "target-cultural-adaptation-v1"
 ASSET_IMAGE_MODELS = {
     "doubao-seedream-5-0-260128",
     "doubao-seedream-4-5-251128",
@@ -2906,6 +2907,8 @@ def update_project(project_id: str, payload: ProjectUpdate) -> dict[str, Any]:
             style = "cg_3d"
         elif mode == "overseas_localization" and not payload.storyboardVisualStyle:
             style = "live_action"
+        country_changed = payload.targetCountry is not None and payload.targetCountry != project.get("target_country")
+        language_changed = payload.targetLanguage is not None and payload.targetLanguage != project.get("target_language")
         conn.execute(
             """UPDATE projects SET title=?, remake_mode=?, source_language=?, storyboard_visual_style=?, replace_characters=?, replace_scenes=?, target_country=?, target_language=?, updated_at=? WHERE id=?""",
             (payload.title.strip() if payload.title and payload.title.strip() else project["title"], mode, payload.sourceLanguage if payload.sourceLanguage is not None else project.get("source_language", ""), style,
@@ -2913,7 +2916,7 @@ def update_project(project_id: str, payload: ProjectUpdate) -> dict[str, Any]:
              int(payload.replaceScenes if payload.replaceScenes is not None else project.get("replace_scenes", 0)),
              payload.targetCountry or project["target_country"], payload.targetLanguage or project["target_language"], now_iso(), project_id),
         )
-        if (mode != project.get("remake_mode") or style != project.get("storyboard_visual_style")
+        if (country_changed or language_changed or mode != project.get("remake_mode") or style != project.get("storyboard_visual_style")
                 or int(payload.replaceCharacters if payload.replaceCharacters is not None else project.get("replace_characters", 0)) != int(project.get("replace_characters", 0))
                 or int(payload.replaceScenes if payload.replaceScenes is not None else project.get("replace_scenes", 0)) != int(project.get("replace_scenes", 0))):
             conn.execute("UPDATE storyboards SET status='待更新' WHERE project_id=?", (project_id,))
@@ -5948,11 +5951,12 @@ def localized_profile_source_hash(payload: dict[str, Any]) -> str:
 
 
 def localized_profile_target_context(payload: dict[str, Any], project: dict[str, Any]) -> dict[str, str]:
-    explicit_era = str(project.get("target_era") or "").strip()
+    requested_era = resolve_target_era(project, [payload])
     return {
         "targetCountry": str(project.get("target_country") or "").strip(),
-        "targetEra": explicit_era,
+        "requestedTargetEra": requested_era,
         "targetLanguage": str(project.get("target_language") or "").strip(),
+        "policyVersion": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
         "sourceHash": localized_profile_source_hash(payload),
     }
 
@@ -5966,8 +5970,21 @@ def localized_profile_context_matches(payload: dict[str, Any], project: dict[str
         and str(stored.get("targetCountry") or "") == expected["targetCountry"]
         and str(stored.get("targetLanguage") or "") == expected["targetLanguage"]
         and str(stored.get("sourceHash") or "") == expected["sourceHash"]
-        and (not expected["targetEra"] or str(stored.get("targetEra") or "") == expected["targetEra"])
+        and (
+            str(stored.get("requestedTargetEra") or "") == expected["requestedTargetEra"]
+            if "requestedTargetEra" in stored else
+            (not expected["requestedTargetEra"] or str(stored.get("targetEra") or "") == expected["requestedTargetEra"])
+        )
     )
+
+
+def localized_profile_shared_background(profile: dict[str, Any], country: str = "") -> tuple[str, str]:
+    context = profile.get("targetContext") if isinstance(profile.get("targetContext"), dict) else {}
+    structure = profile.get("structuredDescription") if isinstance(profile.get("structuredDescription"), dict) else {}
+    basics = structure.get("基础设定") if isinstance(structure.get("基础设定"), dict) else {}
+    era = str(context.get("resolvedTargetEra") or context.get("targetEra") or basics.get("国家 / 时代 / 朝代") or "目标国家历史等价背景").strip()
+    setting = str(context.get("targetSetting") or f"{country or context.get('targetCountry') or '目标国家'}；{era}；礼俗与身份称谓按剧情关系作文化等价适配").strip()
+    return era, setting
 
 
 def project_asset_profile_to_legacy(payload: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
@@ -6072,6 +6089,7 @@ def asset_localization_cache_key(source_assets: list[dict[str, Any]], project: d
         "project_id": str(project.get("id") or ""),
         "source_schema": ASSET_SOURCE_SCHEMA_VERSION,
         "localization_schema": ASSET_LOCALIZATION_SCHEMA_VERSION,
+        "target_cultural_adaptation_policy": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
         "source_assets": [
             {
                 "assetType": asset.get("asset_type", ""),
@@ -6122,18 +6140,34 @@ def sanitize_legacy_preservation_constraints(record: Any) -> dict[str, Any]:
 
 
 def resolve_target_era(project: dict[str, Any], assets: list[dict[str, Any]]) -> str:
+    # This is the shared request constraint, not per-asset target prose. Asset
+    # visual locks are sent as evidence to the batch localizer, which selects
+    # one common resolved era for every profile.
     explicit = str(project.get("target_era") or "").strip()
     if explicit:
         return explicit
-    contexts = [
-        str(asset.get("payload", {}).get("目标生成描述") or "")
-        + " " + str(asset.get("payload", {}).get("sourceSnapshot", {}).get("sourceStructuredDescription", {}).get("基础设定", {}).get("国家 / 时代 / 朝代") or "")
-        + " " + str(asset.get("payload", {}).get("sourceSnapshot", {}).get("coreDescription") or "")
-        for asset in assets if isinstance(asset.get("payload"), dict)
-    ]
-    combined = " ".join(contexts)
-    era_tokens = ("当代", "现代", "近现代", "民国", "清代", "明代", "宋代", "唐代", "古代", "中世纪", "维多利亚时代")
-    return next((token for token in era_tokens if token in combined), "时代沿用原片事实")
+    return ""
+
+
+def current_target_asset_name(asset: dict[str, Any], project: dict[str, Any]) -> str:
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
+    if profile.get("status") in {"complete", "source_review"} and localized_profile_context_matches(payload, project):
+        return str(profile.get("localizedName") or asset.get("localized_name") or asset.get("name") or "")
+    return explicit_user_localized_name(payload) or str(asset.get("name") or "")
+
+
+def stale_target_profile_asset_variables(assets: list[dict[str, Any]], project: dict[str, Any]) -> list[str]:
+    stale: list[str] = []
+    for asset in assets:
+        payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+        profile = payload.get("localizedProfile") if isinstance(payload.get("localizedProfile"), dict) else {}
+        context = profile.get("targetContext") if isinstance(profile.get("targetContext"), dict) else {}
+        if profile.get("status") not in {"complete", "source_review"} or not context:
+            continue
+        if not localized_profile_context_matches(payload, project):
+            stale.append(str(asset.get("display_variable") or asset.get("variable") or asset.get("name") or "目标资产"))
+    return stale
 
 
 def find_cached_asset_localization(conn: sqlite3.Connection, cache_key: str) -> dict[str, Any] | None:
@@ -6145,7 +6179,12 @@ def find_cached_asset_localization(conn: sqlite3.Connection, cache_key: str) -> 
             continue
         profiles = result.get("localizedProfileSnapshot")
         if result.get("资产本地化缓存键") == cache_key and isinstance(profiles, list):
-            return {"task_id": row["id"], "profiles": profiles}
+            return {
+                "task_id": row["id"],
+                "profiles": profiles,
+                "resolvedTargetEra": str(result.get("resolvedTargetEra") or ""),
+                "targetSetting": str(result.get("targetSetting") or ""),
+            }
     return None
 
 
@@ -6162,7 +6201,11 @@ def canonical_localized_role_descriptions(profile: dict[str, Any]) -> tuple[str,
         values = [f"{key}{fields[key]}" for key in keys if usable_visual_value(fields.get(key))]
         return f"{label}{'、'.join(values)}" if values else ""
 
-    identity = segment("", basics, ("性别", "视觉年龄", "族裔外貌", "身份定位"))
+    identity_basics = dict(basics)
+    target_identity = str(identity_basics.get("目标身份表达") or "").strip()
+    if target_identity:
+        identity_basics["身份定位"] = target_identity
+    identity = segment("", identity_basics, ("性别", "视觉年龄", "族裔外貌", "身份定位"))
     face_text = segment("脸部：", face, ("目标族裔背景", "皮肤肤色", "脸型", "骨相", "眉形", "眼形", "虹膜颜色", "鼻形", "唇形", "面部毛发", "妆感", "皮肤质感"))
     hair_text = segment("发型：", hair, ("发色", "长度", "发型名称", "刘海 / 分线", "发丝质感", "整体状态"))
     body_text = segment("体态：", body, ("头身比", "身高体感", "体型", "肩颈", "腰腿", "肌肉 / 线条", "整体体态"))
@@ -6185,7 +6228,7 @@ def build_localized_role_structure(
     target_era: str,
     legacy_preserved_design_constraints: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Inherit only approved non-cultural source facts, then install target face/hair patch."""
+    """Keep source facts immutable while allowing culturally equivalent target role/clothing fields."""
     errors: list[str] = []
     if not isinstance(target_patch, dict):
         return {}, ["localizedProfile.structuredDescription必须是目标字段patch对象"]
@@ -6220,11 +6263,17 @@ def build_localized_role_structure(
         localized["固定穿戴配饰"] = json.loads(json.dumps(fixed_accessories, ensure_ascii=False))
 
     allowed_patch_keys = {
-        "基础设定": {"族裔外貌"},
+        "基础设定": {"族裔外貌", "目标身份表达"},
         "脸部特征": {"目标族裔背景", "脸型", "骨相", "眉形", "眼形", "虹膜颜色", "鼻形", "唇形", "面部毛发", "妆感", "皮肤肤色", "皮肤质感", "气色状态", "静态微表情", "眼神气质"},
         "发型": {"发型名称", "发色", "长度", "刘海 / 分线", "发丝质感", "整体状态"},
+        "服装": set(allowed_clothing),
     }
+    target_accessories = target_patch.get("固定穿戴配饰")
+    if isinstance(target_accessories, list):
+        localized["固定穿戴配饰"] = target_accessories
     for section, fields in target_patch.items():
+        if section == "固定穿戴配饰" and isinstance(fields, list):
+            continue
         if section not in allowed_patch_keys or not isinstance(fields, dict):
             errors.append(f"目标patch包含禁止分区或错误类型：{section}")
             continue
@@ -6233,7 +6282,12 @@ def build_localized_role_structure(
                 errors.append(f"目标patch包含禁止字段：{section}.{key}")
                 continue
             localized[section][key] = value
-    localized["基础设定"]["国家 / 时代 / 朝代"] = target_era or "当代"
+    if isinstance(target_patch.get("固定穿戴配饰"), list):
+        localized["固定穿戴配饰"] = target_patch["固定穿戴配饰"]
+    target_identity = str(localized["基础设定"].get("目标身份表达") or "").strip()
+    if target_identity:
+        localized["基础设定"]["身份定位"] = target_identity
+    localized["基础设定"]["国家 / 时代 / 朝代"] = target_era or "目标国家历史等价背景"
 
     required = {
         "基础设定": {"族裔外貌"},
@@ -6284,6 +6338,8 @@ def merge_localized_profiles(
     target_era: str = "",
     target_language: str = "",
     cached_final_profiles: bool = False,
+    resolved_target_era: str = "",
+    target_setting: str = "",
 ) -> list[str]:
     # Localization responses must use the stable internal variable exactly.
     # Display names and source aliases are intentionally not accepted here.
@@ -6311,7 +6367,7 @@ def merge_localized_profiles(
         profile_errors: list[str] = []
         if asset.get("asset_type") == "角色" and not cached_final_profiles:
             localized_structure, profile_errors = build_localized_role_structure(
-                payload.get("sourceSnapshot", {}), localized_structure, target_country, target_era,
+                payload.get("sourceSnapshot", {}), localized_structure, target_country, resolved_target_era or target_era,
                 payload.get("legacyPreservedDesignConstraints"),
             )
         # 缓存回放的是已完成合并的最终结构（首次发布时已通过 patch 白名单校验），
@@ -6322,8 +6378,12 @@ def merge_localized_profiles(
             "status": "invalid" if profile_errors else "complete",
             "targetContext": {
                 "targetCountry": target_country,
-                "targetEra": target_era or "当代",
+                "requestedTargetEra": target_era,
+                "resolvedTargetEra": resolved_target_era or target_era or "目标国家历史等价背景",
+                "targetEra": resolved_target_era or target_era or "目标国家历史等价背景",
+                "targetSetting": target_setting or f"{target_country}；目标国家历史等价背景；礼俗与身份称谓按剧情关系作文化等价适配",
                 "targetLanguage": target_language,
+                "policyVersion": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
                 "sourceHash": localized_profile_source_hash(payload),
             },
             "localizedName": str(profile.get("localizedName") or explicit_user_localized_name(payload) or ""),
@@ -6343,7 +6403,7 @@ def merge_localized_profiles(
             profile = payload["localizedProfile"]
         payload["localizedProfile"] = profile
         errors.extend(f"{variable}: {error}" for error in profile_errors)
-        projected = project_asset_profile_to_legacy(payload, {"remake_mode": "overseas_localization", "target_country": target_country or "非中国目标", "target_era": target_era or "当代", "target_language": target_language})
+        projected = project_asset_profile_to_legacy(payload, {"remake_mode": "overseas_localization", "target_country": target_country or "非中国目标", "target_era": target_era, "target_language": target_language})
         payload.update({key: value for key, value in projected.items() if key != "当前子资产"})
         payload["当前子资产"] = projected.get("当前子资产", child)
         asset["localized_name"] = profile["localizedName"] or asset.get("name", "")
@@ -6366,8 +6426,12 @@ def merge_localized_profiles(
             "reviewReason": "群像资产不适用单人脸部画像；需按群像构图单独审核",
             "targetContext": {
                 "targetCountry": target_country,
-                "targetEra": target_era or "当代",
+                "requestedTargetEra": target_era,
+                "resolvedTargetEra": resolved_target_era or target_era or "目标国家历史等价背景",
+                "targetEra": resolved_target_era or target_era or "目标国家历史等价背景",
+                "targetSetting": target_setting or f"{target_country}；目标国家历史等价背景；礼俗与身份称谓按剧情关系作文化等价适配",
                 "targetLanguage": target_language,
+                "policyVersion": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
                 "sourceHash": localized_profile_source_hash(payload),
             },
             "localizedName": "",
@@ -6379,7 +6443,7 @@ def merge_localized_profiles(
             "childId": str(source.get("childId") or ""),
         }
         asset["localized_name"] = asset.get("name", "")
-        projected = project_asset_profile_to_legacy(payload, {"remake_mode": "overseas_localization", "target_country": target_country or "非中国目标", "target_era": target_era or "当代", "target_language": target_language})
+        projected = project_asset_profile_to_legacy(payload, {"remake_mode": "overseas_localization", "target_country": target_country or "非中国目标", "target_era": target_era, "target_language": target_language})
         payload.update({key: value for key, value in projected.items() if key != "当前子资产"})
         payload["当前子资产"] = projected.get("当前子资产", child)
         asset["payload"] = payload
@@ -6584,7 +6648,7 @@ def run_target_localization(
             "stage": "source_review", "cache_hit": False, "cache_key": "", "errors": incomplete_source_props,
             "profiles": [], "rawAttempts": [],
         }
-    target_era = resolve_target_era(project, assets)
+    requested_target_era = resolve_target_era(project, assets)
     cache_key = asset_localization_cache_key(assets, project, agent)
     cached = find_cached_asset_localization(conn, cache_key)
     base_assets = json.loads(json.dumps(assets, ensure_ascii=False))
@@ -6605,7 +6669,9 @@ def run_target_localization(
         })
     local_input = {
         "targetCountry": target_country,
-        "targetEra": target_era,
+        "targetEra": requested_target_era or "auto",
+        "targetSettingInstruction": "若targetEra=auto，选择目标国家历史中能承接源剧情关系、权力结构与因果的共同时代背景；不默认当代，不照搬源国时代。顶层返回resolvedTargetEra与targetSetting，所有资产共享。",
+        "targetCulturalAdaptationPolicyVersion": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
         "targetLanguage": project.get("target_language", ""),
         "assets": request_items,
     }
@@ -6613,23 +6679,43 @@ def run_target_localization(
     cache_repaired = False
     if cached:
         localized_assets = cached["profiles"]
+        resolved_target_era = cached.get("resolvedTargetEra") or requested_target_era
+        target_setting = cached.get("targetSetting") or ""
+        first_profile = localized_assets[0].get("localizedProfile", {}) if localized_assets and isinstance(localized_assets[0], dict) else {}
+        if not resolved_target_era:
+            resolved_target_era = localized_profile_shared_background(first_profile, target_country)[0]
+        if not target_setting:
+            target_setting = localized_profile_shared_background(first_profile, target_country)[1]
         attempts.append({"source": "cache", "raw": "", "localizedAssets": localized_assets})
     elif not request_items:
         localized_assets = []
+        resolved_target_era = requested_target_era
+        target_setting = ""
         attempts.append({"source": "group_pending", "raw": "", "localizedAssets": []})
     else:
         raw = call_compact_video_json(agent, local_input, ASSET_LOCALIZATION_COMPACT_PROMPT)
         audit_path = persist_asset_localization_raw("target-localization", raw, local_input, cache_key)
         parsed = parse_json_object(raw, {})
         localized_assets = parsed.get("localizedAssets") if isinstance(parsed.get("localizedAssets"), list) else []
+        resolved_target_era = requested_target_era or str(parsed.get("resolvedTargetEra") or "").strip()
+        target_setting = str(parsed.get("targetSetting") or "").strip()
+        if not resolved_target_era:
+            localized = localized_assets[0].get("localizedProfile") if localized_assets and isinstance(localized_assets[0], dict) else {}
+            era_structure = localized.get("structuredDescription") if isinstance(localized, dict) and isinstance(localized.get("structuredDescription"), dict) else {}
+            era_basics = era_structure.get("基础设定") if isinstance(era_structure.get("基础设定"), dict) else {}
+            resolved_target_era = str(era_basics.get("国家 / 时代 / 朝代") or "目标国家历史等价背景").strip()
+        if not target_setting:
+            target_setting = f"{target_country}；{resolved_target_era}；礼俗与身份称谓按剧情关系作文化等价适配"
         attempts.append({"source": "model", "raw": raw, "auditPath": audit_path, "localizedAssets": localized_assets})
 
     def validate_candidate(candidate: list[dict[str, Any]], *, from_cache: bool = False) -> list[str]:
         assets[:] = json.loads(json.dumps(base_assets, ensure_ascii=False))
-        candidate_errors = merge_localized_profiles(
-            assets, {"localizedAssets": candidate}, target_country, target_era,
+        candidate_errors: list[str] = []
+        candidate_errors.extend(merge_localized_profiles(
+            assets, {"localizedAssets": candidate}, target_country, requested_target_era,
             str(project.get("target_language") or ""), cached_final_profiles=from_cache,
-        )
+            resolved_target_era=resolved_target_era, target_setting=target_setting,
+        ))
         candidate_errors.extend(
             f"{asset.get('variable')}: {error}"
             for asset in assets if not is_group_portrait_asset(asset)
@@ -6662,13 +6748,19 @@ def run_target_localization(
             "correction": {
                 "validationErrors": errors,
                 "previousLocalizedAssets": localized_assets,
-                "instruction": "只根据同一sourceSnapshot修正目标本地化patch；不要重跑或补造原片事实，不得用源脸回填；只返回精确schema字段。",
+                "previousResolvedTargetEra": resolved_target_era,
+                "previousTargetSetting": target_setting,
+                "instruction": "只根据同一sourceSnapshot修正目标本地化patch；若auto时代/targetSetting缺失，补回一个共同选择；不要重跑或补造原片事实，不得用源脸回填；只返回精确schema字段。",
             },
         }
         correction_raw = call_compact_video_json(agent, correction_input, ASSET_LOCALIZATION_COMPACT_PROMPT)
         correction_audit_path = persist_asset_localization_raw("target-localization-correction", correction_raw, correction_input, cache_key)
         correction_parsed = parse_json_object(correction_raw, {})
         corrected_assets = correction_parsed.get("localizedAssets") if isinstance(correction_parsed.get("localizedAssets"), list) else []
+        if not requested_target_era and str(correction_parsed.get("resolvedTargetEra") or "").strip():
+            resolved_target_era = str(correction_parsed["resolvedTargetEra"]).strip()
+        if str(correction_parsed.get("targetSetting") or "").strip():
+            target_setting = str(correction_parsed["targetSetting"]).strip()
         attempts.append({"source": "targeted_correction", "raw": correction_raw, "auditPath": correction_audit_path, "localizedAssets": corrected_assets, "validationErrors": errors})
         # 纠偏返回的是"只含待修资产"的 patch，不能整体替换首次结果——
         # 否则只修了 1 个资产的纠偏会把其余已合格的画像全部丢弃。
@@ -6705,6 +6797,7 @@ def run_target_localization(
     return {
         "stage": "localized", "cache_hit": bool(cached), "cache_repaired": cache_repaired, "cache_key": cache_key,
         "source_task_id": cached["task_id"] if cached else "", "errors": errors,
+        "resolvedTargetEra": resolved_target_era, "targetSetting": target_setting,
         "profiles": profiles, "raw": attempts[0].get("raw", ""), "rawAttempts": attempts,
     }
 
@@ -7031,7 +7124,9 @@ def storyboard_analysis_context_signature(project: dict[str, Any], assets: list[
         "schemaVersion": "storyboard-analysis-context-v2",
         "mode": project.get("remake_mode", "overseas_localization"),
         "targetCountry": project.get("target_country", ""),
+        "targetEraRequest": resolve_target_era(project, []),
         "targetLanguage": project.get("target_language", ""),
+        "targetCulturalAdaptationPolicy": TARGET_CULTURAL_ADAPTATION_POLICY_VERSION,
         "sourceLanguage": project.get("source_language", ""),
         "visualStyle": project.get("storyboard_visual_style", "live_action"),
         "routedPrompt": routed_agent["prompt"],
@@ -7042,12 +7137,59 @@ def storyboard_analysis_context_signature(project: dict[str, Any], assets: list[
                 "name": asset.get("name", ""),
                 "localizedName": asset.get("localized_name", ""),
                 "profileSourceHash": localized_profile_source_hash(asset.get("payload", {}) if isinstance(asset.get("payload"), dict) else {}),
+                "targetContext": (
+                    asset.get("payload", {}).get("localizedProfile", {}).get("targetContext", {})
+                    if isinstance(asset.get("payload", {}).get("localizedProfile"), dict)
+                    and localized_profile_context_matches(asset.get("payload", {}), project)
+                    else {}
+                ),
+                "targetProfile": (
+                    asset.get("payload", {}).get("localizedProfile", {}).get("structuredDescription", {})
+                    if isinstance(asset.get("payload", {}).get("localizedProfile"), dict)
+                    and localized_profile_context_matches(asset.get("payload", {}), project)
+                    else {}
+                ),
+                "targetDescription": (
+                    {
+                        "localizedName": asset.get("payload", {}).get("localizedProfile", {}).get("localizedName", ""),
+                        "localizedChildName": asset.get("payload", {}).get("localizedProfile", {}).get("localizedChildName", ""),
+                        "coreDescription": asset.get("payload", {}).get("localizedProfile", {}).get("coreDescription", ""),
+                        "visualDescription": asset.get("payload", {}).get("localizedProfile", {}).get("visualDescription", ""),
+                    }
+                    if isinstance(asset.get("payload", {}).get("localizedProfile"), dict)
+                    and localized_profile_context_matches(asset.get("payload", {}), project)
+                    else {}
+                ),
             }
             for asset in assets
         ],
     }
     encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def current_storyboard_analysis_context_matches(
+    conn: sqlite3.Connection,
+    project_id: str,
+    episode_id: str,
+    expected_project_signature: str,
+    expected_video_signature: str,
+) -> bool:
+    current_project = get_project_or_404(conn, project_id)
+    current_episode = get_episode_or_first(conn, project_id, episode_id)
+    rows = conn.execute(
+        "SELECT asset_type, name, localized_name, variable, payload_json FROM assets WHERE project_id=? AND episode_id=? ORDER BY created_at",
+        (project_id, episode_id),
+    ).fetchall()
+    assets = rows_to_dicts(rows)
+    for asset in assets:
+        asset["payload"] = json.loads(asset.pop("payload_json") or "{}")
+        attach_display_variable(asset)
+        asset["localized_name"] = current_target_asset_name(asset, current_project)
+    return (
+        episode_video_signature(current_episode) == expected_video_signature
+        and storyboard_analysis_context_signature(current_project, assets) == expected_project_signature
+    )
 
 
 def storyboard_time_fit_errors(storyboards: list[dict[str, Any]], episode: dict[str, Any]) -> list[str]:
@@ -8001,6 +8143,8 @@ def run_asset_extraction(
         "资产详情补全": {"补全批次": 0, "补全资产数": 0, "补全调用数": 0, "阶段": localization_result.get("stage", "not_run")},
         "资产身份匹配统计": reconciliation,
         "资产本地化缓存键": localization_result.get("cache_key", ""),
+        "resolvedTargetEra": localization_result.get("resolvedTargetEra", ""),
+        "targetSetting": localization_result.get("targetSetting", ""),
         "localizedProfileSnapshot": localization_result.get("profiles", []),
         "资产本地化原始尝试": localization_result.get("rawAttempts", []),
         "sourceReviewAssetVariables": [
@@ -8100,6 +8244,14 @@ def run_storyboard_generation(
     for asset in assets:
         asset["payload"] = json.loads(asset.pop("payload_json"))
         attach_display_variable(asset)
+        asset["localized_name"] = current_target_asset_name(asset, project)
+    stale_target_assets = stale_target_profile_asset_variables(assets, project) if overseas_mode else []
+    if stale_target_assets:
+        raise HTTPException(
+            status_code=409,
+            detail=("目标国家/语言、时代或源素材已变化，以下目标资产画像仍属于旧上下文：" + ", ".join(stale_target_assets)
+                    + "。请先重新运行资产拆解与目标本地化，再生成分镜。"),
+        )
     old_to_display, _ = variable_maps(assets)
     asset_occurrence_index: list[dict[str, Any]] = []
     latest_asset_task = row_to_dict(
@@ -8122,6 +8274,12 @@ def run_storyboard_generation(
             asset_occurrence_index = []
     if not asset_occurrence_index:
         asset_occurrence_index = normalize_asset_occurrence_index([], assets)
+    assets_by_variable = {str(asset.get("variable") or ""): asset for asset in assets}
+    for segment in asset_occurrence_index:
+        for appearance in segment.get("出现资产", []) if isinstance(segment.get("出现资产"), list) else []:
+            current_asset = assets_by_variable.get(str(appearance.get("资产变量") or ""))
+            if current_asset:
+                appearance["本地化资产名称"] = current_asset.get("localized_name") or current_asset.get("name", "")
     video_signature = episode_video_signature(episode)
     analysis_context_signature = storyboard_analysis_context_signature(project, assets)
     asset_summary = [
@@ -8131,6 +8289,21 @@ def run_storyboard_generation(
             "本地化资产名称": asset["localized_name"] if overseas_mode else asset["name"],
             "原变量": asset["variable"],
             "资产变量": asset["display_variable"],
+            "当前有效目标画像": (
+                {
+                    "coreDescription": asset["payload"].get("localizedProfile", {}).get("coreDescription", ""),
+                    "visualDescription": asset["payload"].get("localizedProfile", {}).get("visualDescription", ""),
+                    "localizedChildName": asset["payload"].get("localizedProfile", {}).get("localizedChildName", ""),
+                    "childId": asset["payload"].get("localizedProfile", {}).get("childId", ""),
+                    "structuredDescription": asset["payload"].get("localizedProfile", {}).get("structuredDescription", {}),
+                    "目标文化背景": localized_profile_shared_background(asset["payload"].get("localizedProfile", {}), target_country)[1],
+                    "目标时代": localized_profile_shared_background(asset["payload"].get("localizedProfile", {}), target_country)[0],
+                }
+                if isinstance(asset["payload"].get("localizedProfile"), dict)
+                and localized_profile_context_matches(asset["payload"], project)
+                and asset["payload"]["localizedProfile"].get("status") in {"complete", "source_review"}
+                else {}
+            ),
         }
         for asset in assets
     ]
@@ -8157,6 +8330,8 @@ def run_storyboard_generation(
         "参考素材分工": "当前集视频用于观察真实切镜、画面、动作、站位和可听声音；资产摘要/资产出现片段索引用于资产外观与时间归属；独立白模素材仅在明确提供时约束机位、构图、站位、路径和动作。",
         "资产片段索引用途": "该索引是资产出现时间和剧情功能的粗粒度上下文，不代表真实切镜、镜头数量或镜头边界；必须直接观察当前集视频，先按真实切镜点确定镜头，再把相邻且属于同一叙事单元的镜头合并为时长 10 秒左右的分镜，不得按索引段数机械生成镜头，也不得把每个切镜各自升级为一个分镜。",
         "目标国家": target_country if country_requires_localization else "不适用（国内模式）",
+        "目标文化背景": next((item["当前有效目标画像"].get("目标文化背景", "") for item in asset_summary if item.get("当前有效目标画像")), ""),
+        "目标时代": next((item["当前有效目标画像"].get("目标时代", "") for item in asset_summary if item.get("当前有效目标画像")), ""),
         "目标语言": storyboard_target_language if language_requires_localization or country_requires_localization and not keep_source_language else "保留原片语言，不翻译",
         "重制模式": project.get("remake_mode", "overseas_localization"),
         "源语言": project.get("source_language", ""),
@@ -8196,6 +8371,10 @@ def run_storyboard_generation(
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     route_project_agent_prompt(agent, project, storyboard=True)
+    if overseas_mode:
+        agent["prompt"] = str(agent.get("prompt") or "") + (
+            "\n\n【目标文化适配强制规则】目标时代和目标文化背景服从输入中经资产阶段确定的共同背景；如未提供有效背景，按目标国家历史与剧情关系选择，不默认当代。当前有效目标画像是资产外观唯一依据，不得另行设计族裔、服饰、场景或道具外观。保留源镜头数量、顺序、边界、景别、机位、运镜和时长；只在该框架内适配文化动作、礼俗、台词及具有相同剧情功能/价值等级/权力关系/证据识别作用的道具。找不到对应时用时代相符、文化特征较弱的通用表达，保留关系、冲突和因果，不删减。"
+        )
     input_payload["systemPromptChars"] = len(agent.get("prompt", ""))
     raw_model_output = ""
     parsed_model_output: dict[str, Any] = {}
@@ -8318,6 +8497,17 @@ def run_storyboard_generation(
                 time_boundary_repairs.extend(retry_repairs)
                 stream_chars = len(retry_raw)
                 model_error = ""
+    if not current_storyboard_analysis_context_matches(
+        conn, project["id"], episode["id"], analysis_context_signature, video_signature
+    ):
+        stale_result = {
+            "模型模式": agent["mode"], "模型错误": "分镜分析期间项目目标或源素材已变化；旧上下文结果未写入，已有分镜已保留。",
+            "分镜数量": 0, "复用分镜缓存": False, "分镜上下文已过期": True,
+            "模型原始输出": raw_model_output, "模型解析输出": parsed_model_output,
+        }
+        task = finish_or_create_task(conn, project["id"], episode["id"], "storyboard_generation", "失败", stale_result["模型错误"], stale_result, task_id)
+        record_agent_run(conn, task["id"], project["id"], episode["id"], "storyboardPromptGeneration", agent, input_payload, stale_result)
+        return task
     if agent["mode"] == "volcengine" and (model_error or not generated_storyboards):
         if not model_error:
             model_error = "模型已返回内容，但 JSON 修复后仍没有可用分镜结构。"
