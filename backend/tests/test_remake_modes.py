@@ -653,7 +653,7 @@ def test_common_asset_prompt_format_across_modes_and_asset_types():
 
 
 def test_english_target_only_controls_visible_asset_text_and_preserves_english_override():
-    assert "不要执行目标国家本地化" in main.ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT
+    assert "不做本地化" in main.ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT
     assert "不得输出本地化字段" in main.ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT
     assert "原片观察到的族裔" in main.ASSET_LOCALIZATION_COMPACT_PROMPT
     assert "不得默认美国等于白人" in main.ASSET_LOCALIZATION_COMPACT_PROMPT
@@ -2659,7 +2659,7 @@ def test_derive_shares_source_file_paths_without_project_delete_endpoint(client:
 
 def test_storyboard_structured_contract_preserves_root_summary_and_mixed_legacy_shots():
     config_prompt = main.load_agent_config("storyboardPromptGeneration")["prompt"]
-    assert "分镜时长目标为 10 秒左右" in config_prompt
+    assert "时长目标 10 秒左右" in config_prompt
     assert "不得把每个切镜单独作为一个分镜输出" in config_prompt
     assert "机位与构图" in config_prompt and "人物站位" in config_prompt and "台词与声音" in config_prompt
     assert "仅在输入明确提供白模素材时启用" in config_prompt
@@ -3603,7 +3603,7 @@ def test_storyboard_audits_complete_http_incomplete_envelope_and_keeps_placehold
 
 def test_storyboard_mode_prompt_routes_keep_shared_shot_rules_without_defaults_or_duplicate_style():
     base_prompt = main.load_agent_config("storyboardPromptGeneration")["prompt"]
-    assert "新输出将它们留空字符串，不得复述七维内容" in base_prompt
+    assert "留空字符串，不复述" in base_prompt
     for mode in ("overseas_localization", "cg_3d", "asset_replacement"):
         agent = {"prompt": base_prompt}
         project = {

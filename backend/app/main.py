@@ -1047,7 +1047,8 @@ def upload_episode_to_ark(conn: sqlite3.Connection, episode: dict[str, Any]) -> 
         config = load_models_config()
         provider = get_model_provider(config)
         expire_days = int(config.get("volcengine", {}).get("fileExpireDays") or 30)
-        expire_days = max(1, min(30, expire_days))
+        # Ark requires expire_at strictly below now+30d; keep one day of margin.
+        expire_days = max(1, min(29, expire_days))
         expire_at = int(time.time()) + expire_days * 86400
         upload_result = provider.upload_file(
             episode["file_path"], purpose="user_data", video_fps=1, expire_at=expire_at
@@ -7774,6 +7775,35 @@ def normalize_storyboards_from_agent(parsed: dict[str, Any], old_to_display: dic
     return normalized
 
 
+_UNCONFIRMED_SEGMENT_RE = re.compile(r"：\s*待确认[。．]?\s*$")
+
+
+def strip_unconfirmed_prompt_facts(text: str) -> str:
+    """编译最终视频生成提示词时剔除值为"待确认"的子项。
+
+    结构字段里的"待确认"保留为源观察记录；只有喂给视频生成模型的
+    最终文本需要剥离，避免下游把占位标记误读为画面指令。
+    """
+    cleaned: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        if "待确认" not in raw_line:
+            cleaned.append(raw_line)
+            continue
+        if re.fullmatch(r"\s*(?:\[[^\]]*\]\s*)?待确认[。．]?\s*", raw_line):
+            continue
+        kept = [
+            segment
+            for segment in re.split(r"[；;]", raw_line)
+            if not _UNCONFIRMED_SEGMENT_RE.search(segment.strip())
+        ]
+        line = "；".join(kept).strip().rstrip("；;")
+        # 只剩七维标签（如"[背景]"）或空内容时整行删除。
+        if not re.sub(r"^\[[^\]]*\]\s*", "", line).strip(" ：:;；"):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 def insert_storyboards(
     conn: sqlite3.Connection,
     project_id: str,
@@ -7782,6 +7812,10 @@ def insert_storyboards(
 ) -> None:
     timestamp = now_iso()
     for item in storyboards:
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if isinstance(payload.get("源分镜文本"), str) and payload["源分镜文本"]:
+            payload["源分镜文本"] = strip_unconfirmed_prompt_facts(payload["源分镜文本"])
+        prompt = strip_unconfirmed_prompt_facts(item["prompt"])
         conn.execute(
             """
             INSERT INTO storyboards
@@ -7794,9 +7828,9 @@ def insert_storyboards(
                 episode_id,
                 item["title"],
                 item["time_range"],
-                item["prompt"],
-                json.dumps(item["payload"], ensure_ascii=False),
-                "待分析" if (item.get("payload") or {}).get("使用回退占位") else "可生成",
+                prompt,
+                json.dumps(payload, ensure_ascii=False),
+                "待分析" if payload.get("使用回退占位") else "可生成",
                 timestamp,
             ),
         )
