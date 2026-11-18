@@ -906,7 +906,7 @@ ASSET_SOURCE_LEGACY_V1_PROMPT = (CONFIG_DIR / "agents" / "asset_source_extractio
 ASSET_LOCALIZATION_COMPACT_PROMPT = (CONFIG_DIR / "agents" / "asset_target_localization.md").read_text(encoding="utf-8")
 ASSET_EXTRACTION_COMPACT_PROMPT = ASSET_SOURCE_EXTRACTION_COMPACT_PROMPT
 ASSET_DETAIL_COMPLETION_PROMPT = """你只补全输入资产的“缺失字段”。只输出 JSON：{"资产补全":[{"资产变量":"原变量","payload_patch":{},"current_child_patch":{},"needsReview":[]}]}
-国内与海外项目使用完全相同的资产字段。JSON结构、分析内容、源事实、目标视觉描述及资产图提示词均使用简体中文；仅服装字样、店招、铭牌等资产表面可见文字遵循目标语言。只依据源事实和目标国家/语言生成目标视觉描述；源事实与目标描述分别保存。用户目标外观描述是可选视觉覆盖，不得写入本地化视觉描述或固定风格约束字段。
+国内与海外项目使用完全相同的资产字段。JSON结构、分析内容、源事实、目标视觉描述及资产图提示词均使用简体中文；仅服装字样、店招、铭牌等资产表面可见文字遵循目标国家文化文字，与成片台词语言可以不同。只依据源事实和目标国家/语言生成目标视觉描述；源事实与目标描述分别保存。用户目标外观描述是可选视觉覆盖，不得写入本地化视觉描述或固定风格约束字段。
 只返回输入批次中的资产，变量原样复制。仅写入缺失字段清单列出的键；不得改写已存在值、资产名称、变量或编号。用户目标视觉补充只可填充目标设计字段，不能当成视频/剧情来源事实。原片未明确的观察事实仍写 unknown 并在 needsReview 说明；该规则只约束原剧事实字段，不妨碍你依据明确目标国家、目标时代、角色剧情身份和输入中的目标外观要求，为“本地化视觉形象描述/角色资产图结构化描述/角色资产图生成提示词”补全具体自洽的目标设计。原视频观察到的族裔、肤色、脸部、眼睛、发型属于原剧事实，不自动等同用户指定的目标族裔；用户明确的目标族裔/外貌优先，未指定时按目标国家与时代、角色关系和场景选定具体目标外貌。不得机械执行国籍等于族裔，不得给所有欧美角色统一指定白人、蓝眼或高鼻，也不得把源场景地域元素无解释地留在冲突的目标场景中。目标角色脸部骨相、眼形/虹膜、肤色、发色、发型必须与所选目标族裔和角色连续性一致。不得补入原文不存在的情节/资产。
 角色字段：本地化视觉形象描述、角色资产图结构化描述、角色资产图生成提示词。结构化描述沿用现有分区，并覆盖v3十五类：基础设定（性别及判断依据、视觉年龄、国家/时代/朝代、身份、性格、气质），身材体态（头身比、身高体感、体型、肩颈、腰腿、肌肉线条、姿态），脸部（脸型、骨相、眉眼虹膜、鼻唇、面部毛发、妆感、肤色/皮肤质感/气色/表情/眼神），发型（名称、颜色、长度、刘海/分线、质感、状态），服装（等级、场合、颜色、内中外层、领型、袖型、腰线、衣长、下装、摆型、拖尾程度、摆与地面关系、鞋、鞋面/脚踝可见性、面料、纹样及位置、结构廓形、工艺、穿着状态）。每个服装子资产只有一套完整主视觉；变化子资产分别描述，不能混穿。根据视频/剧情明确证据判别性别；姓名和外貌不作为性别证据，证据不足使用中性路径。根据时代、身份、服装等级和场合选择衣装；拖尾等级只可为有证据支持的普通垂摆、轻度拖地或高位典礼遮鞋，不按身份名一刀切，不编造长度数字。角色提示词必须写结构化字段的具体目标视觉结果，过滤手持物、武器、腰间悬挂物，仅保留已有记录中的固定穿戴配饰；不写“根据原片/保持原貌”等让图片模型另找上下文的说法。
 视觉事实来源、固定穿戴配饰、手持或悬挂物档案为已有视频抽取阶段记录；详情补全只修补目标视觉结构，不得新造视频观察、剧情来源事实或配饰记录。unknown及needsReview只留在结构化记录，不作为可用生图描述。仅对已有可见/剧情证据或经确认的用户目标视觉补充生成具体目标值，不能根据名字猜性别或为高位角色自动编造服装细节。
@@ -1609,7 +1609,11 @@ def route_project_agent_prompt(agent: dict[str, Any], project: dict[str, Any], s
     target_country = str(project.get("target_country") or "").strip()
     target_language = str(project.get("target_language") or "").strip()
     country_requires_localization = target_country not in {"", "中国", "中国大陆"}
-    language_requires_localization = target_language not in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译", "中文"}
+    source_language = str(project.get("source_language") or "").strip()
+    language_requires_localization = (
+        target_language not in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
+        and target_language != source_language
+    )
     if country_requires_localization or language_requires_localization:
         return
     source_language = project.get("source_language") or "原片语言（具体语言未知时也保持原片语言，不翻译）"
@@ -8260,9 +8264,11 @@ def run_storyboard_generation(
     keep_source_language = storyboard_target_language in {"", "沿用原片语言", "原片语言", "保留原片语言，不翻译"}
     target_country = str(project.get("target_country") or "").strip()
     country_requires_localization = target_country not in {"", "中国", "中国大陆"}
-    language_requires_localization = not keep_source_language and storyboard_target_language != "中文"
-    # Market/language selection is independent of visual remake mode.
-    overseas_mode = country_requires_localization or language_requires_localization
+    # 语言只负责台词转换：仅当目标语言与源语言不同才翻译（不再把中文硬编码为免翻译）。
+    source_language = str(project.get("source_language") or "").strip()
+    language_requires_localization = not keep_source_language and storyboard_target_language != source_language
+    # 文化/资产本地化只跟目标国家走；目标语言不触发族裔或文化替换。
+    overseas_mode = country_requires_localization
     asset_count = conn.execute(
         "SELECT COUNT(*) FROM assets WHERE project_id = ? AND episode_id = ?",
         (project["id"], episode["id"]),
@@ -8371,9 +8377,17 @@ def run_storyboard_generation(
         "源语言": project.get("source_language", ""),
         "分镜画面类型": project.get("storyboard_visual_style", "live_action"),
         "模式路由强约束": (
-            f"按明确目标国家（{target_country or '未指定'}）和目标语言（{storyboard_target_language if not keep_source_language else '沿用源语言'}）适配分镜；cg_3d/真人/资产替换只决定视觉或资产策略，不改变目标国家/语言路由。保留原始镜头观察作为证据，目标画面文字按选定语言和当前目标角色名替换；不得机械删除汉字或改写未要求翻译的对白含义。"
-            if overseas_mode else
-            "国内模式保留原片语言与源事实，不猜测语言或目标国家；画面类型只决定视觉呈现。"
+            (
+                f"目标国家（{target_country or '未指定'}）负责族裔、文化背景、服装礼俗与画面可见文字（招牌/屏幕/姓名条）的适配；"
+                if overseas_mode else
+                "国内模式保留源人物、场景、道具与源文化事实，不做跨文化替换；"
+            )
+            + (
+                f"目标语言（{storyboard_target_language}）只负责台词与旁白的转换，不影响族裔、文化与画面可见文字"
+                if language_requires_localization else
+                "台词保留原片语言，不翻译"
+            )
+            + "；cg_3d/真人/资产替换只决定视觉或资产策略，不改变该路由。保留原始镜头观察作为证据，不得机械删除汉字或改写未要求翻译的对白含义。"
         ),
         "资产摘要": asset_summary,
         "资产出现片段索引": asset_occurrence_index,
@@ -8407,7 +8421,7 @@ def run_storyboard_generation(
     route_project_agent_prompt(agent, project, storyboard=True)
     if overseas_mode:
         agent["prompt"] = str(agent.get("prompt") or "") + (
-            "\n\n【目标文化适配强制规则】目标时代和目标文化背景服从输入中经资产阶段确定的共同背景；如未提供有效背景，按目标国家历史与剧情关系选择，不默认当代。当前有效目标画像是资产外观唯一依据，不得另行设计族裔、服饰、场景或道具外观。保留源镜头数量、顺序、边界、景别、机位、运镜和时长；只在该框架内适配文化动作、礼俗、台词及具有相同剧情功能/价值等级/权力关系/证据识别作用的道具。找不到对应时用时代相符、文化特征较弱的通用表达，保留关系、冲突和因果，不删减。"
+            "\n\n【目标文化适配强制规则】目标时代和目标文化背景服从输入中经资产阶段确定的共同背景；如未提供有效背景，按目标国家历史与剧情关系选择，不默认当代。当前有效目标画像是资产外观唯一依据，不得另行设计族裔、服饰、场景或道具外观。保留源镜头数量、顺序、边界、景别、机位、运镜和时长；只在该框架内适配文化动作、礼俗、台词及具有相同剧情功能/价值等级/权力关系/证据识别作用的道具。找不到对应时用时代相符、文化特征较弱的通用表达，保留关系、冲突和因果，不删减。目标语言只负责台词与旁白转换；招牌、屏幕字等画面可见文字按目标国家文化适配，与台词语言可以不同。"
         )
     input_payload["systemPromptChars"] = len(agent.get("prompt", ""))
     raw_model_output = ""

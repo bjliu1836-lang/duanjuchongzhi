@@ -659,7 +659,7 @@ def test_english_target_only_controls_visible_asset_text_and_preserves_english_o
     assert "不得默认美国等于白人" in main.ASSET_LOCALIZATION_COMPACT_PROMPT
     assert "内部核心描述、视觉描述和目标图像描述统一使用简体中文" in main.ASSET_LOCALIZATION_COMPACT_PROMPT
     assert "目标视觉描述及资产图提示词均使用简体中文" in main.ASSET_DETAIL_COMPLETION_PROMPT
-    assert "仅服装字样、店招、铭牌等资产表面可见文字遵循目标语言" in main.ASSET_DETAIL_COMPLETION_PROMPT
+    assert "仅服装字样、店招、铭牌等资产表面可见文字遵循目标国家文化文字" in main.ASSET_DETAIL_COMPLETION_PROMPT
 
     project = {
         "remake_mode": "overseas_localization", "source_language": "中文",
@@ -3902,7 +3902,8 @@ def test_cg3d_project_with_target_language_sends_overseas_storyboard_context(cli
     payload = captured[0]["payload"]
     assert payload["目标国家"] == "美国"
     assert payload["目标语言"] == "英语"
-    assert "按明确目标国家（美国）和目标语言（英语）适配分镜" in payload["模式路由强约束"]
+    assert "目标国家（美国）负责族裔、文化背景、服装礼俗与画面可见文字" in payload["模式路由强约束"]
+    assert "目标语言（英语）只负责台词与旁白的转换" in payload["模式路由强约束"]
     summary_names = [item["本地化资产名称"] for item in payload["资产摘要"]]
     assert "Lin Hao" in summary_names
     assert payload["资产摘要"][0]["当前有效目标画像"]["coreDescription"] == "目标角色"
@@ -4141,3 +4142,31 @@ def test_alias_occurs_standalone_skips_prefix_of_qualified_variable():
     # 独立使用的旧别名仍然命中（不误伤真实待核对项）。
     assert main._alias_occurs_standalone("他看向 @23号球员，随后传球。", "@23号球员") is True
     assert main._alias_occurs_standalone("结尾是 @23号球员", "@23号球员") is True
+
+
+def test_language_translation_only_does_not_trigger_culture_localization():
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "中文", "source_language": "中文"}, storyboard=True)
+    assert "项目模式强约束" in agent["prompt"]
+
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "中文", "source_language": "英语"}, storyboard=True)
+    assert "项目模式强约束" not in agent["prompt"]
+
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "英语", "source_language": "中文"}, storyboard=True)
+    assert "项目模式强约束" not in agent["prompt"]
+
+
+def test_language_translation_only_does_not_trigger_culture_localization():
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "中文", "source_language": "中文"}, storyboard=True)
+    assert "项目模式强约束" in agent["prompt"]
+
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "中文", "source_language": "英语"}, storyboard=True)
+    assert "项目模式强约束" not in agent["prompt"]
+
+    agent = {"prompt": "base"}
+    main.route_project_agent_prompt(agent, {"target_country": "中国", "target_language": "英语", "source_language": "中文"}, storyboard=True)
+    assert "项目模式强约束" not in agent["prompt"]
